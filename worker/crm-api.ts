@@ -401,7 +401,7 @@ async function requestLoginOtp(request: Request, env: RuntimeEnv): Promise<Respo
     const challenge = await createChallenge(env, email, "login", null, null);
     challengeId = challenge.id;
     try {
-      if (challenge.code) await sendOtp(env, email, challenge.code, "Accesso a VLC OS", "Usa questo codice per accedere al CRM");
+      if (challenge.code) await sendOtp(env, email, challenge.code, "Accesso a CRMVLC", "Usa questo codice per accedere al CRM");
     } catch (error) {
       await env.DB.prepare("DELETE FROM auth_challenges WHERE id = ?").bind(challenge.id).run();
       throw error;
@@ -989,7 +989,7 @@ async function requestContractSignature(request: Request, contractId: string, us
 
   const challenge = await createChallenge(env, signerEmail, "contract_sign", contract.id, user.id);
   try {
-    if (challenge.code) await sendOtp(env, signerEmail, challenge.code, "Firma del contratto VLC OS", `Codice di conferma per il contratto “${contract.title}”`);
+    if (challenge.code) await sendOtp(env, signerEmail, challenge.code, "Firma del contratto CRMVLC", `Codice di conferma per il contratto “${contract.title}”`);
     await env.DB.prepare("UPDATE contracts SET status = 'awaiting_signature', signer_name = ?, signer_email = ?, updated_at = ? WHERE id = ?")
       .bind(signerName, signerEmail, new Date().toISOString(), contract.id).run();
   } catch (error) {
@@ -1041,7 +1041,7 @@ async function completeContractSignature(request: Request, contractId: string, u
   const evidence = { ...evidenceBase, signedDocumentSha256 };
   const outboxId = crypto.randomUUID();
   const receiptSubject = "Copia del contratto firmato";
-  const receiptBody = `La firma del contratto “${contract.title}” è stata registrata il ${signedAt}. In allegato trovi la copia firmata con il certificato di firma VLC OS.`;
+  const receiptBody = `La firma del contratto “${contract.title}” è stata registrata il ${signedAt}. In allegato trovi la copia firmata con il certificato di firma CRMVLC.`;
 
   await Promise.all([
     env.BUCKET.put(signatureKey, signature, { httpMetadata: { contentType: "image/png" }, customMetadata: { sha256: signatureSha256 } }),
@@ -1107,7 +1107,7 @@ async function ensureBootstrapAdmin(env: RuntimeEnv): Promise<void> {
   if (existing) return;
   const now = new Date().toISOString();
   await env.DB.prepare("INSERT OR IGNORE INTO users (id, email, name, role, island, active, created_at, updated_at) VALUES (?, ?, ?, 'super_admin', NULL, 1, ?, ?)")
-    .bind(crypto.randomUUID(), email, cleanText(env.ADMIN_NAME, 120) || "VLC OS Super Admin", now, now).run();
+    .bind(crypto.randomUUID(), email, cleanText(env.ADMIN_NAME, 120) || "CRMVLC Super Admin", now, now).run();
 }
 
 async function ensureDemoAccount(env: RuntimeEnv): Promise<UserRow> {
@@ -1187,11 +1187,11 @@ async function appendAudit(env: RuntimeEnv, request: Request, actorUserId: strin
 async function sendOtp(env: RuntimeEnv, to: string, code: string, subject: string, intro: string): Promise<void> {
   if (!env.EMAIL_FROM) throw new ApiError(503, "email_not_configured", "Il mittente email non è configurato.");
   await env.EMAIL.send({
-    from: { name: "VLC OS", email: env.EMAIL_FROM },
+    from: { name: "CRMVLC", email: env.EMAIL_FROM },
     to,
     subject,
     text: `${intro}. Codice: ${code}. Scade tra ${OTP_TTL_MINUTES} minuti. Se non hai richiesto questa operazione, ignora il messaggio.`,
-    html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto"><h2>VLC OS</h2><p>${escapeHtml(intro)}.</p><p style="font-size:32px;font-weight:700;letter-spacing:8px">${code}</p><p>Il codice scade tra ${OTP_TTL_MINUTES} minuti.</p><p style="color:#667085">Se non hai richiesto questa operazione, ignora il messaggio.</p></div>`,
+    html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto"><h2>CRMVLC</h2><p>${escapeHtml(intro)}.</p><p style="font-size:32px;font-weight:700;letter-spacing:8px">${code}</p><p>Il codice scade tra ${OTP_TTL_MINUTES} minuti.</p><p style="color:#667085">Se non hai richiesto questa operazione, ignora il messaggio.</p></div>`,
   });
 }
 
@@ -1223,7 +1223,7 @@ async function deliverOutboxMessage(env: RuntimeEnv, messageId: string): Promise
       });
     }
     await env.EMAIL.send({
-      from: { name: "VLC OS", email: env.EMAIL_FROM },
+      from: { name: "CRMVLC", email: env.EMAIL_FROM },
       to: message.recipient,
       subject: message.subject,
       text: message.body_text,
@@ -1313,7 +1313,7 @@ async function buildSignedPdf(original: ArrayBuffer, signature: Uint8Array, evid
   const page = pdf.addPage([595.28, 841.89]);
   const dark = rgb(0.06, 0.16, 0.26);
   const muted = rgb(0.36, 0.43, 0.49);
-  page.drawText("VLC OS", { x: 48, y: 785, size: 11, font: bold, color: rgb(0.9, 0.3, 0.23) });
+  page.drawText("CRMVLC", { x: 48, y: 785, size: 11, font: bold, color: rgb(0.9, 0.3, 0.23) });
   page.drawText("CERTIFICATO DI FIRMA", { x: 48, y: 748, size: 22, font: bold, color: dark });
   page.drawText("Allegato integrante del documento contrattuale", { x: 48, y: 726, size: 10, font, color: muted });
   page.drawLine({ start: { x: 48, y: 704 }, end: { x: 547, y: 704 }, thickness: 1, color: rgb(0.85, 0.88, 0.9) });
@@ -1338,10 +1338,10 @@ async function buildSignedPdf(original: ArrayBuffer, signature: Uint8Array, evid
   page.drawText(`Documento originale: ${evidence.documentSha256}`, { x: 48, y: 304, size: 7.5, font, color: dark, maxWidth: 499 });
   page.drawText(`Firma: ${evidence.signatureSha256}`, { x: 48, y: 286, size: 7.5, font, color: dark, maxWidth: 499 });
   page.drawText("Il documento originale, la firma e il registro di audit sono conservati separatamente e non modificabili tramite l'applicazione.", { x: 48, y: 240, size: 8.5, font, color: muted, maxWidth: 499, lineHeight: 13 });
-  page.drawText(`Generato da VLC OS · ${evidence.contractId}`, { x: 48, y: 48, size: 7.5, font, color: muted });
-  pdf.setTitle(`VLC OS - contratto ${evidence.contractId}`);
+  page.drawText(`Generato da CRMVLC · ${evidence.contractId}`, { x: 48, y: 48, size: 7.5, font, color: muted });
+  pdf.setTitle(`CRMVLC - contratto ${evidence.contractId}`);
   pdf.setSubject("Contratto con certificato di firma OTP e conferma agente");
-  pdf.setProducer("VLC OS");
+  pdf.setProducer("CRMVLC");
   return pdf.save({ useObjectStreams: true });
 }
 

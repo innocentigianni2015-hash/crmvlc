@@ -9,7 +9,7 @@ interface __BaseEnv_Env {
 	ASSETS: Fetcher;
 	ENVIRONMENT: "production";
 	ADMIN_EMAIL: "";
-	ADMIN_NAME: "VLC OS Super Admin";
+	ADMIN_NAME: "CRMVLC Super Admin";
 	EMAIL_FROM: "";
 	SESSION_HOURS: "12";
 }

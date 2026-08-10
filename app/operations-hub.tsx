@@ -94,10 +94,10 @@ export function OperationsHub({ user, clients, users, deliveries, notify }: {
 
   return <section className="ops-page operations-hub">
     <div className="hub-heading">
-      <div><small>VLC OS · infrastruttura completa</small><h1>Regia operativa</h1><p>Sei moduli con dati reali, audit e separazione per isola.</p></div>
+      <div><small>CRMVLC · infrastruttura completa</small><h1>Regia operativa</h1><p>Sei moduli con dati reali, audit e separazione per isola.</p></div>
       <div className="hub-live"><span /> Dati sincronizzati</div>
     </div>
-    <div className="hub-tabs" role="tablist" aria-label="Moduli VLC OS">
+    <div className="hub-tabs" role="tablist" aria-label="Moduli CRMVLC">
       {TABS.filter(([key]) => user.role !== "distributor" || ["overview", "distribution"].includes(key)).map(([key, label]) => <button key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>{label}</button>)}
     </div>
 

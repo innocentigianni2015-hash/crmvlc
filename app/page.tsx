@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect, useRef, useState } from "react";
+import QRCode from "qrcode";
 import { OperationsHub } from "./operations-hub";
 
 type Role = "super_admin" | "sales_manager" | "sales" | "distributor";
@@ -229,63 +230,122 @@ export default function Home() {
 }
 
 function Login({ onAuthenticated }: { onAuthenticated: () => Promise<void> }) {
+  type NextStep = { authenticated?: boolean; next?: "change_password" | "totp_setup" | "totp"; token?: string };
+  const [mode, setMode] = useState<"login" | "change" | "totp_setup" | "totp" | "forgot" | "reset">("login");
   const [email, setEmail] = useState("");
-  const [demoEmail, setDemoEmail] = useState("");
-  const [demoPassword, setDemoPassword] = useState("");
-  const [demoEnabled, setDemoEnabled] = useState(false);
-  const [otpEnabled, setOtpEnabled] = useState(true);
-  const [loginMode, setLoginMode] = useState<"demo" | "otp">("otp");
-  const [challengeId, setChallengeId] = useState("");
+  const [password, setPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [token, setToken] = useState("");
   const [code, setCode] = useState("");
+  const [totpSecret, setTotpSecret] = useState("");
+  const [qrCode, setQrCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
-    let active = true;
-    void api<{ demoEnabled: boolean; demoEmail: string | null; otpEnabled: boolean }>("/api/auth/config")
-      .then((config) => {
-        if (!active) return;
-        setDemoEnabled(config.demoEnabled);
-        setOtpEnabled(config.otpEnabled);
-        if (config.demoEnabled) {
-          setLoginMode("demo");
-          setDemoEmail(config.demoEmail ?? "");
-        }
-      })
-      .catch(() => undefined);
-    return () => { active = false; };
+    const reset = new URLSearchParams(window.location.search).get("reset");
+    if (!reset) return;
+    const timer = window.setTimeout(() => {
+      setToken(reset);
+      setMode("reset");
+      window.history.replaceState({}, "", window.location.pathname);
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
-  async function loginWithPassword(event: FormEvent) {
+  async function advance(result: NextStep) {
+    if (result.authenticated) {
+      await onAuthenticated();
+      return;
+    }
+    if (!result.next || !result.token) throw new Error("Risposta di autenticazione non valida.");
+    setToken(result.token);
+    if (result.next === "change_password") {
+      setMode("change");
+      return;
+    }
+    if (result.next === "totp") {
+      setMode("totp");
+      return;
+    }
+    const setup = await api<{ secret: string; uri: string }>("/api/auth/totp/setup", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token: result.token }),
+    });
+    setTotpSecret(setup.secret);
+    setQrCode(await QRCode.toDataURL(setup.uri, { width: 240, margin: 1, errorCorrectionLevel: "M" }));
+    setMode("totp_setup");
+  }
+
+  async function login(event: FormEvent) {
     event.preventDefault(); setBusy(true); setError("");
     try {
-      await api("/api/auth/demo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: demoEmail, password: demoPassword }) });
-      await onAuthenticated();
+      const result = await api<NextStep>("/api/auth/password/login", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email, password }),
+      });
+      await advance(result);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Accesso non riuscito."); }
     finally { setBusy(false); }
   }
 
-  async function requestCode(event: FormEvent) {
-    event.preventDefault(); setBusy(true); setError("");
+  async function changePassword(event: FormEvent) {
+    event.preventDefault(); setError("");
+    if (newPassword !== confirmPassword) { setError("Le password non coincidono."); return; }
+    setBusy(true);
     try {
-      const result = await api<{ challengeId: string; message: string }>("/api/auth/request", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email }) });
-      setChallengeId(result.challengeId); setMessage(result.message);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Invio non riuscito."); }
+      const result = await api<NextStep>("/api/auth/password/change-required", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token, password: newPassword }),
+      });
+      setPassword(""); setNewPassword(""); setConfirmPassword("");
+      await advance(result);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Cambio password non riuscito."); }
     finally { setBusy(false); }
   }
 
-  async function verifyCode(event: FormEvent) {
+  async function forgotPassword(event: FormEvent) {
     event.preventDefault(); setBusy(true); setError("");
     try {
-      await api("/api/auth/verify", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email, challengeId, code }) });
+      const result = await api<{ message: string }>("/api/auth/password/forgot", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email }),
+      });
+      setMessage(result.message);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Richiesta non riuscita."); }
+    finally { setBusy(false); }
+  }
+
+  async function resetPassword(event: FormEvent) {
+    event.preventDefault(); setError("");
+    if (newPassword !== confirmPassword) { setError("Le password non coincidono."); return; }
+    setBusy(true);
+    try {
+      const result = await api<{ message: string }>("/api/auth/password/reset", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token, password: newPassword }),
+      });
+      setMessage(result.message); setNewPassword(""); setConfirmPassword(""); setMode("login");
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Impostazione non riuscita."); }
+    finally { setBusy(false); }
+  }
+
+  async function confirmTotp(event: FormEvent) {
+    event.preventDefault(); setBusy(true); setError("");
+    try {
+      const path = mode === "totp_setup" ? "/api/auth/totp/confirm" : "/api/auth/totp/verify";
+      await api(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token, code }) });
       await onAuthenticated();
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Verifica non riuscita."); }
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Codice non valido."); }
     finally { setBusy(false); }
   }
 
-  const showDemo = demoEnabled && loginMode === "demo";
-  return <main className="auth-screen"><section className="auth-visual"><div className="auth-brand"><span>C</span><strong>CRMVLC</strong></div><div><small>CRM OPERATIVO · CINQUE ISOLE</small><h1>Relazioni commerciali e contratti, senza zone grigie.</h1><p>Accesso nominativo, dati separati per ruolo e firma verificata con OTP.</p></div><div className="auth-islands">{ISLANDS.map((island) => <span key={island}>{island}</span>)}</div></section><section className="auth-panel"><div className="auth-box"><span className="secure-label">● {showDemo ? "Ambiente dimostrativo" : "Accesso protetto"}</span><h2>{showDemo ? "Prova il CRM" : challengeId ? "Inserisci il codice" : "Entra nel CRM"}</h2><p>{showDemo ? "Accedi come Super Admin usando le credenziali temporanee di prova." : challengeId ? message : "Usa l'indirizzo autorizzato dal Super Admin."}</p>{demoEnabled && otpEnabled && <div className="auth-tabs"><button className={showDemo ? "active" : ""} type="button" onClick={() => { setLoginMode("demo"); setError(""); }}>Demo</button><button className={!showDemo ? "active" : ""} type="button" onClick={() => { setLoginMode("otp"); setError(""); }}>OTP</button></div>}{showDemo ? <form onSubmit={loginWithPassword}><label>Email demo<input type="email" required autoComplete="username" value={demoEmail} onChange={(event) => setDemoEmail(event.target.value)} /></label><label>Password demo<input type="password" required minLength={12} maxLength={256} autoComplete="current-password" value={demoPassword} onChange={(event) => setDemoPassword(event.target.value)} /></label><button className="primary wide" disabled={busy}>{busy ? "Accesso…" : "Entra nella demo"}</button></form> : !challengeId ? <form onSubmit={requestCode}><label>Email aziendale<input type="email" required autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="nome@dominio.com" /></label><button className="primary wide" disabled={busy}>{busy ? "Invio…" : "Ricevi codice OTP"}</button></form> : <form onSubmit={verifyCode}><label>Codice a 6 cifre<input className="otp-input" inputMode="numeric" autoComplete="one-time-code" maxLength={6} required value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, ""))} placeholder="000000" /></label><button className="primary wide" disabled={busy || code.length !== 6}>{busy ? "Verifica…" : "Accedi"}</button><button type="button" className="link-button" onClick={() => { setChallengeId(""); setCode(""); }}>Usa un altro indirizzo</button></form>}{error && <div className="form-error">{error}</div>}<small className="privacy-note">{showDemo ? "Account isolato con dati sintetici. Non inserire dati personali o contratti reali." : "Nessuna password viene memorizzata. Il codice scade dopo 10 minuti."}</small></div></section></main>;
+  const passwordFields = <><label>Nuova password<input type="password" required minLength={12} maxLength={256} autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} /></label><label>Conferma password<input type="password" required minLength={12} maxLength={256} autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} /></label></>;
+
+  return <main className="auth-screen"><section className="auth-visual"><div className="auth-brand"><span>C</span><strong>CRMVLC</strong></div><div><small>CRM OPERATIVO · CINQUE ISOLE</small><h1>Relazioni commerciali e contratti, senza zone grigie.</h1><p>Accesso nominativo con password; OTP riservato alla firma verificata dei contratti.</p></div><div className="auth-islands">{ISLANDS.map((island) => <span key={island}>{island}</span>)}</div></section><section className="auth-panel"><div className="auth-box"><span className="secure-label">● Accesso protetto</span><h2>{mode === "login" ? "Entra nel CRM" : mode === "forgot" ? "Recupera password" : mode === "reset" ? "Imposta password" : mode === "change" ? "Cambia la password temporanea" : mode === "totp_setup" ? "Configura l’autenticatore" : "Codice autenticatore"}</h2><p>{mode === "totp_setup" ? "Scansiona il QR con Google Authenticator, Microsoft Authenticator o un’app compatibile." : mode === "totp" ? "Inserisci il codice a 6 cifre generato dall’app autenticatore." : "Le credenziali sono personali e non devono essere condivise."}</p>
+    {mode === "login" && <form onSubmit={login}><label>Email aziendale<input type="email" required autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} /></label><label>Password<input type="password" required maxLength={256} autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label><button className="primary wide" disabled={busy}>{busy ? "Accesso…" : "Accedi"}</button><button type="button" className="link-button" onClick={() => { setMode("forgot"); setError(""); setMessage(""); }}>Imposta o recupera password</button></form>}
+    {mode === "forgot" && <form onSubmit={forgotPassword}><label>Email aziendale<input type="email" required autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label><button className="primary wide" disabled={busy}>{busy ? "Invio…" : "Invia collegamento"}</button><button type="button" className="link-button" onClick={() => setMode("login")}>Torna all’accesso</button></form>}
+    {mode === "reset" && <form onSubmit={resetPassword}>{passwordFields}<button className="primary wide" disabled={busy}>{busy ? "Salvataggio…" : "Imposta password"}</button></form>}
+    {mode === "change" && <form onSubmit={changePassword}>{passwordFields}<button className="primary wide" disabled={busy}>{busy ? "Salvataggio…" : "Cambia e continua"}</button></form>}
+    {(mode === "totp" || mode === "totp_setup") && <form onSubmit={confirmTotp}>{mode === "totp_setup" && <div style={{ textAlign: "center" }}>{qrCode && <img src={qrCode} width={240} height={240} alt="QR autenticatore CRMVLC" />}<small style={{ display: "block", overflowWrap: "anywhere" }}>Chiave manuale: {totpSecret}</small></div>}<label>Codice a 6 cifre<input className="otp-input" inputMode="numeric" autoComplete="one-time-code" maxLength={6} required value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, ""))} placeholder="000000" /></label><button className="primary wide" disabled={busy || code.length !== 6}>{busy ? "Verifica…" : mode === "totp_setup" ? "Conferma e accedi" : "Accedi"}</button></form>}
+    {message && <div className="form-success">{message}</div>}{error && <div className="form-error">{error}</div>}<small className="privacy-note">Password cifrate con derivazione PBKDF2. Il Super Admin usa anche l’autenticatore TOTP.</small></div></section></main>;
 }
 
 function PageHeading({ eyebrow, title, subtitle, action }: { eyebrow: string; title: string; subtitle: string; action: React.ReactNode }) {
@@ -517,10 +577,10 @@ function DeliveryModal({ data, delivery, onClose, onSaved }: { data: Bootstrap; 
 
 function AdminPanel({ data, refresh, notify }: { data: Bootstrap; refresh: () => Promise<void>; notify: (text: string, tone?: "ok" | "error") => void }) {
   const [userBusy, setUserBusy] = useState(false); const [templateBusy, setTemplateBusy] = useState(false);
-  async function createUser(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setUserBusy(true); const form = new FormData(event.currentTarget); try { await api("/api/users", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(Object.fromEntries(form.entries())) }); event.currentTarget.reset(); notify("Utente autorizzato. Può accedere tramite OTP."); await refresh(); } catch (cause) { notify(cause instanceof Error ? cause.message : "Creazione non riuscita.", "error"); } finally { setUserBusy(false); } }
+  async function createUser(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setUserBusy(true); const form = new FormData(event.currentTarget); try { await api("/api/users", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(Object.fromEntries(form.entries())) }); event.currentTarget.reset(); notify("Utente creato. Al primo accesso dovrà cambiare la password temporanea."); await refresh(); } catch (cause) { notify(cause instanceof Error ? cause.message : "Creazione non riuscita.", "error"); } finally { setUserBusy(false); } }
   async function toggleUser(target: User) { setUserBusy(true); try { await api(`/api/users/${target.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ active: target.active === 0 }) }); notify(target.active === 0 ? "Utente riattivato." : "Utente disattivato e sessioni revocate."); await refresh(); } catch (cause) { notify(cause instanceof Error ? cause.message : "Aggiornamento non riuscito.", "error"); } finally { setUserBusy(false); } }
   async function uploadTemplate(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setTemplateBusy(true); try { await api("/api/templates", { method: "POST", body: new FormData(event.currentTarget) }); event.currentTarget.reset(); notify("Modello contrattuale archiviato."); await refresh(); } catch (cause) { notify(cause instanceof Error ? cause.message : "Caricamento non riuscito.", "error"); } finally { setTemplateBusy(false); } }
-  return <section className="ops-page"><PageHeading eyebrow="Amministrazione" title="Utenti e modelli" subtitle="Ruoli fissi, isola assegnata e documenti contrattuali versionati." action={<span className="admin-badge">Solo Super Admin</span>} /><div className="admin-grid"><article className="data-card"><div className="card-head"><div><h2>Nuovo utente</h2><p>Sales Manager, Sales o Distributore.</p></div></div><form className="stack-form" onSubmit={createUser}><label>Nome e cognome<input name="name" required /></label><label>Email aziendale<input name="email" type="email" required /></label><div className="two-cols"><label>Ruolo<select name="role"><option value="sales">Sales</option><option value="sales_manager">Sales Manager</option><option value="distributor">Distributore</option></select></label><label>Isola<select name="island">{ISLANDS.map((island) => <option key={island}>{island}</option>)}</select></label></div><button className="primary" disabled={userBusy}>{userBusy ? "Creazione…" : "Autorizza utente"}</button></form></article><article className="data-card"><div className="card-head"><div><h2>Carica modello</h2><p>PDF o DOCX, massimo 8 MB.</p></div></div><form className="stack-form" onSubmit={uploadTemplate}><label>Nome modello<input name="name" required placeholder="Contratto sponsor" /></label><label>Versione<input name="version" required defaultValue="1.0" /></label><label>Documento<input name="file" type="file" accept="application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required /></label><button className="primary" disabled={templateBusy}>{templateBusy ? "Caricamento…" : "Archivia modello"}</button></form></article></div><div className="admin-grid lower"><article className="data-card"><div className="card-head"><div><h2>Utenti autorizzati</h2><p>{data.users.length} account</p></div></div><div className="simple-list">{data.users.map((user) => <div key={user.id}><span className="avatar">{initials(user.name)}</span><div><strong>{user.name}</strong><small>{user.email}</small></div><p>{roleLabels[user.role]}<small>{user.island ?? "Tutte le isole"}</small>{user.role !== "super_admin" && <button className="mini-link" disabled={userBusy} onClick={() => void toggleUser(user)}>{user.active === 0 ? "Riattiva" : "Disattiva"}</button>}</p></div>)}</div></article><article className="data-card"><div className="card-head"><div><h2>Modelli contrattuali</h2><p>{data.templates.length} versioni attive</p></div></div><div className="simple-list">{data.templates.map((template) => <div key={template.id}><span className="file-badge">{template.mime_type.includes("pdf") ? "PDF" : "DOC"}</span><div><strong>{template.name}</strong><small>{template.original_filename}</small></div><p>v{template.version}<button className="mini-link" onClick={() => window.open(`/api/templates/${template.id}/download`, "_blank")}>Scarica</button></p></div>)}{!data.templates.length && <Empty title="Nessun modello" text="Carica i documenti già pronti." />}</div></article></div></section>;
+  return <section className="ops-page"><PageHeading eyebrow="Amministrazione" title="Utenti e modelli" subtitle="Ruoli fissi, isola assegnata e documenti contrattuali versionati." action={<span className="admin-badge">Solo Super Admin</span>} /><div className="admin-grid"><article className="data-card"><div className="card-head"><div><h2>Nuovo utente</h2><p>Sales Manager, Sales o Distributore.</p></div></div><form className="stack-form" onSubmit={createUser}><label>Nome e cognome<input name="name" required /></label><label>Email aziendale<input name="email" type="email" required /></label><label>Password temporanea<input name="temporaryPassword" type="password" required minLength={12} maxLength={256} autoComplete="new-password" /><small>Almeno 12 caratteri. L’utente dovrà cambiarla al primo accesso.</small></label><div className="two-cols"><label>Ruolo<select name="role"><option value="sales">Sales</option><option value="sales_manager">Sales Manager</option><option value="distributor">Distributore</option></select></label><label>Isola<select name="island">{ISLANDS.map((island) => <option key={island}>{island}</option>)}</select></label></div><button className="primary" disabled={userBusy}>{userBusy ? "Creazione…" : "Crea utente"}</button></form></article><article className="data-card"><div className="card-head"><div><h2>Carica modello</h2><p>PDF o DOCX, massimo 8 MB.</p></div></div><form className="stack-form" onSubmit={uploadTemplate}><label>Nome modello<input name="name" required placeholder="Contratto sponsor" /></label><label>Versione<input name="version" required defaultValue="1.0" /></label><label>Documento<input name="file" type="file" accept="application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required /></label><button className="primary" disabled={templateBusy}>{templateBusy ? "Caricamento…" : "Archivia modello"}</button></form></article></div><div className="admin-grid lower"><article className="data-card"><div className="card-head"><div><h2>Utenti autorizzati</h2><p>{data.users.length} account</p></div></div><div className="simple-list">{data.users.map((user) => <div key={user.id}><span className="avatar">{initials(user.name)}</span><div><strong>{user.name}</strong><small>{user.email}</small></div><p>{roleLabels[user.role]}<small>{user.island ?? "Tutte le isole"}</small>{user.role !== "super_admin" && <button className="mini-link" disabled={userBusy} onClick={() => void toggleUser(user)}>{user.active === 0 ? "Riattiva" : "Disattiva"}</button>}</p></div>)}</div></article><article className="data-card"><div className="card-head"><div><h2>Modelli contrattuali</h2><p>{data.templates.length} versioni attive</p></div></div><div className="simple-list">{data.templates.map((template) => <div key={template.id}><span className="file-badge">{template.mime_type.includes("pdf") ? "PDF" : "DOC"}</span><div><strong>{template.name}</strong><small>{template.original_filename}</small></div><p>v{template.version}<button className="mini-link" onClick={() => window.open(`/api/templates/${template.id}/download`, "_blank")}>Scarica</button></p></div>)}{!data.templates.length && <Empty title="Nessun modello" text="Carica i documenti già pronti." />}</div></article></div></section>;
 }
 
 function AuditPanel({ events, emails, refresh, notify }: { events: AuditEvent[]; emails: EmailOutboxItem[]; refresh: () => Promise<void>; notify: (text: string, tone?: "ok" | "error") => void }) {

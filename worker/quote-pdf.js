@@ -92,13 +92,13 @@ export async function buildQuotePdf(quote) {
 
   page.drawLine({ start: { x: MARGIN, y: 55 }, end: { x: PAGE_WIDTH - MARGIN, y: 55 }, thickness: 0.7, color: line });
   page.drawText("Canary 360 & Comunication SL · B56378318 · Avenida Las Americas 8, Local 396E, Arona, Santa Cruz de Tenerife", { x: MARGIN, y: 40, size: 6.5, font, color: muted });
-  page.drawText("+34 822 140 134 · info@vivilecanarie.com · www.vivilecanarie.com", { x: MARGIN, y: 28, size: 6.5, font, color: muted });
+  page.drawText("+34 822 140 134 · info@vivilecanarie.com · crmvlc.com", { x: MARGIN, y: 28, size: 6.5, font, color: muted });
   drawRight(page, font, safeText(quote.quoteNumber), PAGE_WIDTH - MARGIN, 28, 6.5, muted);
 
   pdf.setTitle(`Preventivo ${safeText(quote.quoteNumber)}`);
   pdf.setAuthor("Canary 360 & Comunication SL");
   pdf.setSubject("Preventivo commerciale VLC");
-  pdf.setProducer("VLC OS");
+  pdf.setProducer("CRMVLC");
   return pdf.save({ useObjectStreams: true });
 }
 

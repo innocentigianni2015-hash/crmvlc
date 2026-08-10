@@ -1,0 +1,5 @@
+ADMIN_EMAIL=admin@azienda.example
+ADMIN_NAME=Nome Super Admin
+EMAIL_FROM=contratti@azienda.example
+AUTH_SECRET=generare-una-stringa-casuale-di-almeno-32-byte
+SESSION_HOURS=12

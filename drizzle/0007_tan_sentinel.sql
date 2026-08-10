@@ -1,0 +1,1 @@
+ALTER TABLE `sponsors` ADD `merchant_pin_hash` text NOT NULL;

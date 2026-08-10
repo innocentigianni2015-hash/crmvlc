@@ -1,0 +1,669 @@
+type RuntimeEnv = Env & {
+  AUTH_SECRET?: string;
+  EMAIL_FROM?: string;
+  WHATSAPP_TOKEN?: string;
+  WHATSAPP_PHONE_NUMBER_ID?: string;
+  STRIPE_SECRET_KEY?: string;
+  MAPS_TOKEN?: string;
+};
+
+export type OperationsUser = {
+  id: string;
+  email: string;
+  name: string;
+  role: "super_admin" | "sales_manager" | "sales" | "distributor";
+  island: string | null;
+  active: number;
+};
+
+const ISLANDS = ["Tenerife", "Gran Canaria", "Lanzarote", "Fuerteventura", "La Palma"] as const;
+const MAX_JSON_BYTES = 512_000;
+const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
+
+const ISLAND_CENTERS: Record<string, { latitude: number; longitude: number }> = {
+  Tenerife: { latitude: 28.2916, longitude: -16.6291 },
+  "Gran Canaria": { latitude: 27.9202, longitude: -15.5474 },
+  Lanzarote: { latitude: 29.0469, longitude: -13.5899 },
+  Fuerteventura: { latitude: 28.3587, longitude: -14.0537 },
+  "La Palma": { latitude: 28.7134, longitude: -17.9058 },
+};
+
+class OperationsError extends Error {
+  constructor(readonly status: number, readonly code: string, message: string) {
+    super(message);
+  }
+}
+
+export async function handleOperationsApi(
+  request: Request,
+  env: RuntimeEnv,
+  user: OperationsUser,
+): Promise<Response | null> {
+  const url = new URL(request.url);
+  if (!url.pathname.startsWith("/api/operations")) return null;
+
+  try {
+    if (url.pathname === "/api/operations" && request.method === "GET") {
+      return operationsSnapshot(env, user);
+    }
+    if (url.pathname === "/api/operations/sponsors" && request.method === "POST") {
+      return createSponsor(request, env, user);
+    }
+    if (url.pathname === "/api/operations/vip-members" && request.method === "POST") {
+      return createVipMember(request, env, user);
+    }
+    if (url.pathname === "/api/operations/coupons" && request.method === "POST") {
+      return issueCoupon(request, env, user);
+    }
+    if (url.pathname === "/api/operations/coupons/redeem" && request.method === "POST") {
+      return redeemCoupon(request, env, user);
+    }
+    if (url.pathname === "/api/operations/commission-rules" && request.method === "POST") {
+      return createCommissionRule(request, env, user);
+    }
+    if (url.pathname === "/api/operations/payout-requests" && request.method === "POST") {
+      return createPayoutRequest(request, env, user);
+    }
+    if (url.pathname === "/api/operations/payout-requests/review" && request.method === "POST") {
+      return reviewPayoutRequest(request, env, user);
+    }
+    if (url.pathname === "/api/operations/inventory" && request.method === "POST") {
+      return createInventorySlot(request, env, user);
+    }
+    if (url.pathname === "/api/operations/inventory/status" && request.method === "POST") {
+      return updateInventoryStatus(request, env, user);
+    }
+    if (url.pathname === "/api/operations/distribution-points" && request.method === "POST") {
+      return createDistributionPoint(request, env, user);
+    }
+    if (url.pathname === "/api/operations/distribution-points/stock" && request.method === "POST") {
+      return updateDistributionStock(request, env, user);
+    }
+    if (url.pathname === "/api/operations/photo-audits" && request.method === "POST") {
+      return uploadPhotoAudit(request, env, user);
+    }
+    if (url.pathname === "/api/operations/photo-audits/review" && request.method === "POST") {
+      return reviewPhotoAudit(request, env, user);
+    }
+    if (url.pathname === "/api/operations/sales-checkins" && request.method === "POST") {
+      return createSalesCheckin(request, env, user);
+    }
+    if (url.pathname === "/api/operations/sales-tasks" && request.method === "POST") {
+      return createSalesTask(request, env, user);
+    }
+    if (url.pathname === "/api/operations/sales-tasks/complete" && request.method === "POST") {
+      return completeSalesTask(request, env, user);
+    }
+    throw new OperationsError(404, "not_found", "Risorsa operativa non trovata.");
+  } catch (error) {
+    if (error instanceof OperationsError) return errorResponse(error);
+    const requestId = request.headers.get("cf-ray") ?? crypto.randomUUID();
+    console.error(JSON.stringify({ level: "error", event: "operations_api_failure", requestId, error: error instanceof Error ? error.message : "unknown" }));
+    return errorResponse(new OperationsError(500, "internal_error", `Errore operativo. Riferimento: ${requestId}`));
+  }
+}
+
+async function operationsSnapshot(env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  const sponsorScope = scopeFor(user, "s.island", "s.owner_user_id");
+  const islandScope = scopeFor(user, "x.island", null);
+  const financeScope = user.role === "super_admin"
+    ? { sql: "", values: [] as string[] }
+    : user.role === "sales_manager"
+      ? { sql: " AND u.island = ?", values: [String(user.island)] }
+      : { sql: " AND u.id = ?", values: [user.id] };
+
+  const sponsors = user.role === "distributor"
+    ? (await env.DB.prepare("SELECT s.id, s.name, s.island, s.category, s.status, s.offer_title, s.discount_text, s.address, s.latitude_e6, s.longitude_e6, s.instagram_handle, s.client_id, s.updated_at FROM sponsors s WHERE s.client_id IN (SELECT d.client_id FROM deliveries d WHERE d.distributor_user_id = ?) ORDER BY s.updated_at DESC LIMIT 150").bind(user.id).all()).results
+    : (await env.DB.prepare(`SELECT s.id, s.name, s.island, s.category, s.status, s.offer_title, s.discount_text, s.address, s.latitude_e6, s.longitude_e6, s.instagram_handle, s.client_id, s.updated_at FROM sponsors s WHERE 1 = 1${sponsorScope.sql} ORDER BY s.updated_at DESC LIMIT 150`).bind(...sponsorScope.values).all()).results;
+
+  const vipMembers = user.role === "distributor" ? [] : (await env.DB.prepare(
+    `SELECT x.id, x.name, x.phone, x.island, x.tier, x.streak_months, x.consent_at, x.created_at FROM vip_members x WHERE 1 = 1${islandScope.sql} ORDER BY x.created_at DESC LIMIT 150`,
+  ).bind(...islandScope.values).all()).results;
+
+  const coupons = user.role === "distributor" ? [] : (await env.DB.prepare(
+    `SELECT c.id, c.code, c.status, c.issued_at, c.expires_at, c.redeemed_at, s.name AS sponsor_name, s.island, m.name AS member_name, m.phone AS member_phone FROM coupons c JOIN sponsors s ON s.id = c.sponsor_id JOIN vip_members m ON m.id = c.member_id WHERE 1 = 1${scopeFor(user, "s.island", "s.owner_user_id").sql} ORDER BY c.issued_at DESC LIMIT 200`,
+  ).bind(...sponsorScope.values).all()).results;
+
+  const commissionRules = user.role === "super_admin" ? (await env.DB.prepare(
+    "SELECT id, name, role, island, rate_bps, active, created_at, updated_at FROM commission_rules ORDER BY active DESC, role, island",
+  ).all()).results : [];
+
+  const walletEntries = (await env.DB.prepare(
+    `SELECT w.id, w.user_id, u.name AS user_name, u.island, w.source_type, w.description, w.amount_cents, w.status, w.available_at, w.created_at FROM wallet_entries w JOIN users u ON u.id = w.user_id WHERE 1 = 1${financeScope.sql} ORDER BY w.created_at DESC LIMIT 200`,
+  ).bind(...financeScope.values).all()).results;
+
+  const payoutRequests = (await env.DB.prepare(
+    `SELECT p.id, p.user_id, u.name AS user_name, u.island, p.amount_cents, p.status, p.note, p.created_at, p.updated_at FROM payout_requests p JOIN users u ON u.id = p.user_id WHERE 1 = 1${financeScope.sql} ORDER BY p.created_at DESC LIMIT 100`,
+  ).bind(...financeScope.values).all()).results;
+
+  const inventoryScope = scopeFor(user, "x.island", null);
+  const inventory = user.role === "distributor" ? [] : (await env.DB.prepare(
+    `SELECT x.id, x.issue_label, x.island, x.slot_code, x.slot_name, x.width_mm, x.height_mm, x.status, x.client_id, c.company_name AS client_company, x.contract_id, x.updated_at FROM ad_inventory x LEFT JOIN clients c ON c.id = x.client_id WHERE 1 = 1${inventoryScope.sql} ORDER BY x.issue_label DESC, x.island, x.slot_code LIMIT 250`,
+  ).bind(...inventoryScope.values).all()).results;
+
+  const distributionPoints = (await env.DB.prepare(
+    `SELECT x.id, x.client_id, c.company_name AS client_company, x.name, x.island, x.address, x.latitude_e6, x.longitude_e6, x.capacity, x.stock, x.public_visible, x.updated_at FROM distribution_points x LEFT JOIN clients c ON c.id = x.client_id WHERE 1 = 1${islandScope.sql} ORDER BY x.island, x.stock, x.name LIMIT 300`,
+  ).bind(...islandScope.values).all()).results;
+
+  const auditScope = user.role === "super_admin" ? { sql: "", values: [] as string[] }
+    : user.role === "sales_manager" ? { sql: " AND p.island = ?", values: [String(user.island)] }
+      : { sql: " AND p.distributor_user_id = ?", values: [user.id] };
+  const photoAudits = user.role === "sales" ? [] : (await env.DB.prepare(
+    `SELECT p.id, p.delivery_id, p.distributor_user_id, u.name AS distributor_name, p.island, p.sha256, p.latitude_e6, p.longitude_e6, p.geofence_distance_m, p.status, p.quality_score, p.watermark_text, p.created_at, p.reviewed_at FROM photo_audits p JOIN users u ON u.id = p.distributor_user_id WHERE 1 = 1${auditScope.sql} ORDER BY p.created_at DESC LIMIT 150`,
+  ).bind(...auditScope.values).all()).results;
+
+  const salesScope = user.role === "super_admin" ? { sql: "", values: [] as string[] }
+    : user.role === "sales_manager" ? { sql: " AND x.island = ?", values: [String(user.island)] }
+      : { sql: " AND x.user_id = ?", values: [user.id] };
+  const salesCheckins = user.role === "distributor" ? [] : (await env.DB.prepare(
+    `SELECT x.id, x.user_id, u.name AS user_name, x.island, x.latitude_e6, x.longitude_e6, x.checked_in_at, x.status FROM sales_checkins x JOIN users u ON u.id = x.user_id WHERE 1 = 1${salesScope.sql} ORDER BY x.checked_in_at DESC LIMIT 120`,
+  ).bind(...salesScope.values).all()).results;
+  const salesTasks = user.role === "distributor" ? [] : (await env.DB.prepare(
+    `SELECT x.id, x.user_id, u.name AS user_name, x.client_id, c.company_name AS client_company, x.island, x.kind, x.title, x.status, x.scheduled_for, x.completed_at, x.updated_at FROM sales_tasks x JOIN users u ON u.id = x.user_id LEFT JOIN clients c ON c.id = x.client_id WHERE 1 = 1${salesScope.sql} ORDER BY CASE x.status WHEN 'open' THEN 0 ELSE 1 END, x.scheduled_for LIMIT 200`,
+  ).bind(...salesScope.values).all()).results;
+
+  const leaderboard = user.role === "distributor" ? [] : (await env.DB.prepare(
+    `SELECT u.id AS user_id, u.name AS user_name, u.island, COUNT(CASE WHEN c.stage = 'won' THEN 1 END) AS won_count, COALESCE(SUM(CASE WHEN c.stage = 'won' THEN c.value_cents ELSE 0 END), 0) AS won_value_cents FROM users u LEFT JOIN clients c ON c.owner_user_id = u.id AND c.archived_at IS NULL WHERE u.active = 1 AND u.role IN ('sales_manager','sales')${user.role === "super_admin" ? "" : user.role === "sales_manager" ? " AND u.island = ?" : " AND u.id = ?"} GROUP BY u.id, u.name, u.island ORDER BY won_value_cents DESC, won_count DESC LIMIT 30`,
+  ).bind(...(user.role === "super_admin" ? [] : user.role === "sales_manager" ? [String(user.island)] : [user.id])).all()).results;
+
+  const bundles = user.role === "distributor" ? [] : (await env.DB.prepare(
+    "SELECT id, code, name, description, monthly_price_cents, active FROM bundles WHERE active = 1 ORDER BY monthly_price_cents",
+  ).all()).results;
+
+  const counts = {
+    sponsors: sponsors.length,
+    vipMembers: vipMembers.length,
+    couponsIssued: coupons.filter((item) => String(item.status) === "issued").length,
+    couponsRedeemed: coupons.filter((item) => String(item.status) === "redeemed").length,
+    distributionPoints: distributionPoints.length,
+    pendingPhotoAudits: photoAudits.filter((item) => String(item.status) === "pending").length,
+    openSalesTasks: salesTasks.filter((item) => String(item.status) === "open").length,
+    availableWalletCents: walletEntries.filter((item) => String(item.status) === "available").reduce((sum, item) => sum + Number(item.amount_cents), 0),
+  };
+
+  return json({
+    counts,
+    sponsors,
+    vipMembers,
+    coupons,
+    commissionRules,
+    walletEntries,
+    payoutRequests,
+    inventory,
+    distributionPoints,
+    photoAudits,
+    salesCheckins,
+    salesTasks,
+    leaderboard,
+    bundles,
+    integrations: {
+      email: Boolean(env.EMAIL && env.EMAIL_FROM),
+      whatsapp: Boolean(env.WHATSAPP_TOKEN && env.WHATSAPP_PHONE_NUMBER_ID),
+      payments: Boolean(env.STRIPE_SECRET_KEY),
+      maps: Boolean(env.MAPS_TOKEN),
+      photoAi: false,
+    },
+  });
+}
+
+async function createSponsor(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  requireManager(user);
+  if (!env.AUTH_SECRET) throw new OperationsError(503, "auth_secret_missing", "La chiave di sicurezza non è configurata.");
+  const body = await readJson<Record<string, unknown>>(request);
+  const name = clean(body.name, 120);
+  const requestedIsland = clean(body.island, 40);
+  const island = user.role === "super_admin" ? requestedIsland : String(user.island ?? "");
+  const category = clean(body.category, 80);
+  const offerTitle = clean(body.offerTitle, 160);
+  const discountText = clean(body.discountText, 160);
+  const merchantPin = clean(body.merchantPin, 4);
+  if (!name || !isIsland(island) || !category || !offerTitle || !discountText || !/^\d{4}$/.test(merchantPin)) {
+    throw new OperationsError(400, "invalid_sponsor", "Compila sponsor, isola, categoria, offerta, vantaggio e PIN commerciante di 4 cifre.");
+  }
+  const ownerUserId = clean(body.ownerUserId, 80) || user.id;
+  const clientId = cleanOptional(body.clientId, 80);
+  if (clientId) await assertClientScope(env, user, clientId, island);
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const merchantPinHash = await sha256(`${env.AUTH_SECRET}\n${id}\n${merchantPin}`);
+  const latitude = optionalCoordinate(body.latitude, -90, 90);
+  const longitude = optionalCoordinate(body.longitude, -180, 180);
+  await env.DB.prepare("INSERT INTO sponsors (id, client_id, name, island, category, status, offer_title, discount_text, merchant_pin_hash, address, latitude_e6, longitude_e6, instagram_handle, owner_user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .bind(id, clientId, name, island, category, offerTitle, discountText, merchantPinHash, cleanOptional(body.address, 260), toE6(latitude), toE6(longitude), cleanOptional(body.instagramHandle, 80), ownerUserId, now, now).run();
+  await appendOperationsAudit(env, request, user, "sponsor.created", "sponsor", id, { name, island, category });
+  return json({ id }, 201);
+}
+
+async function createVipMember(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  if (user.role === "distributor") throw new OperationsError(403, "not_allowed", "Il Distributore non gestisce gli iscritti VIP.");
+  const body = await readJson<Record<string, unknown>>(request);
+  const name = clean(body.name, 120);
+  const phone = normalizePhone(body.phone);
+  const requestedIsland = clean(body.island, 40);
+  const island = user.role === "super_admin" ? requestedIsland : String(user.island ?? "");
+  if (!name || phone.length < 8 || !isIsland(island) || body.consent !== true) {
+    throw new OperationsError(400, "invalid_member", "Nome, WhatsApp, isola e consenso sono obbligatori.");
+  }
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  try {
+    await env.DB.prepare("INSERT INTO vip_members (id, name, phone, island, tier, streak_months, consent_at, created_at) VALUES (?, ?, ?, ?, 'standard', 0, ?, ?)")
+      .bind(id, name, phone, island, now, now).run();
+  } catch (error) {
+    if (String(error).includes("UNIQUE")) throw new OperationsError(409, "member_exists", "Questo numero WhatsApp è già registrato.");
+    throw error;
+  }
+  await appendOperationsAudit(env, request, user, "vip_member.created", "vip_member", id, { island, phoneSuffix: phone.slice(-4) });
+  return json({ id }, 201);
+}
+
+async function issueCoupon(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  if (user.role === "distributor") throw new OperationsError(403, "not_allowed", "Il Distributore non può emettere coupon.");
+  const body = await readJson<Record<string, unknown>>(request);
+  const sponsorId = clean(body.sponsorId, 80);
+  const memberId = clean(body.memberId, 80);
+  const sponsor = await getSponsor(env, sponsorId);
+  const member = await env.DB.prepare("SELECT id, island FROM vip_members WHERE id = ? LIMIT 1").bind(memberId).first<{ id: string; island: string }>();
+  if (!sponsor || !member || !canAccessIsland(user, sponsor.island) || !canAccessIsland(user, member.island)) {
+    throw new OperationsError(404, "coupon_subject_not_found", "Sponsor o membro VIP non disponibile nel tuo perimetro.");
+  }
+  const id = crypto.randomUUID();
+  const code = secureCode();
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
+  await env.DB.prepare("INSERT INTO coupons (id, member_id, sponsor_id, code, status, issued_at, expires_at) VALUES (?, ?, ?, ?, 'issued', ?, ?)")
+    .bind(id, member.id, sponsor.id, code, now.toISOString(), expiresAt).run();
+  await appendOperationsAudit(env, request, user, "coupon.issued", "coupon", id, { sponsorId, memberId, code });
+  return json({ id, code, expiresAt }, 201);
+}
+
+async function redeemCoupon(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  if (!env.AUTH_SECRET) throw new OperationsError(503, "auth_secret_missing", "La chiave di sicurezza non è configurata.");
+  const body = await readJson<Record<string, unknown>>(request);
+  const code = clean(body.code, 20).toUpperCase();
+  const merchantPin = clean(body.merchantPin, 4);
+  const row = await env.DB.prepare("SELECT c.id, c.status, c.expires_at, c.sponsor_id, s.island, s.client_id, s.merchant_pin_hash FROM coupons c JOIN sponsors s ON s.id = c.sponsor_id WHERE c.code = ? LIMIT 1")
+    .bind(code).first<{ id: string; status: string; expires_at: string; sponsor_id: string; island: string; client_id: string | null; merchant_pin_hash: string }>();
+  if (!row || !canAccessIsland(user, row.island)) throw new OperationsError(404, "coupon_not_found", "Coupon non trovato.");
+  if (row.status !== "issued" || Date.parse(row.expires_at) <= Date.now()) throw new OperationsError(409, "coupon_not_redeemable", "Coupon già usato o scaduto.");
+  if (user.role === "distributor" && row.client_id) {
+    const linked = await env.DB.prepare("SELECT 1 AS ok FROM deliveries WHERE distributor_user_id = ? AND client_id = ? LIMIT 1").bind(user.id, row.client_id).first();
+    if (!linked) throw new OperationsError(403, "not_allowed", "Sponsor non collegato alle tue consegne.");
+  }
+  const candidate = await sha256(`${env.AUTH_SECRET}\n${row.sponsor_id}\n${merchantPin}`);
+  if (!timingSafeHex(candidate, row.merchant_pin_hash)) throw new OperationsError(403, "invalid_merchant_pin", "PIN commerciante non valido.");
+  const now = new Date().toISOString();
+  const latitude = optionalCoordinate(body.latitude, -90, 90);
+  const longitude = optionalCoordinate(body.longitude, -180, 180);
+  const result = await env.DB.prepare("UPDATE coupons SET status = 'redeemed', redeemed_at = ?, redeemed_by_user_id = ?, latitude_e6 = ?, longitude_e6 = ? WHERE id = ? AND status = 'issued'")
+    .bind(now, user.id, toE6(latitude), toE6(longitude), row.id).run();
+  if (Number(result.meta.changes ?? 0) !== 1) throw new OperationsError(409, "coupon_race", "Coupon già utilizzato.");
+  await appendOperationsAudit(env, request, user, "coupon.redeemed", "coupon", row.id, { sponsorId: row.sponsor_id, latitude, longitude });
+  return json({ ok: true, redeemedAt: now });
+}
+
+async function createCommissionRule(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  requireSuperAdmin(user);
+  const body = await readJson<Record<string, unknown>>(request);
+  const name = clean(body.name, 120);
+  const role = clean(body.role, 30);
+  const island = cleanOptional(body.island, 40);
+  const ratePercent = Number(body.ratePercent);
+  if (!name || !["sales_manager", "sales", "distributor"].includes(role) || (island && !isIsland(island)) || !Number.isFinite(ratePercent) || ratePercent < 0 || ratePercent > 100) {
+    throw new OperationsError(400, "invalid_commission", "Regola commissione non valida.");
+  }
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await env.DB.prepare("INSERT INTO commission_rules (id, name, role, island, rate_bps, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)")
+    .bind(id, name, role, island, Math.round(ratePercent * 100), now, now).run();
+  await appendOperationsAudit(env, request, user, "commission_rule.created", "commission_rule", id, { name, role, island, ratePercent });
+  return json({ id }, 201);
+}
+
+async function createPayoutRequest(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  const body = await readJson<Record<string, unknown>>(request);
+  const amountCents = Math.round(Number(body.amountEuros) * 100);
+  if (!Number.isInteger(amountCents) || amountCents < 1000 || amountCents > 10_000_000) throw new OperationsError(400, "invalid_amount", "Richiedi almeno 10 € con un importo valido.");
+  const balance = await env.DB.prepare("SELECT COALESCE(SUM(amount_cents), 0) AS cents FROM wallet_entries WHERE user_id = ? AND status = 'available'").bind(user.id).first<{ cents: number }>();
+  const reserved = await env.DB.prepare("SELECT COALESCE(SUM(amount_cents), 0) AS cents FROM payout_requests WHERE user_id = ? AND status IN ('requested','approved')").bind(user.id).first<{ cents: number }>();
+  if (amountCents > Number(balance?.cents ?? 0) - Number(reserved?.cents ?? 0)) throw new OperationsError(409, "insufficient_wallet", "Saldo disponibile insufficiente.");
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await env.DB.prepare("INSERT INTO payout_requests (id, user_id, amount_cents, status, note, created_at, updated_at) VALUES (?, ?, ?, 'requested', ?, ?, ?)")
+    .bind(id, user.id, amountCents, cleanOptional(body.note, 300), now, now).run();
+  await appendOperationsAudit(env, request, user, "payout.requested", "payout_request", id, { amountCents });
+  return json({ id }, 201);
+}
+
+async function reviewPayoutRequest(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  requireSuperAdmin(user);
+  const body = await readJson<Record<string, unknown>>(request);
+  const id = clean(body.id, 80);
+  const status = clean(body.status, 20);
+  if (!["approved", "paid", "rejected"].includes(status)) throw new OperationsError(400, "invalid_status", "Stato pagamento non valido.");
+  const current = await env.DB.prepare("SELECT id, user_id, amount_cents, status FROM payout_requests WHERE id = ? LIMIT 1").bind(id).first<{ id: string; user_id: string; amount_cents: number; status: string }>();
+  if (!current || !["requested", "approved"].includes(current.status)) throw new OperationsError(409, "payout_not_reviewable", "Richiesta non disponibile.");
+  const now = new Date().toISOString();
+  const statements = [env.DB.prepare("UPDATE payout_requests SET status = ?, reviewed_by = ?, updated_at = ? WHERE id = ? AND status = ?").bind(status, user.id, now, id, current.status)];
+  if (status === "paid") {
+    statements.push(env.DB.prepare("INSERT INTO wallet_entries (id, user_id, source_type, source_id, description, amount_cents, status, available_at, created_at) VALUES (?, ?, 'payout', ?, 'Liquidazione commissioni', ?, 'paid', ?, ?)")
+      .bind(crypto.randomUUID(), current.user_id, current.id, -current.amount_cents, now, now));
+  }
+  await env.DB.batch(statements);
+  await appendOperationsAudit(env, request, user, `payout.${status}`, "payout_request", id, { amountCents: current.amount_cents });
+  return json({ ok: true });
+}
+
+async function createInventorySlot(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  requireManager(user);
+  const body = await readJson<Record<string, unknown>>(request);
+  const requestedIsland = clean(body.island, 40);
+  const island = user.role === "super_admin" ? requestedIsland : String(user.island ?? "");
+  const issueLabel = clean(body.issueLabel, 80);
+  const slotCode = clean(body.slotCode, 40).toUpperCase();
+  const slotName = clean(body.slotName, 120);
+  const widthMm = positiveInt(body.widthMm, 1000);
+  const heightMm = positiveInt(body.heightMm, 1000);
+  if (!isIsland(island) || !issueLabel || !slotCode || !slotName) throw new OperationsError(400, "invalid_inventory", "Dati dello spazio pubblicitario incompleti.");
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await env.DB.prepare("INSERT INTO ad_inventory (id, issue_label, island, slot_code, slot_name, width_mm, height_mm, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'available', ?, ?)")
+    .bind(id, issueLabel, island, slotCode, slotName, widthMm, heightMm, now, now).run();
+  await appendOperationsAudit(env, request, user, "inventory.created", "ad_inventory", id, { issueLabel, island, slotCode });
+  return json({ id }, 201);
+}
+
+async function updateInventoryStatus(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  requireManager(user);
+  const body = await readJson<Record<string, unknown>>(request);
+  const id = clean(body.id, 80);
+  const status = clean(body.status, 20);
+  if (!["available", "held", "sold"].includes(status)) throw new OperationsError(400, "invalid_status", "Stato spazio non valido.");
+  const row = await env.DB.prepare("SELECT id, island FROM ad_inventory WHERE id = ? LIMIT 1").bind(id).first<{ id: string; island: string }>();
+  if (!row || !canAccessIsland(user, row.island)) throw new OperationsError(404, "inventory_not_found", "Spazio non trovato.");
+  const now = new Date().toISOString();
+  await env.DB.prepare("UPDATE ad_inventory SET status = ?, client_id = ?, contract_id = ?, updated_at = ? WHERE id = ?")
+    .bind(status, cleanOptional(body.clientId, 80), cleanOptional(body.contractId, 80), now, id).run();
+  await appendOperationsAudit(env, request, user, "inventory.updated", "ad_inventory", id, { status });
+  return json({ ok: true });
+}
+
+async function createDistributionPoint(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  requireManager(user);
+  const body = await readJson<Record<string, unknown>>(request);
+  const requestedIsland = clean(body.island, 40);
+  const island = user.role === "super_admin" ? requestedIsland : String(user.island ?? "");
+  const name = clean(body.name, 120);
+  const address = clean(body.address, 260);
+  const latitude = requiredCoordinate(body.latitude, -90, 90);
+  const longitude = requiredCoordinate(body.longitude, -180, 180);
+  const capacity = nonNegativeInt(body.capacity, 1_000_000);
+  const stock = nonNegativeInt(body.stock, 1_000_000);
+  if (!isIsland(island) || !name || !address) throw new OperationsError(400, "invalid_point", "Nome, isola, indirizzo e coordinate sono obbligatori.");
+  const clientId = cleanOptional(body.clientId, 80);
+  if (clientId) await assertClientScope(env, user, clientId, island);
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await env.DB.prepare("INSERT INTO distribution_points (id, client_id, name, island, address, latitude_e6, longitude_e6, capacity, stock, public_visible, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .bind(id, clientId, name, island, address, toE6(latitude), toE6(longitude), capacity, stock, body.publicVisible === false ? 0 : 1, now, now).run();
+  await appendOperationsAudit(env, request, user, "distribution_point.created", "distribution_point", id, { name, island, stock });
+  return json({ id }, 201);
+}
+
+async function updateDistributionStock(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  if (!["super_admin", "sales_manager", "distributor"].includes(user.role)) throw new OperationsError(403, "not_allowed", "Non puoi modificare le giacenze.");
+  const body = await readJson<Record<string, unknown>>(request);
+  const id = clean(body.id, 80);
+  const stock = nonNegativeInt(body.stock, 1_000_000);
+  const row = await env.DB.prepare("SELECT id, island FROM distribution_points WHERE id = ? LIMIT 1").bind(id).first<{ id: string; island: string }>();
+  if (!row || !canAccessIsland(user, row.island)) throw new OperationsError(404, "point_not_found", "Punto distribuzione non trovato.");
+  const now = new Date().toISOString();
+  await env.DB.prepare("UPDATE distribution_points SET stock = ?, updated_at = ? WHERE id = ?").bind(stock, now, id).run();
+  await appendOperationsAudit(env, request, user, "distribution_point.stock_updated", "distribution_point", id, { stock });
+  return json({ ok: true });
+}
+
+async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  if (!env.BUCKET) throw new OperationsError(503, "storage_missing", "Archivio fotografico non configurato.");
+  if (!["super_admin", "sales_manager", "distributor"].includes(user.role)) throw new OperationsError(403, "not_allowed", "Non puoi caricare verifiche fotografiche.");
+  const length = Number(request.headers.get("content-length") ?? 0);
+  if (length > MAX_PHOTO_BYTES + 256_000) throw new OperationsError(413, "photo_too_large", "La foto supera 8 MB.");
+  if (!(request.headers.get("content-type") ?? "").includes("multipart/form-data")) throw new OperationsError(415, "form_required", "Invia una foto con coordinate.");
+  const form = await request.formData();
+  const photo = form.get("photo");
+  if (!(photo instanceof File) || photo.size === 0 || photo.size > MAX_PHOTO_BYTES || !["image/jpeg", "image/png", "image/webp"].includes(photo.type)) {
+    throw new OperationsError(400, "invalid_photo", "Carica una foto JPG, PNG o WebP fino a 8 MB.");
+  }
+  const deliveryId = clean(form.get("deliveryId"), 80);
+  const latitude = requiredCoordinate(form.get("latitude"), -90, 90);
+  const longitude = requiredCoordinate(form.get("longitude"), -180, 180);
+  const delivery = await env.DB.prepare("SELECT id, distributor_user_id, island FROM deliveries WHERE id = ? LIMIT 1").bind(deliveryId).first<{ id: string; distributor_user_id: string; island: string }>();
+  if (!delivery || !canAccessIsland(user, delivery.island) || (user.role === "distributor" && delivery.distributor_user_id !== user.id)) {
+    throw new OperationsError(404, "delivery_not_found", "Consegna non disponibile nel tuo perimetro.");
+  }
+  const nearest = await nearestDistributionPoint(env, delivery.island, latitude, longitude);
+  const bytes = await photo.arrayBuffer();
+  const digest = await sha256(bytes);
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const watermarkText = `VLC OS | ${delivery.island} | ${now} | ${latitude.toFixed(6)},${longitude.toFixed(6)} | ${digest.slice(0, 12)}`;
+  const qualityScore = Math.min(95, Math.max(45, Math.round(45 + Math.log10(Math.max(photo.size, 1)) * 8)));
+  const key = `distribution-audit/${delivery.island}/${now.slice(0, 10)}/${id}.${extensionFor(photo.type)}`;
+  await env.BUCKET.put(key, bytes, { httpMetadata: { contentType: photo.type, cacheControl: "private, no-store" }, customMetadata: { sha256: digest, watermark: watermarkText, deliveryId } });
+  await env.DB.prepare("INSERT INTO photo_audits (id, delivery_id, distributor_user_id, island, r2_key, sha256, latitude_e6, longitude_e6, geofence_distance_m, status, quality_score, watermark_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)")
+    .bind(id, delivery.id, delivery.distributor_user_id, delivery.island, key, digest, toE6(latitude), toE6(longitude), nearest?.distanceM ?? null, qualityScore, watermarkText, now).run();
+  await appendOperationsAudit(env, request, user, "photo_audit.created", "photo_audit", id, { deliveryId, digest, distanceM: nearest?.distanceM ?? null, qualityScore });
+  return json({ id, status: "pending", qualityScore, geofenceDistanceM: nearest?.distanceM ?? null, watermarkText }, 201);
+}
+
+async function reviewPhotoAudit(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  requireManager(user);
+  const body = await readJson<Record<string, unknown>>(request);
+  const id = clean(body.id, 80);
+  const status = clean(body.status, 20);
+  if (!["approved", "rejected"].includes(status)) throw new OperationsError(400, "invalid_status", "Esito verifica non valido.");
+  const row = await env.DB.prepare("SELECT id, island, status FROM photo_audits WHERE id = ? LIMIT 1").bind(id).first<{ id: string; island: string; status: string }>();
+  if (!row || !canAccessIsland(user, row.island)) throw new OperationsError(404, "audit_not_found", "Verifica fotografica non trovata.");
+  const now = new Date().toISOString();
+  await env.DB.prepare("UPDATE photo_audits SET status = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ? AND status = 'pending'").bind(status, user.id, now, id).run();
+  await appendOperationsAudit(env, request, user, `photo_audit.${status}`, "photo_audit", id, {});
+  return json({ ok: true });
+}
+
+async function createSalesCheckin(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  if (!["sales", "sales_manager"].includes(user.role) || !user.island) throw new OperationsError(403, "not_allowed", "Check-in riservato alla rete commerciale.");
+  const body = await readJson<Record<string, unknown>>(request);
+  const latitude = requiredCoordinate(body.latitude, -90, 90);
+  const longitude = requiredCoordinate(body.longitude, -180, 180);
+  const center = ISLAND_CENTERS[user.island];
+  const distanceM = center ? haversineMeters(latitude, longitude, center.latitude, center.longitude) : Number.POSITIVE_INFINITY;
+  const now = new Date();
+  const canaryTime = new Intl.DateTimeFormat("en-GB", { timeZone: "Atlantic/Canary", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(now);
+  const hour = Number(canaryTime.find((part) => part.type === "hour")?.value ?? 99);
+  const minute = Number(canaryTime.find((part) => part.type === "minute")?.value ?? 99);
+  const status = distanceM > 80_000 ? "outside_geofence" : (hour < 9 || (hour === 9 && minute <= 15)) ? "on_time" : "late";
+  const id = crypto.randomUUID();
+  await env.DB.prepare("INSERT INTO sales_checkins (id, user_id, island, latitude_e6, longitude_e6, checked_in_at, status) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .bind(id, user.id, user.island, toE6(latitude), toE6(longitude), now.toISOString(), status).run();
+  await appendOperationsAudit(env, request, user, "sales.checkin", "sales_checkin", id, { status, distanceM: Math.round(distanceM) });
+  return json({ id, status, distanceM: Math.round(distanceM) }, 201);
+}
+
+async function createSalesTask(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  requireManager(user);
+  const body = await readJson<Record<string, unknown>>(request);
+  const targetUserId = clean(body.userId, 80);
+  const target = await env.DB.prepare("SELECT id, island, role FROM users WHERE id = ? AND active = 1 LIMIT 1").bind(targetUserId).first<{ id: string; island: string | null; role: string }>();
+  if (!target || !target.island || !["sales", "sales_manager"].includes(target.role) || !canAccessIsland(user, target.island)) throw new OperationsError(400, "invalid_assignee", "Commerciale non disponibile nel tuo perimetro.");
+  const kind = clean(body.kind, 30);
+  const title = clean(body.title, 160);
+  const scheduledFor = clean(body.scheduledFor, 30);
+  if (!['visit', 'display_check'].includes(kind) || !title || Number.isNaN(Date.parse(scheduledFor))) throw new OperationsError(400, "invalid_task", "Attività commerciale non valida.");
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await env.DB.prepare("INSERT INTO sales_tasks (id, user_id, client_id, island, kind, title, status, scheduled_for, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)")
+    .bind(id, target.id, cleanOptional(body.clientId, 80), target.island, kind, title, new Date(scheduledFor).toISOString(), now, now).run();
+  await appendOperationsAudit(env, request, user, "sales_task.created", "sales_task", id, { targetUserId, kind, targetIsland: target.island });
+  return json({ id }, 201);
+}
+
+async function completeSalesTask(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  const body = await readJson<Record<string, unknown>>(request);
+  const id = clean(body.id, 80);
+  const task = await env.DB.prepare("SELECT id, user_id, island, status FROM sales_tasks WHERE id = ? LIMIT 1").bind(id).first<{ id: string; user_id: string; island: string; status: string }>();
+  if (!task || task.status !== "open" || (task.user_id !== user.id && !(["super_admin", "sales_manager"].includes(user.role) && canAccessIsland(user, task.island)))) {
+    throw new OperationsError(404, "task_not_found", "Attività non disponibile.");
+  }
+  const now = new Date().toISOString();
+  await env.DB.prepare("UPDATE sales_tasks SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ? AND status = 'open'").bind(now, now, id).run();
+  await appendOperationsAudit(env, request, user, "sales_task.completed", "sales_task", id, {});
+  return json({ ok: true });
+}
+
+function scopeFor(user: OperationsUser, islandColumn: string, ownerColumn: string | null): { sql: string; values: string[] } {
+  if (user.role === "super_admin") return { sql: "", values: [] };
+  if (user.role === "sales_manager" || user.role === "distributor" || !ownerColumn) return { sql: ` AND ${islandColumn} = ?`, values: [String(user.island)] };
+  return { sql: ` AND ${ownerColumn} = ?`, values: [user.id] };
+}
+
+function requireSuperAdmin(user: OperationsUser): void {
+  if (user.role !== "super_admin") throw new OperationsError(403, "super_admin_required", "Operazione riservata al Super Admin.");
+}
+
+function requireManager(user: OperationsUser): void {
+  if (!["super_admin", "sales_manager"].includes(user.role)) throw new OperationsError(403, "manager_required", "Operazione riservata al Sales Manager o al Super Admin.");
+}
+
+function canAccessIsland(user: OperationsUser, island: string): boolean {
+  return user.role === "super_admin" || Boolean(user.island && user.island === island);
+}
+
+async function assertClientScope(env: RuntimeEnv, user: OperationsUser, clientId: string, island: string): Promise<void> {
+  const client = await env.DB.prepare("SELECT id, island, owner_user_id FROM clients WHERE id = ? AND archived_at IS NULL LIMIT 1").bind(clientId).first<{ id: string; island: string; owner_user_id: string }>();
+  if (!client || client.island !== island || !canAccessIsland(user, client.island) || (user.role === "sales" && client.owner_user_id !== user.id)) {
+    throw new OperationsError(404, "client_not_found", "Cliente non disponibile nel tuo perimetro.");
+  }
+}
+
+async function getSponsor(env: RuntimeEnv, id: string): Promise<{ id: string; island: string; owner_user_id: string; client_id: string | null } | null> {
+  return env.DB.prepare("SELECT id, island, owner_user_id, client_id FROM sponsors WHERE id = ? AND status = 'active' LIMIT 1").bind(id).first();
+}
+
+async function nearestDistributionPoint(env: RuntimeEnv, island: string, latitude: number, longitude: number): Promise<{ id: string; distanceM: number } | null> {
+  const points = (await env.DB.prepare("SELECT id, latitude_e6, longitude_e6 FROM distribution_points WHERE island = ? LIMIT 300").bind(island).all<{ id: string; latitude_e6: number; longitude_e6: number }>()).results;
+  let nearest: { id: string; distanceM: number } | null = null;
+  for (const point of points) {
+    const distanceM = Math.round(haversineMeters(latitude, longitude, point.latitude_e6 / 1_000_000, point.longitude_e6 / 1_000_000));
+    if (!nearest || distanceM < nearest.distanceM) nearest = { id: point.id, distanceM };
+  }
+  return nearest;
+}
+
+async function appendOperationsAudit(env: RuntimeEnv, request: Request, user: OperationsUser, action: string, entityType: string, entityId: string, payload: unknown): Promise<void> {
+  const payloadJson = stableJson(payload);
+  const rawIp = request.headers.get("cf-connecting-ip");
+  const ipHash = rawIp ? await sha256(`${env.AUTH_SECRET ?? "vlc"}:${rawIp}`) : null;
+  await env.DB.prepare("INSERT INTO audit_events (id, actor_user_id, action, entity_type, entity_id, payload_json, payload_sha256, ip_hash, user_agent, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .bind(crypto.randomUUID(), user.id, action, entityType, entityId, payloadJson, await sha256(payloadJson), ipHash, cleanOptional(request.headers.get("user-agent"), 300), new Date().toISOString()).run();
+}
+
+async function readJson<T>(request: Request): Promise<T> {
+  const length = Number(request.headers.get("content-length") ?? 0);
+  if (length > MAX_JSON_BYTES) throw new OperationsError(413, "payload_too_large", "Richiesta troppo grande.");
+  if (!(request.headers.get("content-type") ?? "").includes("application/json")) throw new OperationsError(415, "json_required", "Invia dati JSON.");
+  try { return await request.json<T>(); } catch { throw new OperationsError(400, "invalid_json", "Dati JSON non validi."); }
+}
+
+function json(value: unknown, status = 200): Response {
+  return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
+}
+
+function errorResponse(error: OperationsError): Response {
+  return json({ error: { code: error.code, message: error.message } }, error.status);
+}
+
+function clean(value: unknown, maxLength: number): string {
+  return String(value ?? "").trim().replace(/\s+/g, " ").slice(0, maxLength);
+}
+
+function cleanOptional(value: unknown, maxLength: number): string | null {
+  return clean(value, maxLength) || null;
+}
+
+function normalizePhone(value: unknown): string {
+  const raw = String(value ?? "").trim();
+  const plus = raw.startsWith("+") ? "+" : "";
+  return `${plus}${raw.replace(/\D/g, "")}`.slice(0, 20);
+}
+
+function isIsland(value: string): value is typeof ISLANDS[number] {
+  return ISLANDS.includes(value as typeof ISLANDS[number]);
+}
+
+function positiveInt(value: unknown, max: number): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > max) throw new OperationsError(400, "invalid_number", `Inserisci un intero tra 1 e ${max}.`);
+  return parsed;
+}
+
+function nonNegativeInt(value: unknown, max: number): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > max) throw new OperationsError(400, "invalid_number", `Inserisci un intero tra 0 e ${max}.`);
+  return parsed;
+}
+
+function requiredCoordinate(value: unknown, min: number, max: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < min || parsed > max) throw new OperationsError(400, "invalid_coordinates", "Coordinate geografiche non valide.");
+  return parsed;
+}
+
+function optionalCoordinate(value: unknown, min: number, max: number): number | null {
+  if (value === null || value === undefined || String(value).trim() === "") return null;
+  return requiredCoordinate(value, min, max);
+}
+
+function toE6(value: number | null): number | null {
+  return value === null ? null : Math.round(value * 1_000_000);
+}
+
+function secureCode(): string {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = crypto.getRandomValues(new Uint8Array(10));
+  return [...bytes].map((byte) => alphabet[byte % alphabet.length]).join("");
+}
+
+async function sha256(value: string | ArrayBuffer): Promise<string> {
+  const bytes = typeof value === "string" ? new TextEncoder().encode(value) : new Uint8Array(value);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function timingSafeHex(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let difference = 0;
+  for (let index = 0; index < a.length; index += 1) difference |= a.charCodeAt(index) ^ b.charCodeAt(index);
+  return difference === 0;
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
+}
+
+function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const radius = 6_371_000;
+  const toRadians = (value: number) => value * Math.PI / 180;
+  const dLat = toRadians(lat2 - lat1);
+  const dLon = toRadians(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(dLon / 2) ** 2;
+  return radius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function extensionFor(contentType: string): string {
+  if (contentType === "image/png") return "png";
+  if (contentType === "image/webp") return "webp";
+  return "jpg";
+}

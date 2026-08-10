@@ -1,0 +1,14 @@
+{
+  "name": "Vivi le Canarie VIP Pass",
+  "short_name": "VLC VIP",
+  "description": "Coupon, vantaggi e premi Vivi le Canarie.",
+  "start_url": "/vip",
+  "scope": "/vip",
+  "display": "standalone",
+  "background_color": "#f3efe4",
+  "theme_color": "#10382f",
+  "lang": "it",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

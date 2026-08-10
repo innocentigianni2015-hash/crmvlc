@@ -1,6 +1,6 @@
-# VLC OS — CRM e contratti
+# CRMVLC — CRM e contratti
 
-Versione operativa Cloudflare Workers del CRM VLC OS per Tenerife, Gran Canaria, Lanzarote, Fuerteventura e La Palma.
+Versione operativa Cloudflare Workers di CRMVLC per Tenerife, Gran Canaria, Lanzarote, Fuerteventura e La Palma.
 
 ## Funzioni attive
 

@@ -7,6 +7,12 @@ export const users = sqliteTable("users", {
   role: text("role", { enum: ["super_admin", "sales_manager", "sales", "distributor"] }).notNull(),
   island: text("island"),
   active: integer("active", { mode: "boolean" }).notNull().default(true),
+  passwordHash: text("password_hash"),
+  passwordSalt: text("password_salt"),
+  passwordIterations: integer("password_iterations"),
+  mustChangePassword: integer("must_change_password", { mode: "boolean" }).notNull().default(false),
+  passwordChangedAt: text("password_changed_at"),
+  totpSecretEncrypted: text("totp_secret_encrypted"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 }, (table) => [uniqueIndex("users_email_unique").on(table.email), index("users_role_idx").on(table.role)]);
@@ -31,6 +37,24 @@ export const authChallenges = sqliteTable("auth_challenges", {
   consumedAt: text("consumed_at"),
   createdAt: text("created_at").notNull(),
 }, (table) => [index("auth_challenges_lookup_idx").on(table.email, table.purpose, table.expiresAt)]);
+
+export const authFlowTokens = sqliteTable("auth_flow_tokens", {
+  id: text("id").primaryKey(),
+  tokenHash: text("token_hash").notNull(),
+  userId: text("user_id").notNull().references(() => users.id),
+  purpose: text("purpose", { enum: ["change_password", "password_reset", "totp_setup", "totp_login"] }).notNull(),
+  dataJson: text("data_json"),
+  expiresAt: text("expires_at").notNull(),
+  consumedAt: text("consumed_at"),
+  createdAt: text("created_at").notNull(),
+}, (table) => [uniqueIndex("auth_flow_tokens_hash_unique").on(table.tokenHash), index("auth_flow_tokens_user_idx").on(table.userId, table.purpose, table.expiresAt)]);
+
+export const authRateLimits = sqliteTable("auth_rate_limits", {
+  key: text("key").primaryKey(),
+  attempts: integer("attempts").notNull().default(0),
+  windowStartedAt: text("window_started_at").notNull(),
+  blockedUntil: text("blocked_until"),
+});
 
 export const clients = sqliteTable("clients", {
   id: text("id").primaryKey(),

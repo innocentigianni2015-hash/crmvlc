@@ -20,6 +20,7 @@ import { calculateQuoteTotals, formatQuoteNumber } from "./quote-calculations.js
 import { buildQuotePdf } from "./quote-pdf.js";
 import { handleOperationsApi } from "./operations-api.js";
 import { handleVipPublicApi } from "./vip-public-api.js";
+import { createPasswordHash, handlePasswordAuth } from "./password-auth.js";
 
 type RuntimeEnv = Env & {
   AUTH_SECRET?: string;
@@ -239,8 +240,15 @@ export async function handleCrmApi(
       return json({
         demoEnabled,
         demoEmail: demoEnabled ? normalizeEmail(env.DEMO_EMAIL) : null,
-        otpEnabled: Boolean(env.DB && env.EMAIL && env.AUTH_SECRET && env.EMAIL_FROM),
+        passwordEnabled: Boolean(env.DB && env.AUTH_SECRET),
+        contractOtpEnabled: Boolean(env.DB && env.EMAIL && env.AUTH_SECRET && env.EMAIL_FROM),
       });
+    }
+
+    if (url.pathname.startsWith("/api/auth/password/") || url.pathname.startsWith("/api/auth/totp/")) {
+      await ensureBootstrapAdmin(env);
+      const passwordResponse = await handlePasswordAuth(request, env);
+      if (passwordResponse) return passwordResponse;
     }
 
     if (url.pathname === "/api/auth/demo" && request.method === "POST") {
@@ -248,10 +256,10 @@ export async function handleCrmApi(
     }
 
     if (url.pathname === "/api/auth/request" && request.method === "POST") {
-      return requestLoginOtp(request, env);
+      throw new ApiError(410, "password_login_required", "L’accesso al CRM ora usa email e password.");
     }
     if (url.pathname === "/api/auth/verify" && request.method === "POST") {
-      return verifyLoginOtp(request, env);
+      throw new ApiError(410, "password_login_required", "L’accesso al CRM ora usa email e password.");
     }
     if (url.pathname === "/api/auth/logout" && request.method === "POST") {
       return logout(request, env);
@@ -381,69 +389,6 @@ async function loginDemo(request: Request, env: RuntimeEnv): Promise<Response> {
   await appendAudit(env, request, user.id, "auth.demo_login", "user", user.id, { email: user.email, demo: true });
 
   const response = json({ user: publicUser(user), demoMode: true });
-  response.headers.append("Set-Cookie", sessionCookie(token, request, hours * 60 * 60));
-  return response;
-}
-
-async function requestLoginOtp(request: Request, env: RuntimeEnv): Promise<Response> {
-  requireAuthConfiguration(env);
-  await ensureBootstrapAdmin(env);
-  const body = await readJson<{ email?: string }>(request);
-  const email = normalizeEmail(body.email);
-  if (!isEmail(email)) throw new ApiError(400, "invalid_email", "Inserisci un indirizzo email valido.");
-
-  const user = await env.DB.prepare(
-    "SELECT id, email, name, role, island, active FROM users WHERE email = ? AND active = 1 LIMIT 1",
-  ).bind(email).first<UserRow>();
-
-  let challengeId = crypto.randomUUID();
-  if (user) {
-    const challenge = await createChallenge(env, email, "login", null, null);
-    challengeId = challenge.id;
-    try {
-      if (challenge.code) await sendOtp(env, email, challenge.code, "Accesso a CRMVLC", "Usa questo codice per accedere al CRM");
-    } catch (error) {
-      await env.DB.prepare("DELETE FROM auth_challenges WHERE id = ?").bind(challenge.id).run();
-      throw error;
-    }
-  }
-
-  return json({ accepted: true, challengeId, message: "Se l'indirizzo è autorizzato, riceverai il codice entro pochi minuti." }, 202);
-}
-
-async function verifyLoginOtp(request: Request, env: RuntimeEnv): Promise<Response> {
-  requireAuthConfiguration(env);
-  const body = await readJson<{ email?: string; challengeId?: string; code?: string }>(request);
-  const email = normalizeEmail(body.email);
-  const challengeId = String(body.challengeId ?? "");
-  const code = String(body.code ?? "").replace(/\D/g, "");
-  if (!isEmail(email) || !challengeId || code.length !== 6) {
-    throw new ApiError(400, "invalid_otp", "Codice o indirizzo email non validi.");
-  }
-
-  const challenge = await env.DB.prepare(
-    "SELECT id, email, purpose, subject_id, code_hash, expires_at, attempts, consumed_at FROM auth_challenges WHERE id = ? AND email = ? AND purpose = 'login' LIMIT 1",
-  ).bind(challengeId, email).first<ChallengeRow>();
-  await assertChallenge(env, challenge, code);
-
-  const user = await env.DB.prepare(
-    "SELECT id, email, name, role, island, active FROM users WHERE email = ? AND active = 1 LIMIT 1",
-  ).bind(email).first<UserRow>();
-  if (!user) throw new ApiError(403, "not_authorized", "Utente non autorizzato.");
-
-  const token = randomToken(32);
-  const sessionId = await sha256(token);
-  const now = new Date();
-  const hours = clampNumber(Number(env.SESSION_HOURS || "12"), 1, 48);
-  const expiresAt = new Date(now.getTime() + hours * 60 * 60 * 1000).toISOString();
-  await env.DB.batch([
-    env.DB.prepare("UPDATE auth_challenges SET consumed_at = ? WHERE id = ?").bind(now.toISOString(), challengeId),
-    env.DB.prepare("INSERT INTO sessions (id, user_id, expires_at, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?)")
-      .bind(sessionId, user.id, expiresAt, now.toISOString(), now.toISOString()),
-  ]);
-  await appendAudit(env, request, user.id, "auth.login", "user", user.id, { email: user.email });
-
-  const response = json({ user: publicUser(user) });
   response.headers.append("Set-Cookie", sessionCookie(token, request, hours * 60 * 60));
   return response;
 }
@@ -852,15 +797,18 @@ async function createUser(request: Request, user: UserRow, env: RuntimeEnv): Pro
   const name = cleanText(body.name, 120);
   const role = String(body.role ?? "");
   const island = String(body.island ?? "");
+  const temporaryPassword = String(body.temporaryPassword ?? "");
   if (!isEmail(email) || !name || !isRole(role) || role === "super_admin") {
     throw new ApiError(400, "invalid_user", "Nome, email e ruolo operativo sono obbligatori.");
   }
   if (!isIsland(island)) throw new ApiError(400, "invalid_island", "Assegna una delle cinque isole.");
+  if (temporaryPassword.length < 12 || temporaryPassword.length > 256) throw new ApiError(400, "weak_password", "La password temporanea deve contenere almeno 12 caratteri.");
+  const credentials = await createPasswordHash(temporaryPassword);
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   try {
-    await env.DB.prepare("INSERT INTO users (id, email, name, role, island, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)")
-      .bind(id, email, name, role, island, now, now).run();
+    await env.DB.prepare("INSERT INTO users (id, email, name, role, island, active, password_hash, password_salt, password_iterations, must_change_password, password_changed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, 1, NULL, ?, ?)")
+      .bind(id, email, name, role, island, credentials.hash, credentials.salt, credentials.iterations, now, now).run();
   } catch {
     throw new ApiError(409, "email_exists", "Esiste già un utente con questa email.");
   }

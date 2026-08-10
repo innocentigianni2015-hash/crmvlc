@@ -2,8 +2,8 @@ import type { MetadataRoute } from "next";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: "VLC OS — Vivi le Canarie",
-    short_name: "VLC OS",
+    name: "CRMVLC — CRM Operativo",
+    short_name: "CRMVLC",
     description: "CRM, contratti, sponsor, distribuzione e rete commerciale per le cinque isole.",
     start_url: "/",
     display: "standalone",

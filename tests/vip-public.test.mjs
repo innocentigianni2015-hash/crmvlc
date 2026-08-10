@@ -5,7 +5,7 @@ import { vipCookie, verifyVipToken } from "../worker/vip-public-api.ts";
 test("issues one opaque VIP cookie for both the page and API paths", async () => {
   const header = await vipCookie(
     "member-123",
-    new Request("https://crm.vivilecanarie.es/api/vip/register"),
+    new Request("https://crmvlc.com/api/vip/register"),
     { AUTH_SECRET: "test-secret-with-enough-entropy" },
   );
 

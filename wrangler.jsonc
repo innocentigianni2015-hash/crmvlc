@@ -38,7 +38,7 @@
     "ENVIRONMENT": "production",
     "ADMIN_EMAIL": "innocentigianni@proton.me",
     "ADMIN_NAME": "CRMVLC Super Admin",
-    "EMAIL_FROM": "innocentigianni@proton.me",
+    "EMAIL_FROM": "welcome@crmvlc.com",
     "SESSION_HOURS": "12"
   },
   "observability": {

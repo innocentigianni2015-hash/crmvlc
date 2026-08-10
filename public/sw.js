@@ -1,4 +1,4 @@
-const CACHE_NAME = "vlc-os-shell-v12";
+const CACHE_NAME = "crmvlc-shell-v13";
 const SHELL = ["/", "/vip", "/favicon.svg", "/manifest.webmanifest", "/vip.webmanifest"];
 
 self.addEventListener("install", (event) => {
@@ -15,11 +15,28 @@ self.addEventListener("fetch", (event) => {
   const request = event.request;
   const url = new URL(request.url);
   if (request.method !== "GET" || url.origin !== self.location.origin || url.pathname.startsWith("/api/")) return;
-  event.respondWith(fetch(request).then((response) => {
-    if (response.ok) {
-      const copy = response.clone();
-      event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.put(request, copy)));
+
+  event.respondWith((async () => {
+    try {
+      const response = await fetch(request);
+      if (response.ok) {
+        const copy = response.clone();
+        event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.put(request, copy)));
+      }
+      return response;
+    } catch {
+      const cached = await caches.match(request);
+      if (cached) return cached;
+
+      if (request.mode === "navigate") {
+        const shell = await caches.match(url.pathname.startsWith("/vip") ? "/vip" : "/");
+        if (shell) return shell;
+      }
+
+      return new Response("Servizio temporaneamente non disponibile.", {
+        status: 503,
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      });
     }
-    return response;
-  }).catch(() => caches.match(request).then((cached) => cached || caches.match(url.pathname.startsWith("/vip") ? "/vip" : "/"))));
+  })());
 });

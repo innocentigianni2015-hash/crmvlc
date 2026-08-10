@@ -6,11 +6,11 @@ const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "VLC OS — CRM Operativo",
+  title: "CRMVLC — CRM Operativo",
   description: "Il sistema operativo commerciale di Vivi le Canarie.",
-  applicationName: "VLC OS",
+  applicationName: "CRMVLC",
   manifest: "/manifest.webmanifest",
-  appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "VLC OS" },
+  appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "CRMVLC" },
   other: { "codex-preview": "development" },
 };
 

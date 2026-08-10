@@ -446,7 +446,7 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
   const digest = await sha256(bytes);
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
-  const watermarkText = `VLC OS | ${delivery.island} | ${now} | ${latitude.toFixed(6)},${longitude.toFixed(6)} | ${digest.slice(0, 12)}`;
+  const watermarkText = `CRMVLC | ${delivery.island} | ${now} | ${latitude.toFixed(6)},${longitude.toFixed(6)} | ${digest.slice(0, 12)}`;
   const qualityScore = Math.min(95, Math.max(45, Math.round(45 + Math.log10(Math.max(photo.size, 1)) * 8)));
   const key = `distribution-audit/${delivery.island}/${now.slice(0, 10)}/${id}.${extensionFor(photo.type)}`;
   await env.BUCKET.put(key, bytes, { httpMetadata: { contentType: photo.type, cacheControl: "private, no-store" }, customMetadata: { sha256: digest, watermark: watermarkText, deliveryId } });

@@ -8,9 +8,9 @@ interface __BaseEnv_Env {
 	IMAGES: ImagesBinding;
 	ASSETS: Fetcher;
 	ENVIRONMENT: "production";
-	ADMIN_EMAIL: "";
+	ADMIN_EMAIL: "innocentigianni@proton.me";
 	ADMIN_NAME: "CRMVLC Super Admin";
-	EMAIL_FROM: "";
+	EMAIL_FROM: "innocentigianni@proton.me";
 	SESSION_HOURS: "12";
 }
 declare namespace Cloudflare {

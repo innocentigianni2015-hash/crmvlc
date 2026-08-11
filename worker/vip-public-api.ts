@@ -75,6 +75,7 @@ async function publicDirectory(request: Request, env: RuntimeEnv, ctx: Execution
   const url = new URL(request.url);
   const island = clean(url.searchParams.get("island"), 40);
   const category = clean(url.searchParams.get("category"), 80);
+  const locale = normalizeLocale(url.searchParams.get("locale"));
   if (island && !isIsland(island)) throw new VipApiError(400, "invalid_island", "Isola non valida.");
 
   const clauses = ["status = 'active'"];
@@ -93,7 +94,7 @@ async function publicDirectory(request: Request, env: RuntimeEnv, ctx: Execution
     categories,
     islands: ISLANDS,
     member: member ? publicMember(member) : null,
-    prize: { eyebrow: "Premio del mese", title: "Vivi l'isola da protagonista", description: "Usa i coupon VIP e mantieni attiva la tua streak mensile." },
+    prize: vipPrize(locale),
     instagram: { handle: "@vivi_le_canarie", url: "https://www.instagram.com/vivi_le_canarie/" },
     whatsappConfigured: isWhatsAppConfigured(env),
   });
@@ -374,6 +375,16 @@ function normalizePhone(value: unknown): string {
 
 function isIsland(value: string): value is typeof ISLANDS[number] {
   return ISLANDS.includes(value as typeof ISLANDS[number]);
+}
+
+function normalizeLocale(value: unknown): "es" | "it" | "en" {
+  return value === "it" || value === "en" ? value : "es";
+}
+
+function vipPrize(locale: "es" | "it" | "en") {
+  if (locale === "it") return { eyebrow: "Premio del mese", title: "Vivi l'isola da protagonista", description: "Usa i coupon VIP e mantieni attiva la tua streak mensile." };
+  if (locale === "en") return { eyebrow: "Prize of the month", title: "Experience the island as a protagonist", description: "Use VIP coupons and keep your monthly streak active." };
+  return { eyebrow: "Premio del mes", title: "Vive la isla como protagonista", description: "Usa los cupones VIP y mantén activa tu racha mensual." };
 }
 
 function secureCode(): string {

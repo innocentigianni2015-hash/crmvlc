@@ -3,7 +3,7 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { loadOfflineSnapshot, prepareDeliveryPhoto, queuePhotoAudit, saveOfflineSnapshot } from "./offline";
 
-type Role = "super_admin" | "sales_manager" | "sales" | "distributor";
+type Role = "super_admin" | "admin" | "sales_manager" | "sales" | "distributor";
 type User = { id: string; name: string; role: Role; island: string | null };
 type Client = { id: string; company_name: string; island: string };
 type Delivery = { id: string; client_company?: string; island: string; status: string };
@@ -221,7 +221,7 @@ function Overview({ data, user }: { data: Snapshot; user: User }) {
 }
 
 function VipPanel({ data, user, clients, busy, run }: PanelProps & { clients: Client[] }) {
-  const canManage = ["super_admin", "sales_manager"].includes(user.role);
+  const canManage = ["super_admin", "admin", "sales_manager"].includes(user.role);
   return <div className="hub-stack">
     <div className="hub-three">
       {canManage && <ActionCard index="01" title="Nuovo sponsor" text="Directory, vantaggio e PIN di redemption.">
@@ -289,7 +289,7 @@ function FinancePanel({ data, user, busy, run }: PanelProps) {
 }
 
 function InventoryPanel({ data, user, busy, run }: PanelProps) {
-  const canManage = ["super_admin", "sales_manager"].includes(user.role);
+  const canManage = ["super_admin", "admin", "sales_manager"].includes(user.role);
   return <div className="hub-stack">
     {canManage && <ActionCard index="01" title="Nuovo spazio editoriale" text="Inventario per numero, isola e formato.">
       <form className="wide-form" onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const fd = new FormData(form); void run(() => post("/api/operations/inventory", Object.fromEntries(fd)), "Spazio creato.", form); }}>
@@ -302,7 +302,7 @@ function InventoryPanel({ data, user, busy, run }: PanelProps) {
 }
 
 function GeoAuditPanel({ data, user, clients, deliveries, busy, run, submitPhotoAudit }: PanelProps & { clients: Client[]; deliveries: Delivery[]; submitPhotoAudit: (event: FormEvent<HTMLFormElement>) => void }) {
-  const canManage = ["super_admin", "sales_manager"].includes(user.role);
+  const canManage = ["super_admin", "admin", "sales_manager"].includes(user.role);
   return <div className="hub-stack">
     <div className="hub-two">
       {canManage && <ActionCard index="01" title="Punto distribuzione" text="Coordinate, capacità, stock e visibilità pubblica.">
@@ -327,7 +327,7 @@ function GeoAuditPanel({ data, user, clients, deliveries, busy, run, submitPhoto
 }
 
 function SalesPanel({ data, user, users, clients, busy, run }: PanelProps & { users: User[]; clients: Client[] }) {
-  const canManage = ["super_admin", "sales_manager"].includes(user.role);
+  const canManage = ["super_admin", "admin", "sales_manager"].includes(user.role);
   const salesUsers = users.filter((item) => ["sales", "sales_manager"].includes(item.role));
   return <div className="hub-stack">
     <div className="hub-two">
@@ -372,7 +372,7 @@ function Progress({ label, value }: { label: string; value: number }) {
 }
 
 function IslandSelect({ user }: { user: User }) {
-  if (user.role !== "super_admin") return <input type="hidden" name="island" value={user.island ?? ""} />;
+  if (!["super_admin", "admin"].includes(user.role)) return <input type="hidden" name="island" value={user.island ?? ""} />;
   return <select name="island" required><option value="">Seleziona isola</option>{ISLANDS.map((island) => <option key={island}>{island}</option>)}</select>;
 }
 

@@ -5,6 +5,7 @@ const FAQ_CONTEXT_LIMIT = 6;
 const AI_RATE_LIMIT_PER_HOUR = 60;
 
 export type HelpRole = "super_admin" | "admin" | "sales_manager" | "sales" | "distributor";
+type HelpLanguage = "es" | "it" | "en";
 
 export type HelpUser = {
   id: string;
@@ -31,7 +32,7 @@ type AuditWriter = (
 type FaqRow = {
   id: string;
   translation_group_id: string;
-  language: "it" | "es";
+  language: HelpLanguage;
   module_key: string;
   title: string;
   question: string;
@@ -64,6 +65,7 @@ const ROLE_KEYS = new Set<HelpRole>(["super_admin", "admin", "sales_manager", "s
 const STOP_WORDS = new Set([
   "alla", "alle", "anche", "come", "con", "cosa", "dalla", "delle", "degli", "dove", "fare", "nella", "nelle", "per", "posso", "quale", "sono", "sulla", "tutto",
   "como", "con", "cual", "desde", "donde", "hacer", "las", "los", "para", "puedo", "que", "son", "todo", "una", "del",
+  "also", "and", "are", "can", "do", "from", "how", "the", "this", "what", "where", "with", "you", "your",
 ]);
 
 class HelpError extends Error {
@@ -150,16 +152,16 @@ export async function handleHelpApi(
 async function askAssistant(request: Request, env: HelpEnv, user: HelpUser, writeAudit: AuditWriter): Promise<Response> {
   const body = await readJson(request);
   const question = cleanText(body.question, 1_200);
-  const language = body.language === "es" ? "es" : "it";
+  const language = normalizeLanguage(body.language);
   const moduleKey = validModule(body.moduleKey);
-  if (question.length < 3) throw new HelpError(400, "question_required", language === "es" ? "Escribe una pregunta más completa." : "Scrivi una domanda più completa.");
+  if (question.length < 3) throw new HelpError(400, "question_required", localized(language, { es: "Escribe una pregunta más completa.", it: "Scrivi una domanda più completa.", en: "Please enter a more complete question." }));
 
   const hourAgo = new Date(Date.now() - 60 * 60 * 1_000).toISOString();
   const recent = await env.DB.prepare(
     "SELECT COUNT(*) AS total FROM ai_interactions WHERE user_id = ? AND created_at >= ?",
   ).bind(user.id, hourAgo).first<{ total: number }>();
   if (Number(recent?.total ?? 0) >= AI_RATE_LIMIT_PER_HOUR) {
-    throw new HelpError(429, "rate_limited", language === "es" ? "Has alcanzado el límite horario. Inténtalo de nuevo más tarde." : "Hai raggiunto il limite orario. Riprova più tardi.");
+    throw new HelpError(429, "rate_limited", localized(language, { es: "Has alcanzado el límite horario. Inténtalo de nuevo más tarde.", it: "Hai raggiunto il limite orario. Riprova più tardi.", en: "You have reached the hourly limit. Please try again later." }));
   }
 
   const rows = (await env.DB.prepare(
@@ -187,15 +189,17 @@ async function askAssistant(request: Request, env: HelpEnv, user: HelpUser, writ
     `Domanda approvata: ${row.question}`,
     `Procedura approvata: ${row.answer.slice(0, 2_000)}`,
   ].join("\n")).join("\n\n");
-  const system = language === "es"
-    ? "Eres el asistente interno de CRMVLC. Responde solo con las fuentes aprobadas proporcionadas. No inventes pasos, permisos, datos ni funciones. No ejecutes acciones. Si las fuentes no bastan, usa confidence=low. Respeta el rol del usuario y no describas procedimientos que no puede ejecutar. Devuelve solo JSON válido con answer, confidence (high o low) y sourceIds."
-    : "Sei l’assistente interno di CRMVLC. Rispondi soltanto con le fonti approvate fornite. Non inventare passaggi, permessi, dati o funzioni. Non eseguire azioni. Se le fonti non bastano, usa confidence=low. Rispetta il ruolo dell’utente e non descrivere procedure che non può eseguire. Restituisci solo JSON valido con answer, confidence (high o low) e sourceIds.";
+  const system = localized(language, {
+    es: "Eres el asistente interno de CRMVLC. Responde solo con las fuentes aprobadas proporcionadas. No inventes pasos, permisos, datos ni funciones. No ejecutes acciones. Si las fuentes no bastan, usa confidence=low. Respeta el rol del usuario y no describas procedimientos que no puede ejecutar. Devuelve solo JSON válido con answer, confidence (high o low) y sourceIds.",
+    it: "Sei l’assistente interno di CRMVLC. Rispondi soltanto con le fonti approvate fornite. Non inventare passaggi, permessi, dati o funzioni. Non eseguire azioni. Se le fonti non bastano, usa confidence=low. Rispetta il ruolo dell’utente e non descrivere procedure che non può eseguire. Restituisci solo JSON valido con answer, confidence (high o low) e sourceIds.",
+    en: "You are CRMVLC's internal assistant. Answer only from the approved sources provided. Do not invent steps, permissions, data or features, and do not perform actions. If the sources are insufficient, use confidence=low. Respect the user's role and do not describe procedures they cannot perform. Return only valid JSON containing answer, confidence (high or low), and sourceIds.",
+  });
 
   try {
     const result = await env.AI.run(model, {
       messages: [
         { role: "system", content: system },
-        { role: "user", content: `Ruolo/rol: ${user.role}\nModulo/módulo: ${moduleKey}\n\nFONTI/FUENTES:\n${contextText}\n\nDOMANDA/PREGUNTA:\n${question}` },
+        { role: "user", content: `Role: ${user.role}\nModule: ${moduleKey}\n\nAPPROVED SOURCES:\n${contextText}\n\nQUESTION:\n${question}` },
       ],
       max_tokens: 350,
       temperature: 0.1,
@@ -238,7 +242,7 @@ async function escalateQuestion(
   writeAudit: AuditWriter,
   input: {
     question: string;
-    language: "it" | "es";
+    language: HelpLanguage;
     moduleKey: string;
     reason: string;
     status?: "escalated" | "budget_blocked";
@@ -252,9 +256,11 @@ async function escalateQuestion(
   const interactionId = input.interactionId ?? crypto.randomUUID();
   const ticketId = crypto.randomUUID();
   const now = new Date().toISOString();
-  const answer = input.language === "es"
-    ? "No tengo una respuesta aprobada suficientemente segura. He enviado la pregunta a la cola de Administradores."
-    : "Non ho una risposta approvata abbastanza sicura. Ho inviato la domanda alla coda degli Admin.";
+  const answer = localized(input.language, {
+    es: "No tengo una respuesta aprobada suficientemente segura. He enviado la pregunta a la cola de Administradores.",
+    it: "Non ho una risposta approvata abbastanza sicura. Ho inviato la domanda alla coda degli Admin.",
+    en: "I do not have a sufficiently reliable approved answer. I have sent the question to the Admin queue.",
+  });
   await env.DB.batch([
     env.DB.prepare(
       "INSERT OR IGNORE INTO ai_interactions (id, user_id, role, island, language, module_key, question, answer, status, sources_json, model, prompt_tokens, completion_tokens, estimated_cost_micro_usd, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?)",
@@ -270,7 +276,7 @@ async function escalateQuestion(
 async function createFaqDraft(request: Request, env: HelpEnv, user: HelpUser, writeAudit: AuditWriter): Promise<Response> {
   requireAdmin(user);
   const body = await readJson(request);
-  const language = body.language === "es" ? "es" : "it";
+  const language = normalizeLanguage(body.language);
   const moduleKey = validModule(body.moduleKey);
   const title = requiredText(body.title, 140, "Inserisci il titolo della FAQ.");
   const question = requiredText(body.question, 500, "Inserisci la domanda della FAQ.");
@@ -322,7 +328,7 @@ async function updateFaq(request: Request, faqId: string, env: HelpEnv, user: He
   }
 
   if (faq.status !== "draft") throw new HelpError(409, "faq_immutable", "Una FAQ pubblicata è immutabile: crea una nuova versione.");
-  const language = body.language === "es" ? "es" : body.language === "it" ? "it" : faq.language;
+  const language = body.language === undefined ? faq.language : normalizeLanguage(body.language);
   const moduleKey = body.moduleKey === undefined ? faq.module_key : validModule(body.moduleKey);
   const title = body.title === undefined ? faq.title : requiredText(body.title, 140, "Inserisci il titolo della FAQ.");
   const question = body.question === undefined ? faq.question : requiredText(body.question, 500, "Inserisci la domanda della FAQ.");
@@ -483,6 +489,14 @@ function canaryMonthKey(): string {
 
 function cleanText(value: unknown, maxLength: number): string {
   return String(value ?? "").trim().replace(/\s+/g, " ").slice(0, maxLength);
+}
+
+function normalizeLanguage(value: unknown): HelpLanguage {
+  return value === "it" || value === "en" ? value : "es";
+}
+
+function localized(language: HelpLanguage, values: Record<HelpLanguage, string>): string {
+  return values[language];
 }
 
 function requiredText(value: unknown, maxLength: number, message: string): string {

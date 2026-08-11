@@ -2,6 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { loadOfflineSnapshot, prepareDeliveryPhoto, queuePhotoAudit, saveOfflineSnapshot } from "./offline";
+import { localeTag } from "./i18n";
 
 type Role = "super_admin" | "admin" | "sales_manager" | "sales" | "distributor";
 type User = { id: string; name: string; role: Role; island: string | null };
@@ -55,12 +56,12 @@ async function post(path: string, value: Record<string, unknown>) {
 }
 
 function euros(cents: number) {
-  return new Intl.NumberFormat("it-IT", { style: "currency", currency: "EUR" }).format(cents / 100);
+  return new Intl.NumberFormat(localeTag(), { style: "currency", currency: "EUR" }).format(cents / 100);
 }
 
 function when(value: unknown) {
   if (!value) return "—";
-  return new Intl.DateTimeFormat("it-IT", { dateStyle: "short", timeStyle: "short" }).format(new Date(String(value)));
+  return new Intl.DateTimeFormat(localeTag(), { dateStyle: "short", timeStyle: "short" }).format(new Date(String(value)));
 }
 
 export function OperationsHub({ user, clients, users, deliveries, notify }: {

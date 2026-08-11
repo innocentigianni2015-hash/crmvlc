@@ -5,13 +5,14 @@ import QRCode from "qrcode";
 import { OperationsHub } from "./operations-hub";
 import { clearOfflineSnapshots, loadOfflineSnapshot, pendingOutboxCount, saveOfflineSnapshot, syncPhotoAuditOutbox } from "./offline";
 import { HelpAssistantDrawer, HelpBootstrap, HelpPage } from "./help-assistant";
+import { LanguageSelector, localeTag, platformOwnership, UiLocale, usePlatformLanguage } from "./i18n";
 
 type Role = "super_admin" | "admin" | "sales_manager" | "sales" | "distributor";
 type ActiveModule = "crm" | "operations" | "pricing" | "quotes" | "contracts" | "distribution" | "admin" | "audit" | "podcast" | "help";
 type InstallPromptEvent = Event & { prompt(): Promise<void>; userChoice: Promise<{ outcome: "accepted" | "dismissed" }> };
 const BACKGROUND_LOCK_MS = 60 * 60 * 1000;
 const BACKGROUND_AT_KEY = "crmvlc:backgrounded-at";
-type User = { id: string; email: string; name: string; phone: string | null; role: Role; island: string | null; sales_manager_id?: string | null; sales_manager_name?: string | null; active?: number };
+type User = { id: string; email: string; name: string; phone: string | null; role: Role; island: string | null; language: UiLocale; sales_manager_id?: string | null; sales_manager_name?: string | null; active?: number };
 type Client = {
   id: string; company_name: string; contact_name: string; email: string; phone: string | null;
   island: string; stage: string; value_cents: number; owner_user_id: string; owner_name?: string;
@@ -103,16 +104,16 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 function money(cents: number) {
-  return new Intl.NumberFormat("it-IT", { style: "currency", currency: "EUR", maximumFractionDigits: 2 }).format(cents / 100);
+  return new Intl.NumberFormat(localeTag(), { style: "currency", currency: "EUR", maximumFractionDigits: 2 }).format(cents / 100);
 }
 
 function dateTime(value: string | null) {
   if (!value) return "—";
-  return new Intl.DateTimeFormat("it-IT", { dateStyle: "short", timeStyle: "short" }).format(new Date(value));
+  return new Intl.DateTimeFormat(localeTag(), { dateStyle: "short", timeStyle: "short" }).format(new Date(value));
 }
 
 function dateOnly(value: string) {
-  return new Intl.DateTimeFormat("it-IT", { dateStyle: "short", timeZone: "UTC" }).format(new Date(`${value}T00:00:00Z`));
+  return new Intl.DateTimeFormat(localeTag(), { dateStyle: "short", timeZone: "UTC" }).format(new Date(`${value}T00:00:00Z`));
 }
 
 function canaryParts(value: string) {
@@ -128,10 +129,11 @@ function canaryToday() {
 }
 
 function canaryDateTime(value: string) {
-  return new Intl.DateTimeFormat("it-IT", { dateStyle: "short", timeStyle: "short", timeZone: "Atlantic/Canary" }).format(new Date(value));
+  return new Intl.DateTimeFormat(localeTag(), { dateStyle: "short", timeStyle: "short", timeZone: "Atlantic/Canary" }).format(new Date(value));
 }
 
 export default function Home() {
+  const { locale, setLocale } = usePlatformLanguage();
   const [data, setData] = useState<Bootstrap | null>(null);
   const [loading, setLoading] = useState(true);
   const [authRequired, setAuthRequired] = useState(false);
@@ -176,6 +178,7 @@ export default function Home() {
     }
     try {
       const result = await api<Bootstrap>("/api/bootstrap");
+      setLocale(result.user.language ?? "es");
       setData(result);
       await saveOfflineSnapshot("bootstrap", result.user.id, result);
       if (result.user.role === "distributor") setActive("distribution");
@@ -204,7 +207,7 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [setLocale]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void refresh(); }, 0);
@@ -381,6 +384,20 @@ export default function Home() {
       : "Apri il menu del browser e scegli “Installa app” o “Aggiungi alla schermata Home”.");
   }
 
+  async function saveLanguage(next: UiLocale) {
+    if (offlineMode) return;
+    try {
+      await api("/api/profile", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ language: next }),
+      });
+      setData((current) => current ? { ...current, user: { ...current.user, language: next } } : current);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Aggiornamento della lingua non riuscito.", "error");
+    }
+  }
+
   async function impersonationStarted(role: "sales" | "distributor") {
     await clearOfflineSnapshots();
     setImpersonationModal(null);
@@ -461,7 +478,7 @@ export default function Home() {
       <main className="ops-main">
         <header className="ops-topbar">
           <div className="ops-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Cerca clienti, preventivi, contratti o consegne…" aria-label="Cerca" /></div>
-          <div className="ops-user"><a className="whatsapp-button" href={WHATSAPP_URL} target="_blank" rel="noopener noreferrer" aria-label="Apri WhatsApp con CRMVLC">WA<span>WhatsApp</span></a>{!standalone && <button className="install-button" onClick={() => void installApp()}>Installa</button>}<button className="profile-trigger" onClick={() => setProfileModal(true)} aria-label="Modifica il profilo"><span>{initials(data.user.name)}</span><div><strong>{data.user.name}</strong><small>{roleLabels[data.user.role]}{data.user.island ? ` · ${data.user.island}` : ""}</small></div></button><button onClick={logout}>Esci</button></div>
+          <div className="ops-user"><LanguageSelector compact onSelect={saveLanguage} /><a className="whatsapp-button" href={WHATSAPP_URL} target="_blank" rel="noopener noreferrer" aria-label="Apri WhatsApp con CRMVLC">WA<span>WhatsApp</span></a>{!standalone && <button className="install-button" onClick={() => void installApp()}>Installa</button>}<button className="profile-trigger" onClick={() => setProfileModal(true)} aria-label="Modifica il profilo"><span>{initials(data.user.name)}</span><div><strong>{data.user.name}</strong><small>{roleLabels[data.user.role]}{data.user.island ? ` · ${data.user.island}` : ""}</small></div></button><button onClick={logout}>Esci</button></div>
         </header>
         {data.impersonation && <div className="impersonation-strip"><div><strong>Modalità operativa · {roleLabels[data.user.role]}</strong><span>Stai lavorando come {data.user.name}. Le modifiche sono reali e l’audit registra anche {sessionActor.name}.</span></div><button onClick={() => void stopImpersonation()}>Torna Super Admin</button></div>}
         {(offlineMode || pendingCount > 0) && <div className={`connectivity-strip ${offlineMode ? "offline" : "pending"}`}><strong>{offlineMode ? "Modalità offline" : "Sincronizzazione"}</strong><span>{offlineMode ? `Dati salvati ${offlineSavedAt ? dateTime(new Date(offlineSavedAt).toISOString()) : "sul dispositivo"} · contratti e amministrazione richiedono la rete.` : `${pendingCount} acquisizion${pendingCount === 1 ? "e in attesa" : "i in attesa"} di invio.`}</span></div>}
@@ -505,6 +522,7 @@ export default function Home() {
         {active === "audit" && data.user.role === "super_admin" && <AuditPanel events={data.audit} emails={data.emailOutbox} refresh={refresh} notify={notify} />}
         {active === "podcast" && data.user.role !== "distributor" && <PodcastCalendar data={data} refresh={refresh} notify={notify} />}
         {active === "help" && <HelpPage user={data.user} help={helpData} offline={offlineMode} refresh={refresh} notify={notify} onNavigate={navigateFromHelp} />}
+        <footer className="platform-owner">{platformOwnership(locale)}</footer>
       </main>
 
       {clientModal && <ClientModal data={data} onClose={() => setClientModal(false)} onSaved={async () => { setClientModal(false); notify("Cliente creato."); await refresh(); }} />}
@@ -529,6 +547,7 @@ export default function Home() {
 }
 
 function Login({ onAuthenticated, initialNotice }: { onAuthenticated: () => Promise<void>; initialNotice?: { tone: "ok" | "error"; text: string } | null }) {
+  const { locale } = usePlatformLanguage();
   type NextStep = { authenticated?: boolean; next?: "change_password" | "totp_setup" | "totp"; token?: string };
   const [mode, setMode] = useState<"login" | "change" | "totp_setup" | "totp" | "forgot" | "reset">("login");
   const [email, setEmail] = useState("");
@@ -638,7 +657,7 @@ function Login({ onAuthenticated, initialNotice }: { onAuthenticated: () => Prom
 
   const passwordFields = <><label>Nuova password<input type="password" required minLength={12} maxLength={256} autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} /></label><label>Conferma password<input type="password" required minLength={12} maxLength={256} autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} /></label></>;
 
-  return <main className="auth-screen"><section className="auth-visual"><div className="auth-brand"><img src={BRAND_LOGO} alt="ViV! Le Canarie" /><div><strong>CRMVLC</strong><span>CRM & contratti</span></div></div><div className="auth-promise"><small>CRM OPERATIVO · CINQUE ISOLE</small><h1>Il lavoro commerciale, in un unico posto.</h1><p>Clienti, pipeline, preventivi, contratti, consegne e podcast: dati reali, permessi per ruolo e operatività pensata per il cellulare.</p><div className="auth-trust"><span><b>01</b> Dati per ruolo</span><span><b>02</b> Contratti con audit</span><span><b>03</b> PWA installabile</span></div></div><div className="auth-islands">{ISLANDS.map((island) => <span key={island}>{island}</span>)}</div></section><section className="auth-panel"><div className="auth-box"><div className="auth-mobile-brand"><img src={BRAND_LOGO} alt="ViV! Le Canarie" /><div><strong>CRMVLC</strong><small>Area operativa</small></div></div><span className="secure-label">● Accesso protetto</span><h2>{mode === "login" ? "Bentornato" : mode === "forgot" ? "Recupera password" : mode === "reset" ? "Imposta password" : mode === "change" ? "Cambia la password temporanea" : mode === "totp_setup" ? "Configura l’autenticatore" : "Codice autenticatore"}</h2><p>{mode === "totp_setup" ? "Scansiona il QR con Google Authenticator, Microsoft Authenticator o un’app compatibile." : mode === "totp" ? "Inserisci il codice a 6 cifre generato dall’app autenticatore." : "Accedi alla tua area di lavoro CRMVLC."}</p>
+  return <main className="auth-screen"><section className="auth-visual"><div className="auth-brand"><img src={BRAND_LOGO} alt="ViV! Le Canarie" /><div><strong>CRMVLC</strong><span>CRM & contratti</span></div></div><div className="auth-promise"><small>CRM OPERATIVO · CINQUE ISOLE</small><h1>Il lavoro commerciale, in un unico posto.</h1><p>Clienti, pipeline, preventivi, contratti, consegne e podcast: dati reali, permessi per ruolo e operatività pensata per il cellulare.</p><div className="auth-trust"><span><b>01</b> Dati per ruolo</span><span><b>02</b> Contratti con audit</span><span><b>03</b> PWA installabile</span></div></div><div className="auth-islands">{ISLANDS.map((island) => <span key={island}>{island}</span>)}</div><small className="auth-owner">{platformOwnership(locale)}</small></section><section className="auth-panel"><div className="auth-box"><LanguageSelector /><div className="auth-mobile-brand"><img src={BRAND_LOGO} alt="ViV! Le Canarie" /><div><strong>CRMVLC</strong><small>Area operativa</small></div></div><span className="secure-label">● Accesso protetto</span><h2>{mode === "login" ? "Bentornato" : mode === "forgot" ? "Recupera password" : mode === "reset" ? "Imposta password" : mode === "change" ? "Cambia la password temporanea" : mode === "totp_setup" ? "Configura l’autenticatore" : "Codice autenticatore"}</h2><p>{mode === "totp_setup" ? "Scansiona il QR con Google Authenticator, Microsoft Authenticator o un’app compatibile." : mode === "totp" ? "Inserisci il codice a 6 cifre generato dall’app autenticatore." : "Accedi alla tua area di lavoro CRMVLC."}</p>
     {mode === "login" && <form onSubmit={login}><label>Email aziendale<input type="email" required autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} /></label><label>Password<input type="password" required maxLength={256} autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label><button className="primary wide" disabled={busy}>{busy ? "Accesso…" : "Accedi"}</button><button type="button" className="link-button" onClick={() => { setMode("forgot"); setError(""); setMessage(""); }}>Imposta o recupera password</button></form>}
     {mode === "forgot" && <form onSubmit={forgotPassword}><label>Email aziendale<input type="email" required autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label><button className="primary wide" disabled={busy}>{busy ? "Invio…" : "Invia collegamento"}</button><button type="button" className="link-button" onClick={() => setMode("login")}>Torna all’accesso</button></form>}
     {mode === "reset" && <form onSubmit={resetPassword}>{passwordFields}<button className="primary wide" disabled={busy}>{busy ? "Salvataggio…" : "Imposta password"}</button></form>}
@@ -766,7 +785,7 @@ function PriceListPanel({ data, search, refresh, notify, preferredCampaignId, on
     .filter((group) => group.items.length);
 
   return <section className="ops-page pricing-page">
-    <PageHeading eyebrow="Vendita pubblicitaria" title="Listino" subtitle="Dodici formati mensili, prezzi netti e IGIC calcolato separatamente per tutte le isole." action={<span className="admin-badge">v{priceList.version} · {priceList.tax_name} {(priceList.tax_rate_bps / 100).toLocaleString("it-IT")}%</span>} />
+    <PageHeading eyebrow="Vendita pubblicitaria" title="Listino" subtitle="Dodici formati mensili, prezzi netti e IGIC calcolato separatamente per tutte le isole." action={<span className="admin-badge">v{priceList.version} · {priceList.tax_name} {(priceList.tax_rate_bps / 100).toLocaleString(localeTag())}%</span>} />
     {data.user.role === "super_admin" && <DiscountCampaignAdmin campaigns={data.discountCampaigns ?? []} refresh={refresh} notify={notify} />}
     <div className="pricing-layout">
       <div className="pricing-catalog">
@@ -862,7 +881,7 @@ function PodcastCalendar({ data, refresh, notify }: { data: Bootstrap; refresh: 
   const [year, monthNumber] = month.split("-").map(Number);
   const daysInMonth = new Date(Date.UTC(year, monthNumber, 0)).getUTCDate();
   const leadingDays = (new Date(Date.UTC(year, monthNumber - 1, 1)).getUTCDay() + 6) % 7;
-  const monthLabel = new Intl.DateTimeFormat("it-IT", { month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${month}-01T12:00:00Z`));
+  const monthLabel = new Intl.DateTimeFormat(localeTag(), { month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${month}-01T12:00:00Z`));
   const monthAppointments = appointments.filter((item) => canaryParts(item.starts_at).date.startsWith(month));
   const upcoming = appointments.filter((item) => item.status === "scheduled" && Date.parse(item.ends_at) >= Date.now()).sort((a, b) => a.starts_at.localeCompare(b.starts_at));
 
@@ -1004,7 +1023,7 @@ function ContractModal({ data, onClose, onSaved }: { data: Bootstrap; onClose: (
     try { await api("/api/contracts", { method: "POST", body: new FormData(event.currentTarget) }); await onSaved(); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "Caricamento non riuscito."); setBusy(false); }
   }
-  return <Modal title="Nuovo contratto" subtitle="Carica il PDF definitivo da sottoporre alla firma." onClose={onClose}><form className="form-grid" onSubmit={submit}><label className="span-2">Cliente<select name="clientId" required>{data.clients.map((client) => <option key={client.id} value={client.id}>{client.company_name} · {client.island}</option>)}</select></label><label className="span-2">Titolo contratto<input name="title" required maxLength={160} placeholder="Contratto sponsor annuale" /></label><label>Modello usato<select name="templateId"><option value="">Nessun modello associato</option>{data.templates.map((template) => <option key={template.id} value={template.id}>{template.name} · v{template.version}</option>)}</select></label><label>PDF compilato<input name="file" type="file" accept="application/pdf" required /></label><p className="form-hint span-2">Massimo 2,8 MB per garantire l’invio della copia firmata via email. Dopo la firma il documento non potrà essere sostituito.</p>{error && <div className="form-error span-2">{error}</div>}<div className="modal-actions span-2"><button type="button" onClick={onClose}>Annulla</button><button className="primary" disabled={busy}>{busy ? "Archiviazione…" : "Crea bozza"}</button></div></form></Modal>;
+  return <Modal title="Nuovo contratto" subtitle="Carica il PDF definitivo da sottoporre alla firma." onClose={onClose}><form className="form-grid" onSubmit={submit}><label className="span-2">Cliente<select name="clientId" required>{data.clients.map((client) => <option key={client.id} value={client.id}>{client.company_name} · {client.island}</option>)}</select></label><label className="span-2">Titolo contratto<input name="title" required maxLength={160} placeholder="Contrato anual de patrocinio" /></label><label>Modello usato<select name="templateId"><option value="">Nessun modello associato</option>{data.templates.map((template) => <option key={template.id} value={template.id}>{template.name} · v{template.version}</option>)}</select></label><label>PDF compilato<input name="file" type="file" accept="application/pdf" required /></label><label className="confirmation span-2 document-language-confirmation"><input type="checkbox" name="documentLanguage" value="es" required /><span><strong>Documento esclusivamente in spagnolo</strong>Confermo che tutto il contenuto del PDF è redatto in spagnolo.</span></label><p className="form-hint span-2">Massimo 2,8 MB per garantire l’invio della copia firmata via email. Dopo la firma il documento non potrà essere sostituito.</p>{error && <div className="form-error span-2">{error}</div>}<div className="modal-actions span-2"><button type="button" onClick={onClose}>Annulla</button><button className="primary" disabled={busy}>{busy ? "Archiviazione…" : "Crea bozza"}</button></div></form></Modal>;
 }
 
 function SignatureModal({ contract, onClose, onSaved }: { contract: Contract; onClose: () => void; onSaved: () => Promise<void> }) {
@@ -1024,7 +1043,7 @@ function SignatureModal({ contract, onClose, onSaved }: { contract: Contract; on
 function SupersedeModal({ contract, onClose, onSaved }: { contract: Contract; onClose: () => void; onSaved: () => Promise<void> }) {
   const [busy, setBusy] = useState(false); const [error, setError] = useState("");
   async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setBusy(true); setError(""); try { await api(`/api/contracts/${contract.id}/supersede`, { method: "POST", body: new FormData(event.currentTarget) }); await onSaved(); } catch (cause) { setError(cause instanceof Error ? cause.message : "Operazione non riuscita."); setBusy(false); } }
-  return <Modal title="Annulla e crea nuova versione" subtitle="Il contratto firmato resterà conservato e marcato come annullato." onClose={onClose}><form className="form-grid" onSubmit={submit}><label className="span-2">Motivazione obbligatoria<textarea name="reason" required rows={3} maxLength={500} /></label><label className="span-2">Titolo nuova versione<input name="title" defaultValue={contract.title} required /></label><label className="span-2">Nuovo PDF<input type="file" name="file" accept="application/pdf" required /></label>{error && <div className="form-error span-2">{error}</div>}<div className="modal-actions span-2"><button type="button" onClick={onClose}>Annulla</button><button className="danger-solid" disabled={busy}>{busy ? "Creazione…" : "Annulla e crea versione"}</button></div></form></Modal>;
+  return <Modal title="Annulla e crea nuova versione" subtitle="Il contratto firmato resterà conservato e marcato come annullato." onClose={onClose}><form className="form-grid" onSubmit={submit}><label className="span-2">Motivazione obbligatoria<textarea name="reason" required rows={3} maxLength={500} /></label><label className="span-2">Titolo nuova versione<input name="title" defaultValue={contract.title} required /></label><label className="span-2">Nuovo PDF<input type="file" name="file" accept="application/pdf" required /></label><label className="confirmation span-2 document-language-confirmation"><input type="checkbox" name="documentLanguage" value="es" required /><span><strong>Documento esclusivamente in spagnolo</strong>Confermo che tutto il contenuto del nuovo PDF è redatto in spagnolo.</span></label>{error && <div className="form-error span-2">{error}</div>}<div className="modal-actions span-2"><button type="button" onClick={onClose}>Annulla</button><button className="danger-solid" disabled={busy}>{busy ? "Creazione…" : "Annulla e crea versione"}</button></div></form></Modal>;
 }
 
 function DistributionPanel({ data, deliveries, onCreate, onEdit }: { data: Bootstrap; deliveries: Delivery[]; onCreate: () => void; onEdit: (delivery: Delivery) => void }) {
@@ -1195,11 +1214,12 @@ function AdminPanel({ data, refresh, notify }: { data: Bootstrap; refresh: () =>
           <label>Email aziendale<input name="email" type="email" required /></label>
           <label>Password temporanea<input name="temporaryPassword" type="password" required minLength={12} maxLength={256} autoComplete="new-password" /><small>Almeno 12 caratteri. Al primo accesso dovrà essere cambiata.</small></label>
           <div className="two-cols"><label>Ruolo<select name="role" value={newRole} onChange={(event) => setNewRole(event.target.value as Role)}>{creatableRoles.map((role) => <option key={role} value={role}>{roleLabels[role]}</option>)}</select></label>{newRole !== "admin" && <label>Isola<select name="island" value={newIsland} onChange={(event) => setNewIsland(event.target.value)}>{ISLANDS.map((island) => <option key={island}>{island}</option>)}</select></label>}</div>
+          <label>Lingua iniziale<select name="language" defaultValue="es"><option value="es">Español</option><option value="it">Italiano</option><option value="en">English</option></select><small>L’utente potrà cambiarla dal proprio profilo.</small></label>
           {newRole === "sales" && <label>Sales Manager<select name="salesManagerId"><option value="">Nessuno · solo Admin e Super Admin</option>{newUserManagers.map((manager) => <option key={manager.id} value={manager.id}>{manager.name} · {manager.island}</option>)}</select><small>Il Sales resta operativo anche senza manager, ma nessun Sales Manager vedrà i suoi clienti.</small></label>}
           <button className="primary" disabled={userBusy}>{userBusy ? "Creazione…" : "Crea utente"}</button>
         </form>
       </article>
-      {superAdmin ? <article className="data-card"><div className="card-head"><div><h2>Carica modello</h2><p>PDF o DOCX, massimo 8 MB.</p></div></div><form className="stack-form" onSubmit={uploadTemplate}><label>Nome modello<input name="name" required placeholder="Contratto sponsor" /></label><label>Versione<input name="version" required defaultValue="1.0" /></label><label>Documento<input name="file" type="file" accept="application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required /></label><button className="primary" disabled={templateBusy}>{templateBusy ? "Caricamento…" : "Archivia modello"}</button></form></article> : <article className="data-card permission-card"><div className="card-head"><div><h2>Permessi Admin operativo</h2><p>Gestione quotidiana senza accesso alle configurazioni sensibili.</p></div></div><ul><li>CRM e consegne su tutte le isole</li><li>Crea e gestisce ruoli operativi</li><li>Non crea altri Admin</li><li>Nessun accesso ad audit, listino o commissioni</li></ul></article>}
+      {superAdmin ? <article className="data-card"><div className="card-head"><div><h2>Carica modello</h2><p>PDF o DOCX, massimo 8 MB. Solo documenti in spagnolo.</p></div></div><form className="stack-form" onSubmit={uploadTemplate}><label>Nome modello<input name="name" required placeholder="Contrato de patrocinio" /></label><label>Versione<input name="version" required defaultValue="1.0" /></label><label>Documento<input name="file" type="file" accept="application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required /></label><label className="confirmation document-language-confirmation"><input type="checkbox" name="documentLanguage" value="es" required /><span><strong>Documento esclusivamente in spagnolo</strong>Confermo la lingua del modello caricato.</span></label><button className="primary" disabled={templateBusy}>{templateBusy ? "Caricamento…" : "Archivia modello"}</button></form></article> : <article className="data-card permission-card"><div className="card-head"><div><h2>Permessi Admin operativo</h2><p>Gestione quotidiana senza accesso alle configurazioni sensibili.</p></div></div><ul><li>CRM e consegne su tutte le isole</li><li>Crea e gestisce ruoli operativi</li><li>Non crea altri Admin</li><li>Nessun accesso ad audit, listino o commissioni</li></ul></article>}
     </div>
     <div className={`admin-grid lower ${superAdmin ? "" : "single"}`}>
       <article className="data-card"><div className="card-head"><div><h2>Utenti autorizzati</h2><p>{data.users.length} account · gerarchia Sales–Manager esplicita</p></div></div><div className="simple-list">{data.users.map((target) => <div key={target.id}><span className="avatar">{initials(target.name)}</span><div><strong>{target.name}</strong><small>{target.email}{target.phone ? ` · ${target.phone}` : ""}</small></div><p>{roleLabels[target.role]}<small>{target.island ?? "Tutte le isole"}{target.role === "sales" ? ` · ${target.sales_manager_name ? `Manager: ${target.sales_manager_name}` : "Senza Sales Manager"}` : ""}{target.active === 0 ? " · Disattivato" : ""}</small>{canEdit(target) && <button className="mini-link" onClick={() => setEditing(target)}>Modifica ruolo e accesso</button>}</p></div>)}</div></article>

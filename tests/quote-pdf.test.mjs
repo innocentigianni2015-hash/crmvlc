@@ -27,7 +27,7 @@ test("builds a valid one-page A4 quote PDF", async () => {
   });
   const pdf = await PDFDocument.load(bytes);
   assert.equal(pdf.getPageCount(), 1);
-  assert.equal(pdf.getTitle(), "Preventivo VLC-2026-0001");
+  assert.equal(pdf.getTitle(), "Presupuesto VLC-2026-0001");
   const [page] = pdf.getPages();
   assert.ok(Math.abs(page.getWidth() - 595.28) < 0.01);
   assert.ok(Math.abs(page.getHeight() - 841.89) < 0.01);

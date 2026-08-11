@@ -24,7 +24,7 @@ import { timingSafeEqual } from "node:crypto";
 import { calculateQuoteTotals, formatQuoteNumber } from "./quote-calculations.js";
 import { buildQuotePdf } from "./quote-pdf.js";
 import { buildContractPdf } from "./contract-pdf.js";
-import { handleOperationsApi } from "./operations-api.js";
+import { handleOperationsApi, handlePublicOperationsApi } from "./operations-api.js";
 import { handleVipPublicApi } from "./vip-public-api.js";
 import { createPasswordHash, handlePasswordAuth } from "./password-auth.js";
 import { createImpersonationToken, verifyImpersonationToken } from "./impersonation.js";
@@ -119,6 +119,11 @@ type DeliveryRow = {
   client_company?: string;
   distributor_user_id: string;
   distributor_name?: string;
+  distribution_point_id: string | null;
+  distribution_point_name?: string | null;
+  distribution_point_address?: string | null;
+  distribution_point_latitude_e6?: number | null;
+  distribution_point_longitude_e6?: number | null;
   island: string;
   status: "assigned" | "in_progress" | "delivered" | "issue";
   quantity: number;
@@ -370,6 +375,9 @@ export async function handleCrmApi(
 
     const vipResponse = await handleVipPublicApi(request, env, ctx);
     if (vipResponse) return vipResponse;
+
+    const publicOperationsResponse = await handlePublicOperationsApi(request, env);
+    if (publicOperationsResponse) return publicOperationsResponse;
 
     const user = await requireUser(request, env, ctx);
 
@@ -860,8 +868,12 @@ async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Resp
     ).all()).results;
   const deliveryFilter = deliveryScope(user);
   const deliveries = (await env.DB.prepare(
-    `SELECT d.*, c.company_name AS client_company, u.name AS distributor_name FROM deliveries d JOIN clients c ON c.id = d.client_id JOIN users u ON u.id = d.distributor_user_id WHERE 1 = 1${deliveryFilter.sql} ORDER BY CASE d.status WHEN 'issue' THEN 0 WHEN 'assigned' THEN 1 WHEN 'in_progress' THEN 2 ELSE 3 END, d.updated_at DESC LIMIT 250`,
+    `SELECT d.*, c.company_name AS client_company, u.name AS distributor_name, p.name AS distribution_point_name, p.address AS distribution_point_address, p.latitude_e6 AS distribution_point_latitude_e6, p.longitude_e6 AS distribution_point_longitude_e6 FROM deliveries d JOIN clients c ON c.id = d.client_id JOIN users u ON u.id = d.distributor_user_id LEFT JOIN distribution_points p ON p.id = d.distribution_point_id WHERE 1 = 1${deliveryFilter.sql} ORDER BY CASE d.status WHEN 'issue' THEN 0 WHEN 'assigned' THEN 1 WHEN 'in_progress' THEN 2 ELSE 3 END, d.updated_at DESC LIMIT 250`,
   ).bind(...deliveryFilter.values).all<DeliveryRow>()).results;
+
+  const distributionPoints = (await env.DB.prepare(
+    `SELECT p.id, p.client_id, p.name, p.island, p.address, p.latitude_e6, p.longitude_e6, p.capacity, p.stock FROM distribution_points p WHERE p.public_visible = 1${isGlobalOperator(user) ? "" : " AND p.island = ?"} ORDER BY p.island, p.name LIMIT 500`,
+  ).bind(...(isGlobalOperator(user) ? [] : [String(user.island ?? "")])).all()).results;
 
   let priceList: PriceListRow | null = null;
   let priceItems: PriceItemRow[] = [];
@@ -930,6 +942,7 @@ async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Resp
     quotes,
     templates,
     deliveries,
+    distributionPoints,
     users,
     audit,
     emailOutbox,
@@ -1472,6 +1485,7 @@ async function createDelivery(request: Request, user: UserRow, env: RuntimeEnv):
   const body = await readJson<Record<string, unknown>>(request);
   const clientId = String(body.clientId ?? "");
   const distributorUserId = String(body.distributorUserId ?? "");
+  const distributionPointId = String(body.distributionPointId ?? "");
   const client = await getClient(env, clientId);
   if (!client || !canReadRecord(user, client)) throw new ApiError(404, "client_not_found", "Azienda non trovata nel tuo perimetro.");
 
@@ -1481,6 +1495,12 @@ async function createDelivery(request: Request, user: UserRow, env: RuntimeEnv):
   if (!distributor || distributor.island !== client.island) {
     throw new ApiError(400, "invalid_distributor", "Il Distributore deve essere attivo e assegnato alla stessa isola dell'azienda.");
   }
+  const distributionPoint = await env.DB.prepare(
+    "SELECT id, client_id, name, address, island FROM distribution_points WHERE id = ? AND island = ? AND public_visible = 1 AND (client_id IS NULL OR client_id = ?) LIMIT 1",
+  ).bind(distributionPointId, client.island, client.id).first<{ id: string; client_id: string | null; name: string; address: string; island: string }>();
+  if (!distributionPoint) {
+    throw new ApiError(400, "invalid_distribution_point", "Seleziona un punto di distribuzione autorizzato della stessa isola e azienda.");
+  }
 
   const quantity = positiveInteger(body.quantity, 1_000_000);
   const unit = cleanText(body.unit, 30) || "copie";
@@ -1488,16 +1508,16 @@ async function createDelivery(request: Request, user: UserRow, env: RuntimeEnv):
   const deliveryContactName = cleanText(body.deliveryContactName, 120) || client.contact_name;
   const deliveryContactEmail = normalizeEmail(body.deliveryContactEmail || client.email);
   const deliveryContactPhone = cleanOptionalText(body.deliveryContactPhone ?? client.phone, 40);
-  const deliveryAddress = cleanOptionalText(body.deliveryAddress, 300);
+  const deliveryAddress = cleanOptionalText(body.deliveryAddress, 300) ?? distributionPoint.address;
   const notes = cleanOptionalText(body.notes, 2000);
   if (!isEmail(deliveryContactEmail)) throw new ApiError(400, "invalid_delivery_contact", "Inserisci un'email valida per il referente della consegna.");
 
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   await env.DB.prepare(
-    "INSERT INTO deliveries (id, client_id, distributor_user_id, island, status, quantity, unit, scheduled_for, delivery_contact_name, delivery_contact_email, delivery_contact_phone, delivery_address, notes, version, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, 'assigned', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
-  ).bind(id, client.id, distributor.id, client.island, quantity, unit, scheduledFor, deliveryContactName, deliveryContactEmail, deliveryContactPhone, deliveryAddress, notes, user.id, now, now).run();
-  await appendAudit(env, request, user, "delivery.created", "delivery", id, { clientId, distributorUserId, island: client.island, quantity, unit, scheduledFor });
+    "INSERT INTO deliveries (id, client_id, distributor_user_id, distribution_point_id, island, status, quantity, unit, scheduled_for, delivery_contact_name, delivery_contact_email, delivery_contact_phone, delivery_address, notes, version, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'assigned', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+  ).bind(id, client.id, distributor.id, distributionPoint.id, client.island, quantity, unit, scheduledFor, deliveryContactName, deliveryContactEmail, deliveryContactPhone, deliveryAddress, notes, user.id, now, now).run();
+  await appendAudit(env, request, user, "delivery.created", "delivery", id, { clientId, distributorUserId, distributionPointId: distributionPoint.id, island: client.island, quantity, unit, scheduledFor });
   return json({ id }, 201);
 }
 
@@ -1518,6 +1538,11 @@ async function updateDelivery(request: Request, deliveryId: string, user: UserRo
   const deliveryContactPhone = body.deliveryContactPhone === undefined ? current.delivery_contact_phone : cleanOptionalText(body.deliveryContactPhone, 40);
   const deliveryAddress = body.deliveryAddress === undefined ? current.delivery_address : cleanOptionalText(body.deliveryAddress, 300);
   const notes = body.notes === undefined ? current.notes : cleanOptionalText(body.notes, 2000);
+  const distributionPointId = body.distributionPointId === undefined ? current.distribution_point_id : String(body.distributionPointId ?? "");
+  const distributionPoint = await env.DB.prepare(
+    "SELECT id FROM distribution_points WHERE id = ? AND island = ? AND public_visible = 1 AND (client_id IS NULL OR client_id = ?) LIMIT 1",
+  ).bind(distributionPointId, current.island, current.client_id).first<{ id: string }>();
+  if (!distributionPoint) throw new ApiError(400, "invalid_distribution_point", "Seleziona un punto di distribuzione autorizzato.");
   if (!unit || !deliveryContactName || !isEmail(deliveryContactEmail)) {
     throw new ApiError(400, "invalid_delivery", "Quantità, unità e referente della consegna devono essere validi.");
   }
@@ -1525,10 +1550,10 @@ async function updateDelivery(request: Request, deliveryId: string, user: UserRo
   const now = new Date().toISOString();
   const completedAt = status === "delivered" ? current.completed_at ?? now : null;
   const result = await env.DB.prepare(
-    "UPDATE deliveries SET status = ?, quantity = ?, unit = ?, scheduled_for = ?, delivery_contact_name = ?, delivery_contact_email = ?, delivery_contact_phone = ?, delivery_address = ?, notes = ?, completed_at = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?",
-  ).bind(status, quantity, unit, scheduledFor, deliveryContactName, deliveryContactEmail, deliveryContactPhone, deliveryAddress, notes, completedAt, now, deliveryId, version).run();
+    "UPDATE deliveries SET distribution_point_id = ?, status = ?, quantity = ?, unit = ?, scheduled_for = ?, delivery_contact_name = ?, delivery_contact_email = ?, delivery_contact_phone = ?, delivery_address = ?, notes = ?, completed_at = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?",
+  ).bind(distributionPoint.id, status, quantity, unit, scheduledFor, deliveryContactName, deliveryContactEmail, deliveryContactPhone, deliveryAddress, notes, completedAt, now, deliveryId, version).run();
   if (Number(result.meta.changes ?? 0) !== 1) throw new ApiError(409, "version_conflict", "Aggiornamento concorrente rilevato.");
-  await appendAudit(env, request, user, "delivery.updated", "delivery", deliveryId, { status, quantity, unit, scheduledFor, version: version + 1 });
+  await appendAudit(env, request, user, "delivery.updated", "delivery", deliveryId, { distributionPointId: distributionPoint.id, status, quantity, unit, scheduledFor, version: version + 1 });
   return json({ ok: true });
 }
 

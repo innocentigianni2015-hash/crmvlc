@@ -96,6 +96,7 @@ const copy = {
     whatsapp: "WhatsApp +34 602 576 044",
     footerText: "Media, territorio e imprese nelle Canarie.",
     privacy: "Privacy",
+    maps: "Punti di distribuzione",
   },
   es: {
     navServices: "Oportunidades",
@@ -177,6 +178,7 @@ const copy = {
     whatsapp: "WhatsApp +34 602 576 044",
     footerText: "Medios, territorio y empresas en Canarias.",
     privacy: "Privacidad",
+    maps: "Puntos de distribución",
   },
   en: {
     navServices: "Opportunities",
@@ -240,6 +242,7 @@ const copy = {
     whatsapp: "WhatsApp +34 602 576 044",
     footerText: "Media, territory and businesses in the Canary Islands.",
     privacy: "Privacy",
+    maps: "Distribution points",
   },
 } as const;
 
@@ -427,10 +430,9 @@ export default function PublicLanding() {
 
       <footer>
         <div className="footer-brand"><img src="/brand/viv-le-canarie-icon.svg" alt="Vivi Le Canarie" /><p>{t.footerText}</p></div>
-        <div className="footer-links"><a href="/privacy">{t.privacy}</a><a href="/login">{t.crm}</a><span>© {year} VIV!</span></div>
+        <div className="footer-links"><a href="/mappe">{t.maps}</a><a href="/privacy">{t.privacy}</a><a href="/login">{t.crm}</a><span>© {year} VIV!</span></div>
         <p className="footer-owner">{platformOwnership(locale)}</p>
       </footer>
     </main>
   );
 }
-

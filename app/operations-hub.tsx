@@ -3,11 +3,16 @@
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { loadOfflineSnapshot, prepareDeliveryPhoto, queuePhotoAudit, saveOfflineSnapshot } from "./offline";
 import { localeTag } from "./i18n";
+import { buildGoogleMapsSegments, optimizeDeliveryRoute } from "./delivery-route";
 
 type Role = "super_admin" | "admin" | "sales_manager" | "sales" | "distributor";
 type User = { id: string; name: string; role: Role; island: string | null };
 type Client = { id: string; company_name: string; island: string };
-type Delivery = { id: string; client_company?: string; island: string; status: string };
+type Delivery = {
+  id: string; client_company?: string; island: string; status: string; distributor_user_id?: string; distributor_name?: string;
+  scheduled_for?: string | null; quantity?: number; unit?: string; distribution_point_id?: string | null; distribution_point_name?: string | null;
+  distribution_point_address?: string | null; distribution_point_latitude_e6?: number | null; distribution_point_longitude_e6?: number | null;
+};
 type RecordRow = Record<string, string | number | null>;
 
 type Snapshot = {
@@ -306,6 +311,7 @@ function InventoryPanel({ data, user, busy, run }: PanelProps) {
 function GeoAuditPanel({ data, user, clients, deliveries, busy, run, submitPhotoAudit }: PanelProps & { clients: Client[]; deliveries: Delivery[]; submitPhotoAudit: (event: FormEvent<HTMLFormElement>) => void }) {
   const canManage = ["super_admin", "admin", "sales_manager"].includes(user.role);
   return <div className="hub-stack">
+    <DailyRouteCard deliveries={deliveries} user={user} />
     <div className="hub-two">
       {canManage && <ActionCard index="01" title="Punto distribuzione" text="Coordinate, capacità, stock e visibilità pubblica.">
         <form onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const fd = new FormData(form); void run(() => post("/api/operations/distribution-points", { ...Object.fromEntries(fd), publicVisible: fd.get("publicVisible") === "on" }), "Punto distribuzione creato.", form); }}>
@@ -322,10 +328,38 @@ function GeoAuditPanel({ data, user, clients, deliveries, busy, run, submitPhoto
       </ActionCard>
     </div>
     <div className="hub-two">
-      <DataCard title="Punti e stock" count={data.distributionPoints.length}>{data.distributionPoints.length ? data.distributionPoints.map((row) => <div className="hub-list-row" key={String(row.id)}><div><strong>{row.name}</strong><small>{row.address} · {row.island}</small></div><b className={Number(row.stock) <= Math.max(5, Number(row.capacity) * .15) ? "low-stock" : ""}>{row.stock}/{row.capacity}</b></div>) : <MiniEmpty text="Nessun punto geolocalizzato." />}</DataCard>
-      <DataCard title="Audit fotografici" count={data.photoAudits.length}>{data.photoAudits.length ? data.photoAudits.map((row) => <div className="hub-list-row audit-row" key={String(row.id)}><div><strong>{row.distributor_name}</strong><small>{row.island} · {when(row.created_at)} · distanza {row.geofence_distance_m ?? "—"} m</small></div><b>Qualità {row.quality_score}%</b><span className={`module-status ${row.status}`}>{row.status}</span>{canManage && row.status === "pending" && <div className="inline-actions"><button disabled={busy} onClick={() => void run(() => post("/api/operations/photo-audits/review", { id: row.id, status: "approved" }), "Foto approvata.")}>Approva</button><button disabled={busy} onClick={() => void run(() => post("/api/operations/photo-audits/review", { id: row.id, status: "rejected" }), "Foto rifiutata.")}>Rifiuta</button></div>}</div>) : <MiniEmpty text="Nessuna foto da verificare." />}</DataCard>
+      <DataCard title="Punti e stock" count={data.distributionPoints.length}><a className="public-map-link" href="/mappe" target="_blank" rel="noopener noreferrer">Apri mappa pubblica ↗</a>{data.distributionPoints.length ? data.distributionPoints.map((row) => <div className="hub-list-row" key={String(row.id)}><div><strong>{row.name}</strong><small>{row.address} · {row.island}</small></div><b className={Number(row.stock) <= Math.max(5, Number(row.capacity) * .15) ? "low-stock" : ""}>{row.stock}/{row.capacity}</b></div>) : <MiniEmpty text="Nessun punto geolocalizzato." />}</DataCard>
+      <DataCard title="Audit fotografici" count={data.photoAudits.length}>{data.photoAudits.length ? data.photoAudits.map((row) => { const ai = photoAiSummary(row); return <div className="hub-list-row audit-row" key={String(row.id)}><div><strong>{row.distributor_name}</strong><small>{row.island} · {when(row.created_at)} · distanza {row.geofence_distance_m ?? "—"} m</small>{ai && <small className={ai.verdict === "compliant_candidate" ? "ai-pass" : "ai-review"}>AI: {ai.magazinesDetected || ai.displayDetected ? "riviste/espositore rilevati" : "contenuto da verificare"} · {ai.possibleDuplicate ? "possibile duplicato" : "nessun duplicato rilevato"} · confidenza {ai.confidence}%</small>}{row.duplicate_of_audit_id && <small className="ai-review">Hash identico a una foto già registrata.</small>}</div><b>Qualità {row.quality_score}%</b><span className={`module-status ${row.status}`}>{row.status}</span>{canManage && row.status === "pending" && <div className="inline-actions"><button disabled={busy} onClick={() => void run(() => post("/api/operations/photo-audits/review", { id: row.id, status: "approved" }), "Foto approvata.")}>Approva</button><button disabled={busy} onClick={() => void run(() => post("/api/operations/photo-audits/review", { id: row.id, status: "rejected" }), "Foto rifiutata.")}>Rifiuta</button></div>}</div>; }) : <MiniEmpty text="Nessuna foto da verificare." />}</DataCard>
     </div>
   </div>;
+}
+
+type RouteStop = Delivery & { latitude: number; longitude: number };
+
+function DailyRouteCard({ deliveries, user }: { deliveries: Delivery[]; user: User }) {
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Atlantic/Canary", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  const distributors = Array.from(new Map(deliveries.filter((item) => item.distributor_user_id).map((item) => [item.distributor_user_id!, item.distributor_name ?? "Distributore"])).entries());
+  const [distributorId, setDistributorId] = useState(user.role === "distributor" ? user.id : distributors[0]?.[0] ?? "");
+  const [route, setRoute] = useState<RouteStop[]>([]);
+  const [origin, setOrigin] = useState<{ latitude: number; longitude: number } | null>(null);
+  const candidates = deliveries.filter((item) => item.distributor_user_id === distributorId && item.scheduled_for === today && item.status !== "delivered" && item.distribution_point_latitude_e6 != null && item.distribution_point_longitude_e6 != null);
+
+  async function calculate() {
+    const current = await currentLocation();
+    const stops = candidates.map((item) => ({ ...item, latitude: Number(item.distribution_point_latitude_e6) / 1_000_000, longitude: Number(item.distribution_point_longitude_e6) / 1_000_000 }));
+    setOrigin(current);
+    setRoute(optimizeDeliveryRoute(current, stops));
+  }
+
+  const segments = origin ? buildGoogleMapsSegments(origin, route) : [];
+  return <article className="module-card daily-route-card"><header><div><span className="module-index">00</span><div><h2>Percorso consegne di oggi</h2><p>{today} · ordinamento dalla posizione attuale</p></div></div><span className="route-count">{candidates.length} tappe</span></header>{user.role !== "distributor" && <select value={distributorId} onChange={(event) => { setDistributorId(event.target.value); setRoute([]); setOrigin(null); }}><option value="">Seleziona Distributore</option>{distributors.map(([id, name]) => <option value={id} key={id}>{name}</option>)}</select>}<button className="primary location-button" disabled={!candidates.length} onClick={() => void calculate()}>Ordina dalla mia posizione</button>{!candidates.length && <p className="form-microcopy">Nessuna consegna di oggi collegata a un punto autorizzato.</p>}{route.length > 0 && <><ol className="route-stop-list">{route.map((stop, index) => <li key={stop.id}><span>{index + 1}</span><div><strong>{stop.distribution_point_name ?? stop.client_company}</strong><small>{stop.distribution_point_address} · {stop.quantity} {stop.unit}</small></div><a href={pointNavigationUrl(stop)} target="_blank" rel="noopener noreferrer">Apri ↗</a></li>)}</ol><div className="route-segments">{segments.map((url, index) => <a href={url} target="_blank" rel="noopener noreferrer" key={url}>Avvia tratta {index + 1} ↗</a>)}</div><p className="form-microcopy">Le tratte sono divise in gruppi compatibili con la navigazione mobile; insieme coprono tutte le consegne ordinate.</p></>}</article>;
+}
+
+function pointNavigationUrl(stop: RouteStop) { return `https://www.google.com/maps/search/?api=1&query=${stop.latitude},${stop.longitude}`; }
+
+function photoAiSummary(row: RecordRow): { verdict: string; magazinesDetected: boolean; displayDetected: boolean; possibleDuplicate: boolean; confidence: number } | null {
+  if (!row.ai_result_json) return null;
+  try { return JSON.parse(String(row.ai_result_json)); } catch { return null; }
 }
 
 function SalesPanel({ data, user, users, clients, busy, run }: PanelProps & { users: User[]; clients: Client[] }) {

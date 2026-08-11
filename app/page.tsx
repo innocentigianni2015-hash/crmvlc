@@ -3,8 +3,10 @@
 import { FormEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect, useRef, useState } from "react";
 import QRCode from "qrcode";
 import { OperationsHub } from "./operations-hub";
+import { clearOfflineData, loadOfflineSnapshot, pendingOutboxCount, saveOfflineSnapshot, syncPhotoAuditOutbox } from "./offline";
 
 type Role = "super_admin" | "sales_manager" | "sales" | "distributor";
+type InstallPromptEvent = Event & { prompt(): Promise<void>; userChoice: Promise<{ outcome: "accepted" | "dismissed" }> };
 type User = { id: string; email: string; name: string; role: Role; island: string | null; active?: number };
 type Client = {
   id: string; company_name: string; contact_name: string; email: string; phone: string | null;
@@ -88,6 +90,11 @@ export default function Home() {
   const [data, setData] = useState<Bootstrap | null>(null);
   const [loading, setLoading] = useState(true);
   const [authRequired, setAuthRequired] = useState(false);
+  const [offlineMode, setOfflineMode] = useState(false);
+  const [offlineSavedAt, setOfflineSavedAt] = useState<number | null>(null);
+  const [pendingCount, setPendingCount] = useState(0);
+  const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(null);
+  const [standalone, setStandalone] = useState(false);
   const [active, setActive] = useState<"crm" | "operations" | "pricing" | "quotes" | "contracts" | "distribution" | "admin" | "audit">("crm");
   const [notice, setNotice] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const [search, setSearch] = useState("");
@@ -101,14 +108,29 @@ export default function Home() {
     try {
       const result = await api<Bootstrap>("/api/bootstrap");
       setData(result);
+      await saveOfflineSnapshot("bootstrap", result.user.id, result);
       if (result.user.role === "distributor") setActive("distribution");
       setAuthRequired(false);
+      setOfflineMode(false);
+      setOfflineSavedAt(null);
     } catch (error) {
       if (error instanceof RequestError && error.status === 401) {
         setData(null);
         setAuthRequired(true);
+        setOfflineMode(false);
+      } else if (!(error instanceof RequestError)) {
+        const cached = await loadOfflineSnapshot<Bootstrap>("bootstrap").catch(() => null);
+        if (cached) {
+          setData(cached.value);
+          if (cached.value.user.role === "distributor") setActive("distribution");
+          setAuthRequired(false);
+          setOfflineMode(true);
+          setOfflineSavedAt(cached.savedAt);
+        } else {
+          setNotice({ tone: "error", text: "Nessun dato offline disponibile. Collegati alla rete per accedere." });
+        }
       } else {
-        setNotice({ tone: "error", text: error instanceof Error ? error.message : "Impossibile caricare i dati." });
+        setNotice({ tone: "error", text: error.message });
       }
     } finally {
       setLoading(false);
@@ -121,6 +143,42 @@ export default function Home() {
   }, [refresh]);
   useEffect(() => {
     if ("serviceWorker" in navigator) void navigator.serviceWorker.register("/sw.js");
+    const media = window.matchMedia("(display-mode: standalone)");
+    const updateStandalone = () => setStandalone(media.matches || Boolean((navigator as Navigator & { standalone?: boolean }).standalone));
+    const beforeInstall = (event: Event) => {
+      event.preventDefault();
+      setInstallPrompt(event as InstallPromptEvent);
+    };
+    const installed = () => {
+      setInstallPrompt(null);
+      setStandalone(true);
+    };
+    updateStandalone();
+    media.addEventListener?.("change", updateStandalone);
+    window.addEventListener("beforeinstallprompt", beforeInstall);
+    window.addEventListener("appinstalled", installed);
+    return () => {
+      media.removeEventListener?.("change", updateStandalone);
+      window.removeEventListener("beforeinstallprompt", beforeInstall);
+      window.removeEventListener("appinstalled", installed);
+    };
+  }, []);
+  useEffect(() => {
+    const refreshPending = () => { void pendingOutboxCount().then(setPendingCount).catch(() => setPendingCount(0)); };
+    const syncPending = () => {
+      void syncPhotoAuditOutbox().then((result) => {
+        setPendingCount(result.pending);
+        if (result.sent > 0) setNotice({ tone: "ok", text: `${result.sent} acquisizion${result.sent === 1 ? "e sincronizzata" : "i sincronizzate"}.` });
+      }).catch(() => refreshPending());
+    };
+    refreshPending();
+    if (navigator.onLine) syncPending();
+    window.addEventListener("online", syncPending);
+    window.addEventListener("crmvlc:outbox-changed", refreshPending);
+    return () => {
+      window.removeEventListener("online", syncPending);
+      window.removeEventListener("crmvlc:outbox-changed", refreshPending);
+    };
   }, []);
   useEffect(() => {
     if (!notice) return;
@@ -140,9 +198,27 @@ export default function Home() {
   const openPipeline = data.clients.filter((client) => !["won", "lost"].includes(client.stage)).reduce((sum, client) => sum + client.value_cents, 0);
 
   async function logout() {
-    await api("/api/auth/logout", { method: "POST" });
+    if (!offlineMode) await api("/api/auth/logout", { method: "POST" });
+    await clearOfflineData();
     setData(null);
     setAuthRequired(true);
+    setOfflineMode(false);
+  }
+
+  async function installApp() {
+    if (installPrompt) {
+      await installPrompt.prompt();
+      const choice = await installPrompt.userChoice;
+      if (choice.outcome === "accepted") {
+        setInstallPrompt(null);
+        notify("CRMVLC installato sul dispositivo.");
+      }
+      return;
+    }
+    const ios = /iPad|iPhone|iPod/.test(navigator.userAgent);
+    notify(ios
+      ? "Su iPhone: Condividi → Aggiungi alla schermata Home."
+      : "Apri il menu del browser e scegli “Installa app” o “Aggiungi alla schermata Home”.");
   }
 
   async function changeStage(client: Client, stage: string) {
@@ -177,8 +253,9 @@ export default function Home() {
       <main className="ops-main">
         <header className="ops-topbar">
           <div className="ops-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Cerca clienti, preventivi, contratti o consegne…" aria-label="Cerca" /></div>
-          <div className="ops-user"><span>{initials(data.user.name)}</span><div><strong>{data.user.name}</strong><small>{roleLabels[data.user.role]}{data.user.island ? ` · ${data.user.island}` : ""}</small></div><button onClick={logout}>Esci</button></div>
+          <div className="ops-user">{!standalone && <button className="install-button" onClick={() => void installApp()}>Installa</button>}<span>{initials(data.user.name)}</span><div><strong>{data.user.name}</strong><small>{roleLabels[data.user.role]}{data.user.island ? ` · ${data.user.island}` : ""}</small></div><button onClick={logout}>Esci</button></div>
         </header>
+        {(offlineMode || pendingCount > 0) && <div className={`connectivity-strip ${offlineMode ? "offline" : "pending"}`}><strong>{offlineMode ? "Modalità offline" : "Sincronizzazione"}</strong><span>{offlineMode ? `Dati salvati ${offlineSavedAt ? dateTime(new Date(offlineSavedAt).toISOString()) : "sul dispositivo"} · contratti e amministrazione richiedono la rete.` : `${pendingCount} acquisizion${pendingCount === 1 ? "e in attesa" : "i in attesa"} di invio.`}</span></div>}
         {data.demoMode && <div className="demo-strip"><strong>Modalità demo</strong><span>Usa esclusivamente dati fittizi. Le email OTP non sono attive.</span></div>}
 
         {active === "crm" && <section className="ops-page">

@@ -328,6 +328,10 @@ export async function handleCrmApi(
       });
     }
 
+    if (url.pathname === "/api/public/leads" && request.method === "POST") {
+      return createPublicLandingLead(request, env);
+    }
+
     if (url.pathname.startsWith("/api/auth/password/") || url.pathname.startsWith("/api/auth/totp/")) {
       await ensureBootstrapAdmin(env);
       const passwordResponse = await handlePasswordAuth(request, env);
@@ -705,6 +709,108 @@ async function confirmProfileEmail(request: Request, env: RuntimeEnv): Promise<R
   response.headers.append("Set-Cookie", clearSessionCookie(request));
   response.headers.append("Set-Cookie", clearImpersonationCookie(request));
   return response;
+}
+
+async function createPublicLandingLead(request: Request, env: RuntimeEnv): Promise<Response> {
+  const body = await readJson<Record<string, unknown>>(request);
+  if (cleanText(body.website, 200)) return json({ accepted: true }, 202);
+
+  const company = cleanText(body.company, 120);
+  const contact = cleanText(body.contact, 120);
+  const phone = normalizePhone(body.phone);
+  const email = normalizeEmail(body.email);
+  const city = cleanText(body.city, 100);
+  const island = cleanText(body.island, 40);
+  const service = cleanText(body.service, 20);
+  const locale = cleanText(body.locale, 5) === "es" ? "es" : "it";
+  const notes = cleanText(body.notes, 1000);
+
+  if (!company || !contact || !phone || !isEmail(email) || !city) {
+    throw new ApiError(400, "required_fields", "Completa azienda, referente, telefono, email e città.");
+  }
+  if (!isIsland(island)) throw new ApiError(400, "invalid_island", "Seleziona una delle cinque isole.");
+  if (!(["magazine", "podcast", "both"] as string[]).includes(service)) {
+    throw new ApiError(400, "invalid_service", "Seleziona il servizio richiesto.");
+  }
+  if (body.consent !== true) throw new ApiError(400, "consent_required", "Il consenso privacy è obbligatorio.");
+
+  await consumePublicLeadRateLimit(request, env);
+
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const duplicateSince = new Date(now.getTime() - 10 * 60_000).toISOString();
+  const duplicate = await env.DB.prepare(
+    "SELECT id FROM landing_leads WHERE email = ? AND phone = ? AND created_at >= ? ORDER BY created_at DESC LIMIT 1",
+  ).bind(email, phone, duplicateSince).first<{ id: string }>();
+  if (duplicate) return json({ accepted: true, leadId: duplicate.id, duplicate: true }, 202);
+
+  const manager = await env.DB.prepare(
+    `SELECT u.id, u.name
+     FROM users u
+     LEFT JOIN landing_leads l ON l.assigned_manager_id = u.id
+     WHERE u.role = 'sales_manager' AND u.active = 1 AND u.island = ?
+     GROUP BY u.id, u.name, u.created_at
+     ORDER BY COUNT(l.id) ASC, MAX(l.created_at) ASC, u.created_at ASC, u.id ASC
+     LIMIT 1`,
+  ).bind(island).first<{ id: string; name: string }>();
+
+  const leadId = crypto.randomUUID();
+  const clientId = manager ? crypto.randomUUID() : null;
+  const status = manager ? "assigned" : "pending_manager";
+  const auditPayload = {
+    company,
+    island,
+    service,
+    status,
+    assignedManagerId: manager?.id ?? null,
+    clientId,
+  };
+  const auditPayloadJson = stableJson(auditPayload);
+  const rawIp = request.headers.get("cf-connecting-ip") ?? request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? null;
+  const ipHash = rawIp ? await sha256(`${env.AUTH_SECRET ?? "crmvlc"}:landing:${rawIp}`) : null;
+  const auditId = crypto.randomUUID();
+
+  const statements: D1PreparedStatement[] = [
+    env.DB.prepare(
+      `INSERT INTO landing_leads (
+        id, company, contact, phone, email, city, island, service, notes, locale,
+        source, status, assigned_manager_id, client_id, consent_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'crmvlc_landing', ?, ?, ?, ?, ?)`,
+    ).bind(leadId, company, contact, phone, email, city, island, service, notes, locale, status, manager?.id ?? null, clientId, nowIso, nowIso),
+    env.DB.prepare(
+      "INSERT INTO audit_events (id, actor_user_id, action, entity_type, entity_id, payload_json, payload_sha256, ip_hash, user_agent, created_at) VALUES (?, NULL, 'landing_lead.created', 'landing_lead', ?, ?, ?, ?, ?, ?)",
+    ).bind(auditId, leadId, auditPayloadJson, await sha256(auditPayloadJson), ipHash, cleanOptionalText(request.headers.get("user-agent"), 300), nowIso),
+  ];
+
+  if (manager && clientId) {
+    const crmNotes = [`Lead landing · ${service} · ${city}`, notes].filter(Boolean).join("\n");
+    statements.splice(1, 0, env.DB.prepare(
+      "INSERT INTO clients (id, company_name, contact_name, email, phone, island, stage, value_cents, owner_user_id, notes, version, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'lead', 0, ?, ?, 1, ?, ?, ?)",
+    ).bind(clientId, company, contact, email, phone, island, manager.id, crmNotes, manager.id, nowIso, nowIso));
+  }
+
+  await env.DB.batch(statements);
+  return json({ accepted: true, leadId, routedTo: island, managerAssigned: Boolean(manager) }, 201);
+}
+
+async function consumePublicLeadRateLimit(request: Request, env: RuntimeEnv): Promise<void> {
+  const rawIp = request.headers.get("cf-connecting-ip") ?? request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
+  const key = await sha256(`${env.AUTH_SECRET ?? "crmvlc"}:landing-rate:${rawIp}`);
+  const now = new Date();
+  const row = await env.DB.prepare(
+    "SELECT attempts, window_started_at, blocked_until FROM auth_rate_limits WHERE key = ? LIMIT 1",
+  ).bind(key).first<{ attempts: number; window_started_at: string; blocked_until: string | null }>();
+  if (row?.blocked_until && Date.parse(row.blocked_until) > now.getTime()) {
+    throw new ApiError(429, "too_many_requests", "Troppe richieste. Riprova più tardi.");
+  }
+
+  const reset = !row || now.getTime() - Date.parse(row.window_started_at) >= 60 * 60_000;
+  const attempts = reset ? 1 : row.attempts + 1;
+  const blockedUntil = attempts > 10 ? new Date(now.getTime() + 60 * 60_000).toISOString() : null;
+  await env.DB.prepare(
+    "INSERT INTO auth_rate_limits (key, attempts, window_started_at, blocked_until) VALUES (?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET attempts = excluded.attempts, window_started_at = excluded.window_started_at, blocked_until = excluded.blocked_until",
+  ).bind(key, attempts, reset ? now.toISOString() : row!.window_started_at, blockedUntil).run();
+  if (blockedUntil) throw new ApiError(429, "too_many_requests", "Troppe richieste. Riprova più tardi.");
 }
 
 async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Response> {

@@ -104,7 +104,14 @@ async function outboxOperation(mode, operation) {
 }
 
 async function syncPhotoAuditOutbox() {
-  const records = await outboxOperation("readonly", (store) => store.getAll());
+  const session = await fetch("/api/bootstrap", { credentials: "same-origin" });
+  if (!session.ok) return;
+  const bootstrap = await session.json();
+  const userId = bootstrap?.user?.id;
+  if (!userId) return;
+
+  const allRecords = await outboxOperation("readonly", (store) => store.getAll());
+  const records = allRecords.filter((record) => record.userId === userId);
   let sent = 0;
 
   for (const record of records.sort((a, b) => a.createdAt - b.createdAt)) {
@@ -143,7 +150,8 @@ async function syncPhotoAuditOutbox() {
     }
   }
 
-  const pending = await outboxOperation("readonly", (store) => store.count());
+  const remaining = await outboxOperation("readonly", (store) => store.getAll());
+  const pending = remaining.filter((record) => record.userId === userId).length;
   const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
   clients.forEach((client) => client.postMessage({ type: "crmvlc:outbox-synced", sent, pending }));
 }

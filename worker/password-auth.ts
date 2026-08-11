@@ -26,7 +26,8 @@ type FlowRow = {
 };
 
 const SESSION_COOKIE = "vlc_session";
-const PASSWORD_ITERATIONS = 600_000;
+const PASSWORD_ITERATIONS = 100_000;
+const PASSWORD_SALT_PREFIX = "p1.";
 const PASSWORD_MIN_LENGTH = 12;
 const encoder = new TextEncoder();
 
@@ -65,12 +66,17 @@ export async function handlePasswordAuth(request: Request, env: AuthEnv): Promis
   }
 }
 
-export async function createPasswordHash(password: string): Promise<{ hash: string; salt: string; iterations: number }> {
+export async function createPasswordHash(password: string, authSecret: string): Promise<{ hash: string; salt: string; iterations: number }> {
   validatePassword(password);
   const saltBytes = crypto.getRandomValues(new Uint8Array(16));
-  const key = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
+  const material = await passwordKeyMaterial(password, requirePasswordPepper(authSecret));
+  const key = await crypto.subtle.importKey("raw", material, "PBKDF2", false, ["deriveBits"]);
   const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: saltBytes, iterations: PASSWORD_ITERATIONS }, key, 256);
-  return { hash: bytesToBase64Url(new Uint8Array(bits)), salt: bytesToBase64Url(saltBytes), iterations: PASSWORD_ITERATIONS };
+  return {
+    hash: bytesToBase64Url(new Uint8Array(bits)),
+    salt: `${PASSWORD_SALT_PREFIX}${bytesToBase64Url(saltBytes)}`,
+    iterations: PASSWORD_ITERATIONS,
+  };
 }
 
 async function passwordLogin(request: Request, env: AuthEnv): Promise<Response> {
@@ -82,7 +88,7 @@ async function passwordLogin(request: Request, env: AuthEnv): Promise<Response> 
 
   const user = await getUserByEmail(env, email);
   const valid = user?.active === 1 && user.password_hash && user.password_salt && user.password_iterations
-    ? await verifyPassword(password, user.password_hash, user.password_salt, user.password_iterations)
+    ? await verifyPassword(password, user.password_hash, user.password_salt, user.password_iterations, env.AUTH_SECRET ?? "")
     : false;
   if (!user || !valid) {
     await recordLoginFailure(env, email);
@@ -102,7 +108,7 @@ async function changeRequiredPassword(request: Request, env: AuthEnv): Promise<R
   const token = String(body.token ?? "");
   const password = String(body.password ?? "");
   const flow = await requireFlow(env, token, "change_password");
-  const credentials = await createPasswordHash(password);
+  const credentials = await createPasswordHash(password, env.AUTH_SECRET ?? "");
   const now = new Date().toISOString();
   await env.DB.batch([
     env.DB.prepare("UPDATE users SET password_hash = ?, password_salt = ?, password_iterations = ?, must_change_password = 0, password_changed_at = ?, updated_at = ? WHERE id = ? AND active = 1")
@@ -203,8 +209,10 @@ async function forgotPassword(request: Request, env: AuthEnv): Promise<Response>
 async function resetPassword(request: Request, env: AuthEnv): Promise<Response> {
   const body = await readJson<{ token?: string; password?: string }>(request);
   const token = String(body.token ?? "");
-  const credentials = await createPasswordHash(String(body.password ?? ""));
+  const password = String(body.password ?? "");
+  validatePassword(password);
   const flow = await requireFlow(env, token, "password_reset");
+  const credentials = await createPasswordHash(password, env.AUTH_SECRET ?? "");
   const now = new Date().toISOString();
   await env.DB.batch([
     env.DB.prepare("UPDATE users SET password_hash = ?, password_salt = ?, password_iterations = ?, must_change_password = 0, password_changed_at = ?, updated_at = ? WHERE id = ? AND active = 1")
@@ -255,11 +263,31 @@ async function getUserById(env: AuthEnv, id: string): Promise<PasswordUser | nul
     .bind(id).first<PasswordUser>();
 }
 
-async function verifyPassword(password: string, expected: string, salt: string, iterations: number): Promise<boolean> {
-  if (iterations < 100_000 || iterations > 2_000_000) return false;
-  const key = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: base64UrlToBytes(salt), iterations }, key, 256);
-  return timingSafeBytes(new Uint8Array(bits), base64UrlToBytes(expected));
+async function verifyPassword(password: string, expected: string, storedSalt: string, iterations: number, authSecret: string): Promise<boolean> {
+  if (iterations < 100_000 || iterations > PASSWORD_ITERATIONS) return false;
+  try {
+    const peppered = storedSalt.startsWith(PASSWORD_SALT_PREFIX);
+    const salt = peppered ? storedSalt.slice(PASSWORD_SALT_PREFIX.length) : storedSalt;
+    const material = peppered
+      ? await passwordKeyMaterial(password, requirePasswordPepper(authSecret))
+      : encoder.encode(password);
+    const key = await crypto.subtle.importKey("raw", material, "PBKDF2", false, ["deriveBits"]);
+    const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: base64UrlToBytes(salt), iterations }, key, 256);
+    return timingSafeBytes(new Uint8Array(bits), base64UrlToBytes(expected));
+  } catch {
+    return false;
+  }
+}
+
+async function passwordKeyMaterial(password: string, authSecret: string): Promise<Uint8Array> {
+  const key = await crypto.subtle.importKey("raw", encoder.encode(authSecret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(`CRMVLC-PASSWORD\n${password}`));
+  return new Uint8Array(signature);
+}
+
+function requirePasswordPepper(authSecret: string): string {
+  if (!authSecret) throw new AuthError(503, "auth_not_configured", "Autenticazione non configurata.");
+  return authSecret;
 }
 
 function validatePassword(password: string): void {

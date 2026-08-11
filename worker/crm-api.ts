@@ -754,8 +754,13 @@ async function createPublicLandingLead(request: Request, env: RuntimeEnv): Promi
      LIMIT 1`,
   ).bind(island).first<{ id: string; name: string }>();
 
+  const fallbackOwner = manager ? null : await env.DB.prepare(
+    "SELECT id, name FROM users WHERE active = 1 AND role IN ('admin', 'super_admin') ORDER BY CASE role WHEN 'admin' THEN 0 ELSE 1 END, created_at ASC, id ASC LIMIT 1",
+  ).first<{ id: string; name: string }>();
+  const owner = manager ?? fallbackOwner;
+
   const leadId = crypto.randomUUID();
-  const clientId = manager ? crypto.randomUUID() : null;
+  const clientId = owner ? crypto.randomUUID() : null;
   const status = manager ? "assigned" : "pending_manager";
   const auditPayload = {
     company,
@@ -763,6 +768,7 @@ async function createPublicLandingLead(request: Request, env: RuntimeEnv): Promi
     service,
     status,
     assignedManagerId: manager?.id ?? null,
+    fallbackOwnerId: manager ? null : fallbackOwner?.id ?? null,
     clientId,
   };
   const auditPayloadJson = stableJson(auditPayload);
@@ -782,11 +788,11 @@ async function createPublicLandingLead(request: Request, env: RuntimeEnv): Promi
     ).bind(auditId, leadId, auditPayloadJson, await sha256(auditPayloadJson), ipHash, cleanOptionalText(request.headers.get("user-agent"), 300), nowIso),
   ];
 
-  if (manager && clientId) {
+  if (owner && clientId) {
     const crmNotes = [`Lead landing · ${service} · ${city}`, notes].filter(Boolean).join("\n");
     statements.splice(1, 0, env.DB.prepare(
       "INSERT INTO clients (id, company_name, contact_name, email, phone, island, stage, value_cents, owner_user_id, notes, version, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'lead', 0, ?, ?, 1, ?, ?, ?)",
-    ).bind(clientId, company, contact, email, phone, island, manager.id, crmNotes, manager.id, nowIso, nowIso));
+    ).bind(clientId, company, contact, email, phone, island, owner.id, crmNotes, owner.id, nowIso, nowIso));
   }
 
   await env.DB.batch(statements);

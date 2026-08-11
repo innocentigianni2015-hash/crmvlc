@@ -1,4 +1,5 @@
 type RuntimeEnv = Env & {
+  AI?: Ai;
   AUTH_SECRET?: string;
   EMAIL_FROM?: string;
   WHATSAPP_TOKEN?: string;
@@ -21,6 +22,7 @@ export type OperationsUser = {
 const ISLANDS = ["Tenerife", "Gran Canaria", "Lanzarote", "Fuerteventura", "La Palma"] as const;
 const MAX_JSON_BYTES = 512_000;
 const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
+const PHOTO_AI_MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct" as const;
 
 const ISLAND_CENTERS: Record<string, { latitude: number; longitude: number }> = {
   Tenerife: { latitude: 28.2916, longitude: -16.6291 },
@@ -34,6 +36,21 @@ class OperationsError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) {
     super(message);
   }
+}
+
+export async function handlePublicOperationsApi(request: Request, env: RuntimeEnv): Promise<Response | null> {
+  const url = new URL(request.url);
+  if (url.pathname !== "/api/public/distribution-points") return null;
+  if (request.method !== "GET") return json({ error: { code: "method_not_allowed", message: "Metodo non consentito." } }, 405);
+  const island = clean(url.searchParams.get("island"), 40);
+  if (island && !isIsland(island)) return json({ error: { code: "invalid_island", message: "Isola non valida." } }, 400);
+  const points = (await env.DB.prepare(
+    `SELECT id, name, island, address, latitude_e6, longitude_e6 FROM distribution_points WHERE public_visible = 1${island ? " AND island = ?" : ""} ORDER BY island, name LIMIT 500`,
+  ).bind(...(island ? [island] : [])).all<{ id: string; name: string; island: string; address: string; latitude_e6: number; longitude_e6: number }>()).results;
+  return new Response(JSON.stringify({
+    points: points.map((point) => ({ ...point, latitude: point.latitude_e6 / 1_000_000, longitude: point.longitude_e6 / 1_000_000, latitude_e6: undefined, longitude_e6: undefined })),
+    islands: ISLANDS,
+  }), { headers: { "content-type": "application/json; charset=utf-8", "cache-control": "public, max-age=300, stale-while-revalidate=3600" } });
 }
 
 export async function handleOperationsApi(
@@ -151,7 +168,7 @@ async function operationsSnapshot(env: RuntimeEnv, user: OperationsUser): Promis
     : user.role === "sales_manager" ? { sql: " AND p.island = ?", values: [String(user.island)] }
       : { sql: " AND p.distributor_user_id = ?", values: [user.id] };
   const photoAudits = user.role === "sales" ? [] : (await env.DB.prepare(
-    `SELECT p.id, p.delivery_id, p.distributor_user_id, u.name AS distributor_name, p.island, p.sha256, p.latitude_e6, p.longitude_e6, p.geofence_distance_m, p.status, p.quality_score, p.watermark_text, p.created_at, p.reviewed_at FROM photo_audits p JOIN users u ON u.id = p.distributor_user_id WHERE 1 = 1${auditScope.sql} ORDER BY p.created_at DESC LIMIT 150`,
+    `SELECT p.id, p.delivery_id, p.distributor_user_id, u.name AS distributor_name, p.island, p.sha256, p.latitude_e6, p.longitude_e6, p.geofence_distance_m, p.status, p.quality_score, p.duplicate_of_audit_id, p.ai_model, p.ai_verdict, p.ai_result_json, p.watermark_text, p.created_at, p.reviewed_at FROM photo_audits p JOIN users u ON u.id = p.distributor_user_id WHERE 1 = 1${auditScope.sql} ORDER BY p.created_at DESC LIMIT 150`,
   ).bind(...auditScope.values).all()).results;
 
   const salesScope = isGlobalOperator(user) ? { sql: "", values: [] as string[] }
@@ -202,8 +219,8 @@ async function operationsSnapshot(env: RuntimeEnv, user: OperationsUser): Promis
       email: Boolean(env.EMAIL && env.EMAIL_FROM),
       whatsapp: true,
       payments: Boolean(env.STRIPE_SECRET_KEY),
-      maps: Boolean(env.MAPS_TOKEN),
-      photoAi: false,
+      maps: true,
+      photoAi: Boolean(env.AI),
     },
   });
 }
@@ -439,23 +456,116 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
   const deliveryId = clean(form.get("deliveryId"), 80);
   const latitude = requiredCoordinate(form.get("latitude"), -90, 90);
   const longitude = requiredCoordinate(form.get("longitude"), -180, 180);
-  const delivery = await env.DB.prepare("SELECT id, distributor_user_id, island FROM deliveries WHERE id = ? LIMIT 1").bind(deliveryId).first<{ id: string; distributor_user_id: string; island: string }>();
+  const delivery = await env.DB.prepare("SELECT d.id, d.distributor_user_id, d.island, d.quantity, d.unit, d.distribution_point_id, p.name AS point_name, p.address AS point_address, p.latitude_e6 AS point_latitude_e6, p.longitude_e6 AS point_longitude_e6 FROM deliveries d LEFT JOIN distribution_points p ON p.id = d.distribution_point_id WHERE d.id = ? LIMIT 1").bind(deliveryId).first<{ id: string; distributor_user_id: string; island: string; quantity: number; unit: string; distribution_point_id: string | null; point_name: string | null; point_address: string | null; point_latitude_e6: number | null; point_longitude_e6: number | null }>();
   if (!delivery || !canAccessIsland(user, delivery.island) || (user.role === "distributor" && delivery.distributor_user_id !== user.id)) {
     throw new OperationsError(404, "delivery_not_found", "Consegna non disponibile nel tuo perimetro.");
   }
-  const nearest = await nearestDistributionPoint(env, delivery.island, latitude, longitude);
+  const nearest = delivery.distribution_point_id && delivery.point_latitude_e6 !== null && delivery.point_longitude_e6 !== null
+    ? { id: delivery.distribution_point_id, distanceM: Math.round(haversineMeters(latitude, longitude, delivery.point_latitude_e6 / 1_000_000, delivery.point_longitude_e6 / 1_000_000)) }
+    : await nearestDistributionPoint(env, delivery.island, latitude, longitude);
   const bytes = await photo.arrayBuffer();
   const digest = await sha256(bytes);
+  const duplicate = await env.DB.prepare("SELECT id, delivery_id FROM photo_audits WHERE sha256 = ? ORDER BY created_at DESC LIMIT 1").bind(digest).first<{ id: string; delivery_id: string }>();
+  const previous = await env.DB.prepare("SELECT id, r2_key FROM photo_audits WHERE delivery_id = ? ORDER BY created_at DESC LIMIT 1").bind(delivery.id).first<{ id: string; r2_key: string }>();
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   const watermarkText = `CRMVLC | ${delivery.island} | ${now} | ${latitude.toFixed(6)},${longitude.toFixed(6)} | ${digest.slice(0, 12)}`;
-  const qualityScore = Math.min(95, Math.max(45, Math.round(45 + Math.log10(Math.max(photo.size, 1)) * 8)));
+  const aiAnalysis = await analyzeDeliveryPhoto(env, bytes, photo.type, {
+    quantity: delivery.quantity,
+    unit: delivery.unit,
+    pointName: delivery.point_name,
+    pointAddress: delivery.point_address,
+    geofenceDistanceM: nearest?.distanceM ?? null,
+    exactDuplicate: Boolean(duplicate),
+  }, previous?.r2_key ?? null);
+  const qualityScore = aiAnalysis.qualityScore;
   const key = `distribution-audit/${delivery.island}/${now.slice(0, 10)}/${id}.${extensionFor(photo.type)}`;
   await env.BUCKET.put(key, bytes, { httpMetadata: { contentType: photo.type, cacheControl: "private, no-store" }, customMetadata: { sha256: digest, watermark: watermarkText, deliveryId } });
-  await env.DB.prepare("INSERT INTO photo_audits (id, delivery_id, distributor_user_id, island, r2_key, sha256, latitude_e6, longitude_e6, geofence_distance_m, status, quality_score, watermark_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)")
-    .bind(id, delivery.id, delivery.distributor_user_id, delivery.island, key, digest, toE6(latitude), toE6(longitude), nearest?.distanceM ?? null, qualityScore, watermarkText, now).run();
-  await appendOperationsAudit(env, request, user, "photo_audit.created", "photo_audit", id, { deliveryId, digest, distanceM: nearest?.distanceM ?? null, qualityScore });
-  return json({ id, status: "pending", qualityScore, geofenceDistanceM: nearest?.distanceM ?? null, watermarkText }, 201);
+  await env.DB.prepare("INSERT INTO photo_audits (id, delivery_id, distributor_user_id, island, r2_key, sha256, latitude_e6, longitude_e6, geofence_distance_m, status, quality_score, duplicate_of_audit_id, ai_model, ai_verdict, ai_result_json, watermark_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)")
+    .bind(id, delivery.id, delivery.distributor_user_id, delivery.island, key, digest, toE6(latitude), toE6(longitude), nearest?.distanceM ?? null, qualityScore, duplicate?.id ?? null, aiAnalysis.model, aiAnalysis.verdict, JSON.stringify(aiAnalysis), watermarkText, now).run();
+  await appendOperationsAudit(env, request, user, "photo_audit.created", "photo_audit", id, { deliveryId, digest, distanceM: nearest?.distanceM ?? null, qualityScore, duplicateOfAuditId: duplicate?.id ?? null, aiVerdict: aiAnalysis.verdict });
+  return json({ id, status: "pending", qualityScore, geofenceDistanceM: nearest?.distanceM ?? null, watermarkText, aiVerdict: aiAnalysis.verdict, duplicate: Boolean(duplicate) }, 201);
+}
+
+type PhotoAiResult = {
+  model: string | null;
+  verdict: "compliant_candidate" | "review_required";
+  qualityScore: number;
+  magazinesDetected: boolean;
+  displayDetected: boolean;
+  deliveryConsistent: boolean;
+  possibleDuplicate: boolean;
+  confidence: number;
+  reasons: string[];
+};
+
+async function analyzeDeliveryPhoto(
+  env: RuntimeEnv,
+  bytes: ArrayBuffer,
+  mimeType: string,
+  expected: { quantity: number; unit: string; pointName: string | null; pointAddress: string | null; geofenceDistanceM: number | null; exactDuplicate: boolean },
+  previousR2Key: string | null,
+): Promise<PhotoAiResult> {
+  const fallback: PhotoAiResult = {
+    model: null,
+    verdict: "review_required",
+    qualityScore: 0,
+    magazinesDetected: false,
+    displayDetected: false,
+    deliveryConsistent: false,
+    possibleDuplicate: expected.exactDuplicate,
+    confidence: 0,
+    reasons: [env.AI ? "Analisi AI temporaneamente non disponibile." : "Workers AI non configurata."],
+  };
+  if (!env.AI) return fallback;
+  try {
+    const content: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
+      { type: "text", text: `Controlla questa prova di consegna CRMVLC. Atteso: ${expected.quantity} ${expected.unit}; punto: ${expected.pointName ?? "non indicato"}, ${expected.pointAddress ?? "indirizzo non indicato"}; distanza GPS dal punto: ${expected.geofenceDistanceM ?? "non disponibile"} metri. Valuta presenza visibile di riviste Vivi Le Canarie o di un espositore, qualità tecnica, coerenza generale con una consegna e possibile riuso della fotografia. Non affermare quantità esatte se non leggibili. Rispondi solo JSON con: qualityScore 0-100, magazinesDetected boolean, displayDetected boolean, deliveryConsistent boolean, possibleDuplicate boolean, confidence 0-100, reasons array di massimo 4 stringhe brevi in italiano.` },
+      { type: "image_url", image_url: { url: dataUrl(bytes, mimeType) } },
+    ];
+    if (previousR2Key && env.BUCKET) {
+      const previous = await env.BUCKET.get(previousR2Key);
+      if (previous) {
+        const previousBytes = await previous.arrayBuffer();
+        if (previousBytes.byteLength <= MAX_PHOTO_BYTES) {
+          content.push({ type: "text", text: "Foto precedente della stessa consegna: confrontala con quella attuale per individuare un possibile duplicato." });
+          content.push({ type: "image_url", image_url: { url: dataUrl(previousBytes, previous.httpMetadata?.contentType ?? "image/jpeg") } });
+        }
+      }
+    }
+    const output = await env.AI.run(PHOTO_AI_MODEL, {
+      messages: [{ role: "system", content: "Sei un revisore prudente di prove fotografiche. Non approvi né rifiuti: produci indicatori verificabili per un revisore umano." }, { role: "user", content }],
+      response_format: { type: "json_object" },
+      max_tokens: 350,
+      temperature: 0,
+    });
+    const parsed = JSON.parse(output.response) as Record<string, unknown>;
+    const score = clampScore(parsed.qualityScore);
+    const magazinesDetected = parsed.magazinesDetected === true;
+    const displayDetected = parsed.displayDetected === true;
+    const deliveryConsistent = parsed.deliveryConsistent === true;
+    const possibleDuplicate = expected.exactDuplicate || parsed.possibleDuplicate === true;
+    const confidence = clampScore(parsed.confidence);
+    const reasons = Array.isArray(parsed.reasons) ? parsed.reasons.map((item) => clean(item, 180)).filter(Boolean).slice(0, 4) : [];
+    const reviewRequired = possibleDuplicate || (!magazinesDetected && !displayDetected) || !deliveryConsistent || score < 60 || confidence < 55 || (expected.geofenceDistanceM !== null && expected.geofenceDistanceM > 250);
+    return { model: PHOTO_AI_MODEL, verdict: reviewRequired ? "review_required" : "compliant_candidate", qualityScore: score, magazinesDetected, displayDetected, deliveryConsistent, possibleDuplicate, confidence, reasons };
+  } catch (error) {
+    console.error(JSON.stringify({ level: "error", event: "photo_ai_failed", error: error instanceof Error ? error.message : "unknown" }));
+    return fallback;
+  }
+}
+
+function dataUrl(bytes: ArrayBuffer, mimeType: string): string {
+  const array = new Uint8Array(bytes);
+  let binary = "";
+  const chunk = 0x8000;
+  for (let offset = 0; offset < array.length; offset += chunk) binary += String.fromCharCode(...array.subarray(offset, offset + chunk));
+  return `data:${mimeType};base64,${btoa(binary)}`;
+}
+
+function clampScore(value: unknown): number {
+  const score = Number(value);
+  return Number.isFinite(score) ? Math.max(0, Math.min(100, Math.round(score))) : 0;
 }
 
 async function reviewPhotoAudit(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {

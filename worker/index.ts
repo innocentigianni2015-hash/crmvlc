@@ -11,6 +11,12 @@ const worker = {
       if (apiResponse) return withSecurityHeaders(apiResponse);
     }
 
+    if (request.method === "GET" && url.pathname === "/") {
+      const landingUrl = new URL(request.url);
+      landingUrl.pathname = "/landing";
+      return withSecurityHeaders(await handler.fetch(new Request(landingUrl, request), env, ctx));
+    }
+
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
       const response = await handleImageOptimization(request, {

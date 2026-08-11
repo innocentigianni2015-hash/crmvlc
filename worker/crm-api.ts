@@ -243,12 +243,29 @@ type PodcastAppointmentRow = {
   starts_at: string;
   ends_at: string;
   notes: string | null;
+  package_code: PodcastPackageCode;
+  package_name: string;
+  package_price_cents: number;
+  marcolifestyle_add_on: number;
+  marcolifestyle_price_cents: number;
+  subtotal_cents: number;
+  tax_name: string;
+  tax_rate_bps: number;
+  tax_cents: number;
+  total_cents: number;
   status: "scheduled" | "cancelled";
   version: number;
   created_by: string;
   created_at: string;
   updated_at: string;
 };
+
+type PodcastPackageCode = "one_minute_free" | "three_to_five_minutes";
+const PODCAST_PACKAGES: Record<PodcastPackageCode, { name: string; priceCents: number }> = {
+  one_minute_free: { name: "1 minuto · 1 telecamera", priceCents: 0 },
+  three_to_five_minutes: { name: "3–5 minuti · 3 telecamere + montaggio", priceCents: 49_900 },
+};
+const MARCOLIFESTYLE_PRICE_CENTS = 50_000;
 
 const SESSION_COOKIE = "vlc_session";
 const IMPERSONATION_COOKIE = "vlc_impersonation";
@@ -875,8 +892,8 @@ async function createPodcastAppointment(request: Request, user: UserRow, env: Ru
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   await env.DB.prepare(
-    "INSERT INTO podcast_appointments (id, guest_name, topic, interviewer_user_id, starts_at, ends_at, notes, status, version, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled', 1, ?, ?, ?)",
-  ).bind(id, appointment.guestName, appointment.topic, appointment.interviewerUserId, appointment.startsAt, appointment.endsAt, appointment.notes, user.id, now, now).run();
+    "INSERT INTO podcast_appointments (id, guest_name, topic, interviewer_user_id, starts_at, ends_at, notes, package_code, package_name, package_price_cents, marcolifestyle_add_on, marcolifestyle_price_cents, subtotal_cents, tax_name, tax_rate_bps, tax_cents, total_cents, status, version, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled', 1, ?, ?, ?)",
+  ).bind(id, appointment.guestName, appointment.topic, appointment.interviewerUserId, appointment.startsAt, appointment.endsAt, appointment.notes, appointment.packageCode, appointment.packageName, appointment.packagePriceCents, appointment.marcolifestyleAddOn ? 1 : 0, appointment.marcolifestylePriceCents, appointment.subtotalCents, appointment.taxName, appointment.taxRateBps, appointment.taxCents, appointment.totalCents, user.id, now, now).run();
   await appendAudit(env, request, user, "podcast_appointment.created", "podcast_appointment", id, appointment);
   return json({ id }, 201);
 }
@@ -911,8 +928,8 @@ async function updatePodcastAppointment(request: Request, appointmentId: string,
 
   const appointment = await validatePodcastAppointment(body, env, current.id);
   const result = await env.DB.prepare(
-    "UPDATE podcast_appointments SET guest_name = ?, topic = ?, interviewer_user_id = ?, starts_at = ?, ends_at = ?, notes = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ? AND status = 'scheduled'",
-  ).bind(appointment.guestName, appointment.topic, appointment.interviewerUserId, appointment.startsAt, appointment.endsAt, appointment.notes, now, current.id, version).run();
+    "UPDATE podcast_appointments SET guest_name = ?, topic = ?, interviewer_user_id = ?, starts_at = ?, ends_at = ?, notes = ?, package_code = ?, package_name = ?, package_price_cents = ?, marcolifestyle_add_on = ?, marcolifestyle_price_cents = ?, subtotal_cents = ?, tax_name = ?, tax_rate_bps = ?, tax_cents = ?, total_cents = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ? AND status = 'scheduled'",
+  ).bind(appointment.guestName, appointment.topic, appointment.interviewerUserId, appointment.startsAt, appointment.endsAt, appointment.notes, appointment.packageCode, appointment.packageName, appointment.packagePriceCents, appointment.marcolifestyleAddOn ? 1 : 0, appointment.marcolifestylePriceCents, appointment.subtotalCents, appointment.taxName, appointment.taxRateBps, appointment.taxCents, appointment.totalCents, now, current.id, version).run();
   if (Number(result.meta.changes ?? 0) !== 1) throw new ApiError(409, "version_conflict", "Aggiornamento concorrente rilevato.");
   await appendAudit(env, request, user, "podcast_appointment.updated", "podcast_appointment", current.id, appointment);
   return json({ ok: true });
@@ -937,6 +954,22 @@ async function validatePodcastAppointment(body: Record<string, unknown>, env: Ru
   }
   const endsAt = oneHourAfter(startsAt);
   const notes = cleanOptionalText(body.notes, 1000);
+  const packageCode = cleanText(body.packageCode, 40) as PodcastPackageCode;
+  const selectedPackage = PODCAST_PACKAGES[packageCode];
+  if (!selectedPackage) throw new ApiError(400, "invalid_podcast_package", "Seleziona un pacchetto podcast valido.");
+  const marcolifestyleAddOn = body.marcolifestyleAddOn === true || body.marcolifestyleAddOn === 1 || body.marcolifestyleAddOn === "1" || body.marcolifestyleAddOn === "on";
+  const taxConfig = await env.DB.prepare(
+    "SELECT tax_name, tax_rate_bps FROM price_lists WHERE active = 1 ORDER BY updated_at DESC LIMIT 1",
+  ).first<{ tax_name: string; tax_rate_bps: number }>();
+  const taxName = cleanText(taxConfig?.tax_name ?? "IGIC", 20) || "IGIC";
+  const taxRateBps = Number.isInteger(Number(taxConfig?.tax_rate_bps)) && Number(taxConfig?.tax_rate_bps) >= 0 && Number(taxConfig?.tax_rate_bps) <= 10_000
+    ? Number(taxConfig?.tax_rate_bps)
+    : 700;
+  const packagePriceCents = selectedPackage.priceCents;
+  const marcolifestylePriceCents = marcolifestyleAddOn ? MARCOLIFESTYLE_PRICE_CENTS : 0;
+  const subtotalCents = packagePriceCents + marcolifestylePriceCents;
+  const taxCents = Math.round(subtotalCents * taxRateBps / 10_000);
+  const totalCents = subtotalCents + taxCents;
   const interviewer = await env.DB.prepare(
     "SELECT id FROM users WHERE id = ? AND active = 1 AND role <> 'distributor' LIMIT 1",
   ).bind(interviewerUserId).first();
@@ -950,7 +983,12 @@ async function validatePodcastAppointment(body: Record<string, unknown>, env: Ru
       "SELECT id FROM podcast_appointments WHERE interviewer_user_id = ? AND status = 'scheduled' AND starts_at < ? AND ends_at > ? LIMIT 1",
     ).bind(interviewerUserId, endsAt, startsAt).first();
   if (conflict) throw new ApiError(409, "interviewer_not_available", "L’intervistatore ha già un appuntamento in questa fascia oraria.");
-  return { guestName, topic, interviewerUserId, startsAt, endsAt, notes };
+  return {
+    guestName, topic, interviewerUserId, startsAt, endsAt, notes,
+    packageCode, packageName: selectedPackage.name, packagePriceCents,
+    marcolifestyleAddOn, marcolifestylePriceCents, subtotalCents,
+    taxName, taxRateBps, taxCents, totalCents,
+  };
 }
 
 async function createQuote(request: Request, user: UserRow, env: RuntimeEnv, ctx: ExecutionContext): Promise<Response> {

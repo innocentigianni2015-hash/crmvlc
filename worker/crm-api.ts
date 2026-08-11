@@ -2,11 +2,14 @@ import {
   canApplyQuoteDiscount,
   canCancelSignedContract,
   canCreateQuote,
+  canManagePodcastCalendar,
   canManageDeliveries,
   canManagePriceList,
   canCreateUserWithRole,
+  canReadPodcastCalendar,
   canReadPriceList,
   canReadRecord,
+  canUseDiscountCampaign,
   canWriteDelivery,
   canWriteRecord,
   canUpdateUserRole,
@@ -23,6 +26,7 @@ import { handleOperationsApi } from "./operations-api.js";
 import { handleVipPublicApi } from "./vip-public-api.js";
 import { createPasswordHash, handlePasswordAuth } from "./password-auth.js";
 import { createImpersonationToken, verifyImpersonationToken } from "./impersonation.js";
+import { canaryDateKey, canaryLocalToIso, oneHourAfter } from "./podcast-scheduling.js";
 
 type RuntimeEnv = Env & {
   AUTH_SECRET?: string;
@@ -192,6 +196,7 @@ type QuoteRow = {
   tax_rate_bps: number;
   months: number;
   subtotal_cents: number;
+  discount_campaign_id: string | null;
   discount_bps: number;
   discount_reason: string | null;
   discount_cents: number;
@@ -206,6 +211,37 @@ type QuoteRow = {
   converted_at: string | null;
   created_by: string;
   created_at: string;
+};
+
+type DiscountCampaignRow = {
+  id: string;
+  title: string;
+  message: string;
+  discount_bps: number;
+  starts_on: string;
+  ends_on: string;
+  active: number;
+  created_by: string;
+  created_at: string;
+  deactivated_at: string | null;
+  deactivated_by: string | null;
+  usage_count?: number;
+};
+
+type PodcastAppointmentRow = {
+  id: string;
+  guest_name: string;
+  topic: string;
+  interviewer_user_id: string;
+  interviewer_name?: string;
+  starts_at: string;
+  ends_at: string;
+  notes: string | null;
+  status: "scheduled" | "cancelled";
+  version: number;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
 };
 
 const SESSION_COOKIE = "vlc_session";
@@ -329,6 +365,22 @@ export async function handleCrmApi(
     const priceItemMatch = url.pathname.match(/^\/api\/price-items\/([^/]+)$/);
     if (priceItemMatch && request.method === "PATCH") {
       return updatePriceItem(request, priceItemMatch[1], user, env);
+    }
+
+    if (url.pathname === "/api/discount-campaigns" && request.method === "POST") {
+      return createDiscountCampaign(request, user, env);
+    }
+    const discountCampaignMatch = url.pathname.match(/^\/api\/discount-campaigns\/([^/]+)$/);
+    if (discountCampaignMatch && request.method === "PATCH") {
+      return deactivateDiscountCampaign(request, discountCampaignMatch[1], user, env);
+    }
+
+    if (url.pathname === "/api/podcast-appointments" && request.method === "POST") {
+      return createPodcastAppointment(request, user, env);
+    }
+    const podcastAppointmentMatch = url.pathname.match(/^\/api\/podcast-appointments\/([^/]+)$/);
+    if (podcastAppointmentMatch && request.method === "PATCH") {
+      return updatePodcastAppointment(request, podcastAppointmentMatch[1], user, env);
     }
 
     if (url.pathname === "/api/quotes" && request.method === "POST") {
@@ -664,6 +716,29 @@ async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Resp
     }
   }
 
+  let discountCampaigns: DiscountCampaignRow[] = [];
+  if (user.role === "super_admin") {
+    discountCampaigns = (await env.DB.prepare(
+      "SELECT dc.*, (SELECT COUNT(*) FROM quotes q WHERE q.discount_campaign_id = dc.id) AS usage_count FROM discount_campaigns dc ORDER BY dc.created_at DESC LIMIT 250",
+    ).all<DiscountCampaignRow>()).results;
+  } else if (canUseDiscountCampaign(user)) {
+    const today = canaryDateKey();
+    discountCampaigns = (await env.DB.prepare(
+      "SELECT dc.*, (SELECT COUNT(*) FROM quotes q WHERE q.discount_campaign_id = dc.id) AS usage_count FROM discount_campaigns dc WHERE dc.active = 1 AND dc.starts_on <= ? AND dc.ends_on >= ? ORDER BY dc.created_at DESC LIMIT 50",
+    ).bind(today, today).all<DiscountCampaignRow>()).results;
+  }
+
+  let podcastAppointments: PodcastAppointmentRow[] = [];
+  let podcastInterviewers: Record<string, unknown>[] = [];
+  if (canReadPodcastCalendar(user)) {
+    podcastAppointments = (await env.DB.prepare(
+      "SELECT p.*, u.name AS interviewer_name FROM podcast_appointments p JOIN users u ON u.id = p.interviewer_user_id ORDER BY p.starts_at DESC LIMIT 500",
+    ).all<PodcastAppointmentRow>()).results;
+    podcastInterviewers = (await env.DB.prepare(
+      "SELECT id, email, name, phone, role, island, active FROM users WHERE active = 1 AND role <> 'distributor' ORDER BY name",
+    ).all()).results;
+  }
+
   let users: Record<string, unknown>[] = [];
   let audit: Record<string, unknown>[] = [];
   let emailOutbox: Record<string, unknown>[] = [];
@@ -699,6 +774,9 @@ async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Resp
     emailOutbox,
     priceList,
     priceItems,
+    discountCampaigns,
+    podcastAppointments,
+    podcastInterviewers,
     demoMode: isDemoEnabled(env) && user.email === normalizeEmail(env.DEMO_EMAIL),
   });
 }
@@ -733,6 +811,142 @@ async function updatePriceItem(request: Request, itemId: string, user: UserRow, 
   return json({ ok: true });
 }
 
+async function createDiscountCampaign(request: Request, user: UserRow, env: RuntimeEnv): Promise<Response> {
+  requireSuperAdmin(user);
+  const body = await readJson<Record<string, unknown>>(request);
+  const title = cleanText(body.title, 120);
+  const message = cleanText(body.message, 300);
+  const discountPercent = Number(body.discountPercent);
+  const startsOn = strictDateKey(body.startsOn);
+  const endsOn = strictDateKey(body.endsOn);
+  if (!title || !message) throw new ApiError(400, "invalid_campaign", "Inserisci titolo e messaggio della promozione.");
+  if (!Number.isFinite(discountPercent) || discountPercent <= 0 || discountPercent > 100) {
+    throw new ApiError(400, "invalid_discount", "Lo sconto deve essere maggiore di 0 e non può superare il 100%.");
+  }
+  if (startsOn > endsOn) throw new ApiError(400, "invalid_campaign_dates", "La data finale deve essere uguale o successiva alla data iniziale.");
+
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const discountBps = Math.round(discountPercent * 100);
+  await env.DB.prepare(
+    "INSERT INTO discount_campaigns (id, title, message, discount_bps, starts_on, ends_on, active, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)",
+  ).bind(id, title, message, discountBps, startsOn, endsOn, user.id, now).run();
+  await appendAudit(env, request, user, "discount_campaign.created", "discount_campaign", id, {
+    title,
+    discountBps,
+    startsOn,
+    endsOn,
+  });
+  return json({ id }, 201);
+}
+
+async function deactivateDiscountCampaign(request: Request, campaignId: string, user: UserRow, env: RuntimeEnv): Promise<Response> {
+  requireSuperAdmin(user);
+  const body = await readJson<Record<string, unknown>>(request);
+  if (body.active !== false) {
+    throw new ApiError(400, "campaign_deactivation_required", "Le promozioni non si modificano: puoi solo disattivarle e crearne una nuova.");
+  }
+  const current = await env.DB.prepare("SELECT * FROM discount_campaigns WHERE id = ? LIMIT 1")
+    .bind(campaignId).first<DiscountCampaignRow>();
+  if (!current) throw new ApiError(404, "campaign_not_found", "Promozione non trovata.");
+  if (current.active === 0) return json({ ok: true });
+
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    "UPDATE discount_campaigns SET active = 0, deactivated_at = ?, deactivated_by = ? WHERE id = ? AND active = 1",
+  ).bind(now, user.id, current.id).run();
+  await appendAudit(env, request, user, "discount_campaign.deactivated", "discount_campaign", current.id, {
+    title: current.title,
+    usageCount: Number(current.usage_count ?? 0),
+  });
+  return json({ ok: true });
+}
+
+async function createPodcastAppointment(request: Request, user: UserRow, env: RuntimeEnv): Promise<Response> {
+  requirePodcastManager(user);
+  const body = await readJson<Record<string, unknown>>(request);
+  const appointment = await validatePodcastAppointment(body, env);
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    "INSERT INTO podcast_appointments (id, guest_name, topic, interviewer_user_id, starts_at, ends_at, notes, status, version, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'scheduled', 1, ?, ?, ?)",
+  ).bind(id, appointment.guestName, appointment.topic, appointment.interviewerUserId, appointment.startsAt, appointment.endsAt, appointment.notes, user.id, now, now).run();
+  await appendAudit(env, request, user, "podcast_appointment.created", "podcast_appointment", id, appointment);
+  return json({ id }, 201);
+}
+
+async function updatePodcastAppointment(request: Request, appointmentId: string, user: UserRow, env: RuntimeEnv): Promise<Response> {
+  requirePodcastManager(user);
+  const current = await env.DB.prepare("SELECT * FROM podcast_appointments WHERE id = ? LIMIT 1")
+    .bind(appointmentId).first<PodcastAppointmentRow>();
+  if (!current) throw new ApiError(404, "podcast_appointment_not_found", "Appuntamento podcast non trovato.");
+  const body = await readJson<Record<string, unknown>>(request);
+  const version = Number(body.version);
+  if (!Number.isInteger(version) || version !== current.version) {
+    throw new ApiError(409, "version_conflict", "L’appuntamento è stato modificato da un altro utente. Ricarica il calendario.");
+  }
+
+  const now = new Date().toISOString();
+  if (body.status === "cancelled") {
+    if (current.status === "cancelled") return json({ ok: true });
+    const result = await env.DB.prepare(
+      "UPDATE podcast_appointments SET status = 'cancelled', version = version + 1, updated_at = ? WHERE id = ? AND version = ? AND status = 'scheduled'",
+    ).bind(now, current.id, version).run();
+    if (Number(result.meta.changes ?? 0) !== 1) throw new ApiError(409, "version_conflict", "Aggiornamento concorrente rilevato.");
+    await appendAudit(env, request, user, "podcast_appointment.cancelled", "podcast_appointment", current.id, {
+      startsAt: current.starts_at,
+      interviewerUserId: current.interviewer_user_id,
+    });
+    return json({ ok: true });
+  }
+  if (current.status === "cancelled") {
+    throw new ApiError(409, "cancelled_appointment_immutable", "Un appuntamento annullato resta nello storico. Creane uno nuovo.");
+  }
+
+  const appointment = await validatePodcastAppointment(body, env, current.id);
+  const result = await env.DB.prepare(
+    "UPDATE podcast_appointments SET guest_name = ?, topic = ?, interviewer_user_id = ?, starts_at = ?, ends_at = ?, notes = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ? AND status = 'scheduled'",
+  ).bind(appointment.guestName, appointment.topic, appointment.interviewerUserId, appointment.startsAt, appointment.endsAt, appointment.notes, now, current.id, version).run();
+  if (Number(result.meta.changes ?? 0) !== 1) throw new ApiError(409, "version_conflict", "Aggiornamento concorrente rilevato.");
+  await appendAudit(env, request, user, "podcast_appointment.updated", "podcast_appointment", current.id, appointment);
+  return json({ ok: true });
+}
+
+async function validatePodcastAppointment(body: Record<string, unknown>, env: RuntimeEnv, excludeId?: string) {
+  const guestName = cleanText(body.guestName, 120);
+  const topic = cleanText(body.topic, 180);
+  const interviewerUserId = cleanText(body.interviewerUserId, 128);
+  const date = strictDateKey(body.date);
+  const time = cleanText(body.time, 5);
+  const startsAt = canaryLocalToIso(date, time);
+  if (!guestName || !topic || !interviewerUserId) {
+    throw new ApiError(400, "invalid_podcast_appointment", "Inserisci ospite, argomento e intervistatore.");
+  }
+  if (!startsAt) throw new ApiError(400, "invalid_podcast_time", "Data o orario non validi per il fuso delle Canarie.");
+  if (new Date(startsAt).getTime() < Date.now() - 5 * 60_000) {
+    throw new ApiError(400, "podcast_time_in_past", "L’appuntamento deve iniziare nel futuro.");
+  }
+  if (new Date(startsAt).getTime() > Date.now() + 2 * 365 * 24 * 60 * 60_000) {
+    throw new ApiError(400, "podcast_time_too_far", "Puoi pianificare appuntamenti entro i prossimi due anni.");
+  }
+  const endsAt = oneHourAfter(startsAt);
+  const notes = cleanOptionalText(body.notes, 1000);
+  const interviewer = await env.DB.prepare(
+    "SELECT id FROM users WHERE id = ? AND active = 1 AND role <> 'distributor' LIMIT 1",
+  ).bind(interviewerUserId).first();
+  if (!interviewer) throw new ApiError(400, "invalid_interviewer", "L’intervistatore selezionato non è disponibile.");
+
+  const conflict = excludeId
+    ? await env.DB.prepare(
+      "SELECT id FROM podcast_appointments WHERE interviewer_user_id = ? AND status = 'scheduled' AND starts_at < ? AND ends_at > ? AND id <> ? LIMIT 1",
+    ).bind(interviewerUserId, endsAt, startsAt, excludeId).first()
+    : await env.DB.prepare(
+      "SELECT id FROM podcast_appointments WHERE interviewer_user_id = ? AND status = 'scheduled' AND starts_at < ? AND ends_at > ? LIMIT 1",
+    ).bind(interviewerUserId, endsAt, startsAt).first();
+  if (conflict) throw new ApiError(409, "interviewer_not_available", "L’intervistatore ha già un appuntamento in questa fascia oraria.");
+  return { guestName, topic, interviewerUserId, startsAt, endsAt, notes };
+}
+
 async function createQuote(request: Request, user: UserRow, env: RuntimeEnv, ctx: ExecutionContext): Promise<Response> {
   if (!canCreateQuote(user)) throw new ApiError(403, "not_allowed", "Il Distributore non può creare preventivi.");
   const body = await readJson<Record<string, unknown>>(request);
@@ -742,16 +956,33 @@ async function createQuote(request: Request, user: UserRow, env: RuntimeEnv, ctx
 
   const months = positiveInteger(body.months, 36);
   const validDays = positiveInteger(body.validDays ?? 30, 90);
-  const discountPercent = Number(body.discountPercent ?? 0);
-  if (!Number.isFinite(discountPercent) || discountPercent < 0 || discountPercent > 100) {
-    throw new ApiError(400, "invalid_discount", "Lo sconto deve essere compreso tra 0 e 100%.");
+  const discountCampaignId = cleanOptionalText(body.discountCampaignId, 128);
+  let discountBps = 0;
+  let discountReason: string | null = null;
+  if (discountCampaignId) {
+    if (!canUseDiscountCampaign(user)) {
+      throw new ApiError(403, "discount_campaign_not_allowed", "Il tuo ruolo non può usare promozioni commerciali.");
+    }
+    const campaign = await env.DB.prepare("SELECT * FROM discount_campaigns WHERE id = ? LIMIT 1")
+      .bind(discountCampaignId).first<DiscountCampaignRow>();
+    const today = canaryDateKey();
+    if (!campaign || campaign.active !== 1 || campaign.starts_on > today || campaign.ends_on < today) {
+      throw new ApiError(409, "discount_campaign_unavailable", "La promozione selezionata non è più disponibile.");
+    }
+    discountBps = campaign.discount_bps;
+    discountReason = campaign.title;
+  } else {
+    const discountPercent = Number(body.discountPercent ?? 0);
+    if (!Number.isFinite(discountPercent) || discountPercent < 0 || discountPercent > 100) {
+      throw new ApiError(400, "invalid_discount", "Lo sconto deve essere compreso tra 0 e 100%.");
+    }
+    discountBps = Math.round(discountPercent * 100);
+    if (discountBps > 0 && !canApplyQuoteDiscount(user)) {
+      throw new ApiError(403, "discount_not_allowed", "Solo il Super Admin può applicare sconti manuali.");
+    }
+    discountReason = cleanOptionalText(body.discountReason, 300);
+    if (discountBps > 0 && !discountReason) throw new ApiError(400, "discount_reason_required", "Indica il motivo dello sconto.");
   }
-  const discountBps = Math.round(discountPercent * 100);
-  if (discountBps > 0 && !canApplyQuoteDiscount(user)) {
-    throw new ApiError(403, "discount_not_allowed", "Solo il Super Admin può applicare sconti.");
-  }
-  const discountReason = cleanOptionalText(body.discountReason, 300);
-  if (discountBps > 0 && !discountReason) throw new ApiError(400, "discount_reason_required", "Indica il motivo dello sconto.");
   const customerNote = cleanOptionalText(body.customerNote, 700);
 
   if (!Array.isArray(body.items) || body.items.length === 0 || body.items.length > 30) {
@@ -833,8 +1064,8 @@ async function createQuote(request: Request, user: UserRow, env: RuntimeEnv, ctx
   try {
     const statements = [
       env.DB.prepare(
-        "INSERT INTO quotes (id, quote_number, sequence, year, client_id, price_list_id, status, owner_user_id, island, customer_company, customer_contact, customer_email, currency, tax_name, tax_rate_bps, months, subtotal_cents, discount_bps, discount_reason, discount_cents, net_cents, tax_cents, total_cents, customer_note, valid_until, pdf_r2_key, pdf_sha256, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, 'issued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      ).bind(id, quoteNumber, sequence, year, client.id, priceList.id, client.owner_user_id, client.island, client.company_name, client.contact_name, client.email, priceList.currency, priceList.tax_name, priceList.tax_rate_bps, months, totals.subtotalCents, discountBps, discountReason, totals.discountCents, totals.netCents, totals.taxCents, totals.totalCents, customerNote, validUntil, pdfKey, pdfSha256, user.id, createdAt),
+        "INSERT INTO quotes (id, quote_number, sequence, year, client_id, price_list_id, status, owner_user_id, island, customer_company, customer_contact, customer_email, currency, tax_name, tax_rate_bps, months, subtotal_cents, discount_campaign_id, discount_bps, discount_reason, discount_cents, net_cents, tax_cents, total_cents, customer_note, valid_until, pdf_r2_key, pdf_sha256, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, 'issued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).bind(id, quoteNumber, sequence, year, client.id, priceList.id, client.owner_user_id, client.island, client.company_name, client.contact_name, client.email, priceList.currency, priceList.tax_name, priceList.tax_rate_bps, months, totals.subtotalCents, discountCampaignId, discountBps, discountReason, totals.discountCents, totals.netCents, totals.taxCents, totals.totalCents, customerNote, validUntil, pdfKey, pdfSha256, user.id, createdAt),
       ...totals.lines.map((item) => env.DB.prepare(
         "INSERT INTO quote_items (id, quote_id, price_item_id, code, name, dimensions, monthly_price_cents, quantity, months, line_subtotal_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       ).bind(crypto.randomUUID(), id, item.priceItemId, item.code, item.name, item.dimensions, item.monthlyPriceCents, item.quantity, item.months, item.lineSubtotalCents)),
@@ -849,6 +1080,7 @@ async function createQuote(request: Request, user: UserRow, env: RuntimeEnv, ctx
     clientId: client.id,
     island: client.island,
     subtotalCents: totals.subtotalCents,
+    discountCampaignId,
     discountBps,
     netCents: totals.netCents,
     taxRateBps: priceList.tax_rate_bps,
@@ -1606,6 +1838,12 @@ function requireUserManager(user: UserRow): void {
   }
 }
 
+function requirePodcastManager(user: UserRow): void {
+  if (!canManagePodcastCalendar(user)) {
+    throw new ApiError(403, "podcast_manager_required", "Solo Super Admin e Admin possono gestire il calendario podcast.");
+  }
+}
+
 function isGlobalOperator(user: UserRow): boolean {
   return user.role === "super_admin" || user.role === "admin";
 }
@@ -1796,6 +2034,16 @@ function optionalDate(value: unknown): string | null {
   if (!date) return null;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(Date.parse(`${date}T00:00:00Z`))) {
     throw new ApiError(400, "invalid_date", "La data programmata non è valida.");
+  }
+  return date;
+}
+
+function strictDateKey(value: unknown): string {
+  const date = cleanText(value, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new ApiError(400, "invalid_date", "Inserisci una data valida.");
+  const parsed = new Date(`${date}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) {
+    throw new ApiError(400, "invalid_date", "Inserisci una data valida.");
   }
   return date;
 }

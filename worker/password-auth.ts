@@ -8,6 +8,7 @@ type PasswordUser = {
   name: string;
   role: Role;
   island: string | null;
+  language: "es" | "it" | "en";
   active: number;
   password_hash: string | null;
   password_salt: string | null;
@@ -193,12 +194,13 @@ async function forgotPassword(request: Request, env: AuthEnv): Promise<Response>
         const origin = new URL(request.url).origin;
         const link = `${origin}/?reset=${encodeURIComponent(token)}`;
         if (!env.EMAIL_FROM) throw new AuthError(503, "email_not_configured", "Mittente email non configurato.");
+        const message = passwordResetMessage(user.language ?? "es", link);
         await env.EMAIL.send({
           from: { name: "CRMVLC", email: env.EMAIL_FROM },
           to: user.email,
-          subject: "Imposta o recupera la password CRMVLC",
-          text: `Apri questo collegamento entro 30 minuti per impostare la password: ${link}`,
-          html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto"><h2>CRMVLC</h2><p>Apri il collegamento entro 30 minuti per impostare la password.</p><p><a href="${escapeHtml(link)}">Imposta password</a></p><p>Se non hai richiesto questa operazione, ignora il messaggio.</p></div>`,
+          subject: message.subject,
+          text: message.text,
+          html: message.html,
         });
       }
     }
@@ -254,12 +256,12 @@ async function requireFlow(env: AuthEnv, token: string, purpose: FlowPurpose): P
 }
 
 async function getUserByEmail(env: AuthEnv, email: string): Promise<PasswordUser | null> {
-  return env.DB.prepare("SELECT id, email, name, role, island, active, password_hash, password_salt, password_iterations, must_change_password, totp_secret_encrypted FROM users WHERE email = ? LIMIT 1")
+  return env.DB.prepare("SELECT id, email, name, language, role, island, active, password_hash, password_salt, password_iterations, must_change_password, totp_secret_encrypted FROM users WHERE email = ? LIMIT 1")
     .bind(email).first<PasswordUser>();
 }
 
 async function getUserById(env: AuthEnv, id: string): Promise<PasswordUser | null> {
-  return env.DB.prepare("SELECT id, email, name, role, island, active, password_hash, password_salt, password_iterations, must_change_password, totp_secret_encrypted FROM users WHERE id = ? AND active = 1 LIMIT 1")
+  return env.DB.prepare("SELECT id, email, name, language, role, island, active, password_hash, password_salt, password_iterations, must_change_password, totp_secret_encrypted FROM users WHERE id = ? AND active = 1 LIMIT 1")
     .bind(id).first<PasswordUser>();
 }
 
@@ -375,7 +377,26 @@ function authJson(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
 }
 
-function publicUser(user: PasswordUser) { return { id: user.id, email: user.email, name: user.name, role: user.role, island: user.island }; }
+function publicUser(user: PasswordUser) { return { id: user.id, email: user.email, name: user.name, language: user.language ?? "es", role: user.role, island: user.island }; }
+
+function passwordResetMessage(language: PasswordUser["language"], link: string) {
+  const safeLink = escapeHtml(link);
+  if (language === "it") return {
+    subject: "Imposta o recupera la password CRMVLC",
+    text: `Apri questo collegamento entro 30 minuti per impostare la password: ${link}`,
+    html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto"><h2>CRMVLC</h2><p>Apri il collegamento entro 30 minuti per impostare la password.</p><p><a href="${safeLink}">Imposta password</a></p><p>Se non hai richiesto questa operazione, ignora il messaggio.</p></div>`,
+  };
+  if (language === "en") return {
+    subject: "Set or recover your CRMVLC password",
+    text: `Open this link within 30 minutes to set your password: ${link}`,
+    html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto"><h2>CRMVLC</h2><p>Open the link within 30 minutes to set your password.</p><p><a href="${safeLink}">Set password</a></p><p>If you did not request this action, ignore this message.</p></div>`,
+  };
+  return {
+    subject: "Configura o recupera tu contraseña CRMVLC",
+    text: `Abre este enlace en un plazo de 30 minutos para configurar tu contraseña: ${link}`,
+    html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto"><h2>CRMVLC</h2><p>Abre el enlace en un plazo de 30 minutos para configurar tu contraseña.</p><p><a href="${safeLink}">Configurar contraseña</a></p><p>Si no has solicitado esta operación, ignora el mensaje.</p></div>`,
+  };
+}
 function digits(value: unknown) { return String(value ?? "").replace(/\D/g, "").slice(0, 6); }
 function isEmail(value: string) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) && value.length <= 254; }
 function safeJson(value: string | null): Record<string, unknown> { try { return value ? JSON.parse(value) as Record<string, unknown> : {}; } catch { return {}; } }

@@ -28,6 +28,7 @@ type Snapshot = {
 };
 
 const ISLANDS = ["Tenerife", "Gran Canaria", "Lanzarote", "Fuerteventura", "La Palma"];
+const WHATSAPP_URL = "https://wa.me/34602576044?text=Buongiorno%2C%20contatto%20CRMVLC%20per%20un%27informazione.";
 const TABS = [
   ["overview", "Regia"],
   ["vip", "VIP & Sponsor"],
@@ -186,7 +187,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify }: {
 function Overview({ data, user }: { data: Snapshot; user: User }) {
   const integrations = [
     ["Email OTP", data.integrations.email, "Identità e ricevute"],
-    ["WhatsApp", data.integrations.whatsapp, "Coupon e automazioni"],
+    ["WhatsApp", data.integrations.whatsapp, "Chat diretta · +34 602 576 044"],
     ["Stripe / SEPA", data.integrations.payments, "Incassi ricorrenti"],
     ["Mappe", data.integrations.maps, "Percorsi e mappe pubbliche"],
     ["AI fotografica", data.integrations.photoAi, "Controllo qualità immagini"],
@@ -203,7 +204,7 @@ function Overview({ data, user }: { data: Snapshot; user: User }) {
     <div className="hub-two">
       <div className="module-card">
         <header><div><span className="module-index">01</span><h2>Stato piattaforma</h2></div><small>Perimetro: {user.island ?? "tutte le isole"}</small></header>
-        <div className="integration-list">{integrations.map(([label, connected, note]) => <div key={label}><span className={`integration-dot ${connected ? "connected" : "pending"}`} /><div><strong>{label}</strong><small>{note}</small></div><b>{connected ? "Collegato" : "Da collegare"}</b></div>)}</div>
+        <div className="integration-list">{integrations.map(([label, connected, note]) => <div key={label}><span className={`integration-dot ${connected ? "connected" : "pending"}`} /><div><strong>{label}</strong><small>{note}</small></div>{label === "WhatsApp" ? <a href={WHATSAPP_URL} target="_blank" rel="noopener noreferrer">Apri chat</a> : <b>{connected ? "Collegato" : "Da collegare"}</b>}</div>)}</div>
       </div>
       <div className="module-card readiness-card">
         <header><div><span className="module-index">02</span><h2>Copertura moduli</h2></div></header>

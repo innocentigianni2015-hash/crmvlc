@@ -14,7 +14,7 @@ export type HelpUser = {
 };
 
 type HelpEnv = Env & {
-  AI: Ai;
+  AI?: Ai;
   AI_MODEL?: string;
   AI_MONTHLY_BUDGET_MICRO_USD?: string;
 };

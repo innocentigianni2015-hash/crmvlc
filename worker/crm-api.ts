@@ -31,6 +31,9 @@ import { canaryDateKey, canaryLocalToIso, oneHourAfter } from "./podcast-schedul
 import { handleHelpApi, loadHelpBootstrap } from "./help-assistant.js";
 
 type RuntimeEnv = Env & {
+  AI?: Ai;
+  AI_MODEL?: string;
+  AI_MONTHLY_BUDGET_MICRO_USD?: string;
   AUTH_SECRET?: string;
   DEMO_MODE?: string;
   DEMO_EMAIL?: string;

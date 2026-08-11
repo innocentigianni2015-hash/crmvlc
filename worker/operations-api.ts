@@ -14,6 +14,8 @@ export type OperationsUser = {
   role: "super_admin" | "admin" | "sales_manager" | "sales" | "distributor";
   island: string | null;
   active: number;
+  sessionActor?: { id: string; name: string; email: string; role: "super_admin" | "admin" | "sales_manager" | "sales" | "distributor" };
+  impersonation?: { startedAt: string; expiresAt: string } | null;
 };
 
 const ISLANDS = ["Tenerife", "Gran Canaria", "Lanzarote", "Fuerteventura", "La Palma"] as const;
@@ -564,11 +566,24 @@ async function nearestDistributionPoint(env: RuntimeEnv, island: string, latitud
 }
 
 async function appendOperationsAudit(env: RuntimeEnv, request: Request, user: OperationsUser, action: string, entityType: string, entityId: string, payload: unknown): Promise<void> {
-  const payloadJson = stableJson(payload);
+  const auditedPayload = user.impersonation
+    ? {
+      ...(payload !== null && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : { value: payload }),
+      impersonation: {
+        actorUserId: user.sessionActor?.id ?? user.id,
+        actorName: user.sessionActor?.name ?? user.name,
+        effectiveUserId: user.id,
+        effectiveUserName: user.name,
+        effectiveRole: user.role,
+        startedAt: user.impersonation.startedAt,
+      },
+    }
+    : payload;
+  const payloadJson = stableJson(auditedPayload);
   const rawIp = request.headers.get("cf-connecting-ip");
   const ipHash = rawIp ? await sha256(`${env.AUTH_SECRET ?? "vlc"}:${rawIp}`) : null;
   await env.DB.prepare("INSERT INTO audit_events (id, actor_user_id, action, entity_type, entity_id, payload_json, payload_sha256, ip_hash, user_agent, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-    .bind(crypto.randomUUID(), user.id, action, entityType, entityId, payloadJson, await sha256(payloadJson), ipHash, cleanOptional(request.headers.get("user-agent"), 300), new Date().toISOString()).run();
+    .bind(crypto.randomUUID(), user.sessionActor?.id ?? user.id, action, entityType, entityId, payloadJson, await sha256(payloadJson), ipHash, cleanOptional(request.headers.get("user-agent"), 300), new Date().toISOString()).run();
 }
 
 async function readJson<T>(request: Request): Promise<T> {

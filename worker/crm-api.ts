@@ -22,6 +22,7 @@ import { buildQuotePdf } from "./quote-pdf.js";
 import { handleOperationsApi } from "./operations-api.js";
 import { handleVipPublicApi } from "./vip-public-api.js";
 import { createPasswordHash, handlePasswordAuth } from "./password-auth.js";
+import { createImpersonationToken, verifyImpersonationToken } from "./impersonation.js";
 
 type RuntimeEnv = Env & {
   AUTH_SECRET?: string;
@@ -39,6 +40,11 @@ type UserRow = {
   island: string | null;
   active: number;
   created_at?: string;
+};
+
+type AuthenticatedUser = UserRow & {
+  sessionActor: UserRow;
+  impersonation: { startedAt: string; expiresAt: string } | null;
 };
 
 type ClientRow = {
@@ -203,6 +209,8 @@ type QuoteRow = {
 };
 
 const SESSION_COOKIE = "vlc_session";
+const IMPERSONATION_COOKIE = "vlc_impersonation";
+const IMPERSONATION_SECONDS = 60 * 60;
 const MAX_JSON_BYTES = 512_000;
 const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
 const MAX_CONTRACT_BYTES = 2_750_000;
@@ -259,7 +267,10 @@ export async function handleCrmApi(
     if (url.pathname.startsWith("/api/auth/password/") || url.pathname.startsWith("/api/auth/totp/")) {
       await ensureBootstrapAdmin(env);
       const passwordResponse = await handlePasswordAuth(request, env);
-      if (passwordResponse) return passwordResponse;
+      if (passwordResponse) {
+        if (passwordResponse.ok) passwordResponse.headers.append("Set-Cookie", clearImpersonationCookie(request));
+        return passwordResponse;
+      }
     }
 
     if (url.pathname === "/api/auth/demo" && request.method === "POST") {
@@ -286,6 +297,12 @@ export async function handleCrmApi(
 
     const user = await requireUser(request, env, ctx);
 
+    if (url.pathname === "/api/admin/impersonation/start" && request.method === "POST") {
+      return startImpersonation(request, user, env);
+    }
+    if (url.pathname === "/api/admin/impersonation/stop" && request.method === "POST") {
+      return stopImpersonation(request, user, env);
+    }
     if (url.pathname === "/api/bootstrap" && request.method === "GET") {
       return bootstrap(user, env);
     }
@@ -406,10 +423,11 @@ async function loginDemo(request: Request, env: RuntimeEnv): Promise<Response> {
   const expiresAt = new Date(now.getTime() + hours * 60 * 60 * 1000).toISOString();
   await env.DB.prepare("INSERT INTO sessions (id, user_id, expires_at, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?)")
     .bind(sessionId, user.id, expiresAt, now.toISOString(), now.toISOString()).run();
-  await appendAudit(env, request, user.id, "auth.demo_login", "user", user.id, { email: user.email, demo: true });
+  await appendAudit(env, request, user, "auth.demo_login", "user", user.id, { email: user.email, demo: true });
 
   const response = json({ user: publicUser(user), demoMode: true });
   response.headers.append("Set-Cookie", sessionCookie(token, request, hours * 60 * 60));
+  response.headers.append("Set-Cookie", clearImpersonationCookie(request));
   return response;
 }
 
@@ -421,6 +439,61 @@ async function logout(request: Request, env: RuntimeEnv): Promise<Response> {
   }
   const response = json({ ok: true });
   response.headers.append("Set-Cookie", clearSessionCookie(request));
+  response.headers.append("Set-Cookie", clearImpersonationCookie(request));
+  return response;
+}
+
+async function startImpersonation(request: Request, user: AuthenticatedUser, env: RuntimeEnv): Promise<Response> {
+  const actor = user.sessionActor;
+  if (actor.role !== "super_admin") throw new ApiError(403, "super_admin_required", "Solo il Super Admin può usare le viste operative.");
+  if (!env.AUTH_SECRET) throw new ApiError(503, "auth_not_configured", "La chiave di autenticazione non è configurata.");
+
+  const body = await readJson<{ userId?: string }>(request);
+  const targetId = cleanText(body.userId, 128);
+  const target = targetId ? await env.DB.prepare(
+    "SELECT id, email, name, phone, role, island, active FROM users WHERE id = ? AND active = 1 LIMIT 1",
+  ).bind(targetId).first<UserRow>() : null;
+  if (!target || !["sales", "distributor"].includes(target.role)) {
+    throw new ApiError(404, "impersonation_target_not_found", "Seleziona un Sales o Distributore attivo.");
+  }
+
+  const startedAt = Math.floor(Date.now() / 1000);
+  const expiresAt = startedAt + IMPERSONATION_SECONDS;
+  const token = await createImpersonationToken(env.AUTH_SECRET, {
+    version: 1,
+    actorId: actor.id,
+    targetId: target.id,
+    startedAt,
+    expiresAt,
+  });
+  await appendAudit(env, request, actor, "impersonation.started", "user", target.id, {
+    effectiveUserId: target.id,
+    effectiveUserName: target.name,
+    effectiveRole: target.role,
+    expiresAt: new Date(expiresAt * 1000).toISOString(),
+  });
+
+  const response = json({
+    ok: true,
+    user: publicUser(target),
+    expiresAt: new Date(expiresAt * 1000).toISOString(),
+  });
+  response.headers.append("Set-Cookie", impersonationCookie(token, request, 12 * 60 * 60));
+  return response;
+}
+
+async function stopImpersonation(request: Request, user: AuthenticatedUser, env: RuntimeEnv): Promise<Response> {
+  const actor = user.sessionActor;
+  if (actor.role !== "super_admin") throw new ApiError(403, "super_admin_required", "Solo il Super Admin può terminare la vista operativa.");
+  if (user.impersonation) {
+    await appendAudit(env, request, user, "impersonation.stopped", "user", user.id, {
+      effectiveUserId: user.id,
+      effectiveUserName: user.name,
+      effectiveRole: user.role,
+    });
+  }
+  const response = json({ ok: true, user: publicUser(actor) });
+  response.headers.append("Set-Cookie", clearImpersonationCookie(request));
   return response;
 }
 
@@ -473,13 +546,13 @@ async function updateProfile(request: Request, user: UserRow, env: RuntimeEnv): 
   const now = new Date().toISOString();
   await env.DB.prepare("UPDATE users SET name = ?, phone = ?, updated_at = ? WHERE id = ?")
     .bind(name, phone, now, user.id).run();
-  await appendAudit(env, request, user.id, "user.profile_updated", "user", user.id, {
+  await appendAudit(env, request, user, "user.profile_updated", "user", user.id, {
     nameChanged: name !== user.name,
     phoneChanged: phone !== user.phone,
     emailChangeRequested: emailChanged,
   });
   if (emailChanged) {
-    await appendAudit(env, request, user.id, "user.email_change_requested", "user", user.id, { newEmail: requestedEmail });
+    await appendAudit(env, request, user, "user.email_change_requested", "user", user.id, { newEmail: requestedEmail });
   }
   return json({
     user: publicUser({ ...user, name, phone }),
@@ -545,10 +618,11 @@ async function confirmProfileEmail(request: Request, env: RuntimeEnv): Promise<R
   }
   const response = json({ message: "Email confermata. Accedi nuovamente con il nuovo indirizzo." });
   response.headers.append("Set-Cookie", clearSessionCookie(request));
+  response.headers.append("Set-Cookie", clearImpersonationCookie(request));
   return response;
 }
 
-async function bootstrap(user: UserRow, env: RuntimeEnv): Promise<Response> {
+async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Response> {
   const scope = recordScope(user);
   const clients = user.role === "distributor"
     ? (await env.DB.prepare(
@@ -604,8 +678,17 @@ async function bootstrap(user: UserRow, env: RuntimeEnv): Promise<Response> {
       .bind(user.island).all()).results;
   }
 
+  const impersonationUsers = user.sessionActor.role === "super_admin"
+    ? (await env.DB.prepare(
+      "SELECT id, email, name, phone, role, island, active, created_at FROM users WHERE active = 1 AND role IN ('sales', 'distributor') ORDER BY role, island, name",
+    ).all()).results
+    : [];
+
   return json({
     user: publicUser(user),
+    sessionActor: publicUser(user.sessionActor),
+    impersonation: user.impersonation,
+    impersonationUsers,
     clients,
     contracts,
     quotes,
@@ -641,7 +724,7 @@ async function updatePriceItem(request: Request, itemId: string, user: UserRow, 
   ).bind(monthlyPriceCents, now, current.id, version).run();
   if (Number(result.meta.changes ?? 0) !== 1) throw new ApiError(409, "version_conflict", "Aggiornamento concorrente rilevato.");
   await env.DB.prepare("UPDATE price_lists SET updated_at = ? WHERE id = ?").bind(now, current.price_list_id).run();
-  await appendAudit(env, request, user.id, "price_item.updated", "price_item", current.id, {
+  await appendAudit(env, request, user, "price_item.updated", "price_item", current.id, {
     code: current.code,
     previousPriceCents: current.monthly_price_cents,
     monthlyPriceCents,
@@ -761,7 +844,7 @@ async function createQuote(request: Request, user: UserRow, env: RuntimeEnv, ctx
     ctx.waitUntil(env.BUCKET.delete(pdfKey));
     throw error;
   }
-  await appendAudit(env, request, user.id, "quote.issued", "quote", id, {
+  await appendAudit(env, request, user, "quote.issued", "quote", id, {
     quoteNumber,
     clientId: client.id,
     island: client.island,
@@ -816,7 +899,7 @@ async function convertQuoteToContract(request: Request, quoteId: string, user: U
     if (latest?.status === "converted") throw new ApiError(409, "quote_already_converted", "Il preventivo è già stato convertito in contratto.");
     throw error;
   }
-  await appendAudit(env, request, user.id, "quote.converted_to_contract", "quote", quote.id, {
+  await appendAudit(env, request, user, "quote.converted_to_contract", "quote", quote.id, {
     quoteNumber: quote.quote_number,
     contractId,
     documentSha256: quote.pdf_sha256,
@@ -847,7 +930,7 @@ async function createClient(request: Request, user: UserRow, env: RuntimeEnv): P
   await env.DB.prepare(
     "INSERT INTO clients (id, company_name, contact_name, email, phone, island, stage, value_cents, owner_user_id, notes, version, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
   ).bind(id, companyName, contactName, email, phone, island, stage, valueCents, ownerUserId, notes, user.id, now, now).run();
-  await appendAudit(env, request, user.id, "client.created", "client", id, { companyName, island, ownerUserId });
+  await appendAudit(env, request, user, "client.created", "client", id, { companyName, island, ownerUserId });
   return json({ id }, 201);
 }
 
@@ -867,7 +950,7 @@ async function updateClient(request: Request, clientId: string, user: UserRow, e
     "UPDATE clients SET stage = ?, notes = ?, value_cents = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?",
   ).bind(stage, notes, valueCents, now, clientId, version).run();
   if (Number(result.meta.changes ?? 0) !== 1) throw new ApiError(409, "version_conflict", "Aggiornamento concorrente rilevato.");
-  await appendAudit(env, request, user.id, "client.updated", "client", clientId, { stage, valueCents, version: version + 1 });
+  await appendAudit(env, request, user, "client.updated", "client", clientId, { stage, valueCents, version: version + 1 });
   return json({ ok: true });
 }
 
@@ -901,7 +984,7 @@ async function createDelivery(request: Request, user: UserRow, env: RuntimeEnv):
   await env.DB.prepare(
     "INSERT INTO deliveries (id, client_id, distributor_user_id, island, status, quantity, unit, scheduled_for, delivery_contact_name, delivery_contact_email, delivery_contact_phone, delivery_address, notes, version, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, 'assigned', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
   ).bind(id, client.id, distributor.id, client.island, quantity, unit, scheduledFor, deliveryContactName, deliveryContactEmail, deliveryContactPhone, deliveryAddress, notes, user.id, now, now).run();
-  await appendAudit(env, request, user.id, "delivery.created", "delivery", id, { clientId, distributorUserId, island: client.island, quantity, unit, scheduledFor });
+  await appendAudit(env, request, user, "delivery.created", "delivery", id, { clientId, distributorUserId, island: client.island, quantity, unit, scheduledFor });
   return json({ id }, 201);
 }
 
@@ -932,7 +1015,7 @@ async function updateDelivery(request: Request, deliveryId: string, user: UserRo
     "UPDATE deliveries SET status = ?, quantity = ?, unit = ?, scheduled_for = ?, delivery_contact_name = ?, delivery_contact_email = ?, delivery_contact_phone = ?, delivery_address = ?, notes = ?, completed_at = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?",
   ).bind(status, quantity, unit, scheduledFor, deliveryContactName, deliveryContactEmail, deliveryContactPhone, deliveryAddress, notes, completedAt, now, deliveryId, version).run();
   if (Number(result.meta.changes ?? 0) !== 1) throw new ApiError(409, "version_conflict", "Aggiornamento concorrente rilevato.");
-  await appendAudit(env, request, user.id, "delivery.updated", "delivery", deliveryId, { status, quantity, unit, scheduledFor, version: version + 1 });
+  await appendAudit(env, request, user, "delivery.updated", "delivery", deliveryId, { status, quantity, unit, scheduledFor, version: version + 1 });
   return json({ ok: true });
 }
 
@@ -959,7 +1042,7 @@ async function createUser(request: Request, user: UserRow, env: RuntimeEnv): Pro
   } catch {
     throw new ApiError(409, "email_exists", "Esiste già un utente con questa email.");
   }
-  await appendAudit(env, request, user.id, "user.created", "user", id, { email, role, island });
+  await appendAudit(env, request, user, "user.created", "user", id, { email, role, island });
   return json({ id }, 201);
 }
 
@@ -984,7 +1067,7 @@ async function updateUser(request: Request, targetUserId: string, user: UserRow,
       .bind(role, island, active, now, target.id),
     env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(target.id),
   ]);
-  await appendAudit(env, request, user.id, "user.updated", "user", target.id, { role, island, active: active === 1 });
+  await appendAudit(env, request, user, "user.updated", "user", target.id, { role, island, active: active === 1 });
   return json({ ok: true });
 }
 
@@ -994,7 +1077,7 @@ async function retryOutboxMessage(request: Request, messageId: string, user: Use
   const result = await env.DB.prepare("UPDATE email_outbox SET status = 'pending', attempts = 0, next_attempt_at = ?, last_error = NULL WHERE id = ? AND status <> 'sent'")
     .bind(now, messageId).run();
   if (Number(result.meta.changes ?? 0) !== 1) throw new ApiError(404, "email_not_found", "Invio email non trovato o già completato.");
-  await appendAudit(env, request, user.id, "email.retry_requested", "email_outbox", messageId, {});
+  await appendAudit(env, request, user, "email.retry_requested", "email_outbox", messageId, {});
   ctx.waitUntil(deliverOutboxMessage(env, messageId));
   return json({ ok: true }, 202);
 }
@@ -1017,7 +1100,7 @@ async function uploadTemplate(request: Request, user: UserRow, env: RuntimeEnv, 
     ctx.waitUntil(env.BUCKET.delete(key));
     throw error;
   }
-  await appendAudit(env, request, user.id, "template.created", "contract_template", id, { name, version, filename: safeFilename(file.name) });
+  await appendAudit(env, request, user, "template.created", "contract_template", id, { name, version, filename: safeFilename(file.name) });
   return json({ id }, 201);
 }
 
@@ -1057,7 +1140,7 @@ async function createContract(request: Request, user: UserRow, env: RuntimeEnv, 
     ctx.waitUntil(env.BUCKET.delete(key));
     throw error;
   }
-  await appendAudit(env, request, user.id, "contract.created", "contract", id, { clientId, title, documentSha256, version: 1 });
+  await appendAudit(env, request, user, "contract.created", "contract", id, { clientId, title, documentSha256, version: 1 });
   return json({ id }, 201);
 }
 
@@ -1094,7 +1177,7 @@ async function requestContractSignature(request: Request, contractId: string, us
     await env.DB.prepare("DELETE FROM auth_challenges WHERE id = ?").bind(challenge.id).run();
     throw error;
   }
-  await appendAudit(env, request, user.id, "contract.signature_requested", "contract", contract.id, { signerEmail, challengeId: challenge.id });
+  await appendAudit(env, request, user, "contract.signature_requested", "contract", contract.id, { signerEmail, challengeId: challenge.id });
   return json({ challengeId: challenge.id, expiresInMinutes: OTP_TTL_MINUTES });
 }
 
@@ -1161,7 +1244,7 @@ async function completeContractSignature(request: Request, contractId: string, u
     ctx.waitUntil(Promise.all([env.BUCKET.delete(signatureKey), env.BUCKET.delete(signedDocumentKey), env.BUCKET.delete(evidenceKey)]).then(() => undefined));
     throw error;
   }
-  await appendAudit(env, request, user.id, "contract.signed", "contract", contract.id, evidence);
+  await appendAudit(env, request, user, "contract.signed", "contract", contract.id, evidence);
   ctx.waitUntil(deliverOutboxMessage(env, outboxId));
   return json({ ok: true, signedAt, documentSha256: contract.document_sha256, signedDocumentSha256, signatureSha256 });
 }
@@ -1194,7 +1277,7 @@ async function supersedeSignedContract(request: Request, contractId: string, use
     ctx.waitUntil(env.BUCKET.delete(key));
     throw error;
   }
-  await appendAudit(env, request, user.id, "contract.cancelled_and_superseded", "contract", contract.id, { reason, newContractId: newId, newVersion, documentSha256 });
+  await appendAudit(env, request, user, "contract.cancelled_and_superseded", "contract", contract.id, { reason, newContractId: newId, newVersion, documentSha256 });
   return json({ id: newId, version: newVersion }, 201);
 }
 
@@ -1228,17 +1311,47 @@ async function ensureDemoAccount(env: RuntimeEnv): Promise<UserRow> {
   return user;
 }
 
-async function requireUser(request: Request, env: RuntimeEnv, ctx: ExecutionContext): Promise<UserRow> {
+async function requireUser(request: Request, env: RuntimeEnv, ctx: ExecutionContext): Promise<AuthenticatedUser> {
   const token = cookieValue(request, SESSION_COOKIE);
   if (!token) throw new ApiError(401, "authentication_required", "Accedi per continuare.");
   const sessionId = await sha256(token);
   const now = new Date().toISOString();
-  const user = await env.DB.prepare(
+  const sessionActor = await env.DB.prepare(
     "SELECT u.id, u.email, u.name, u.phone, u.role, u.island, u.active FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id = ? AND s.expires_at > ? AND u.active = 1 LIMIT 1",
   ).bind(sessionId, now).first<UserRow>();
-  if (!user) throw new ApiError(401, "session_expired", "Sessione scaduta. Accedi nuovamente.");
+  if (!sessionActor) throw new ApiError(401, "session_expired", "Sessione scaduta. Accedi nuovamente.");
   ctx.waitUntil(env.DB.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?").bind(now, sessionId).run().then(() => undefined));
-  return user;
+
+  const authenticatedActor: AuthenticatedUser = { ...sessionActor, sessionActor, impersonation: null };
+  const impersonationToken = cookieValue(request, IMPERSONATION_COOKIE);
+  if (!impersonationToken || sessionActor.role !== "super_admin") return authenticatedActor;
+  const stoppingImpersonation = new URL(request.url).pathname === "/api/admin/impersonation/stop";
+  if (!env.AUTH_SECRET) {
+    if (stoppingImpersonation) return authenticatedActor;
+    throw new ApiError(503, "auth_not_configured", "La chiave di autenticazione non è configurata.");
+  }
+
+  const claims = await verifyImpersonationToken(env.AUTH_SECRET, impersonationToken);
+  if (!claims || claims.actorId !== sessionActor.id) {
+    if (stoppingImpersonation) return authenticatedActor;
+    throw new ApiError(409, "impersonation_expired", "La modalità operativa è scaduta. Torna alla dashboard Super Admin e riaprila.");
+  }
+  const target = await env.DB.prepare(
+    "SELECT id, email, name, phone, role, island, active FROM users WHERE id = ? AND active = 1 LIMIT 1",
+  ).bind(claims.targetId).first<UserRow>();
+  if (!target || !["sales", "distributor"].includes(target.role)) {
+    if (stoppingImpersonation) return authenticatedActor;
+    throw new ApiError(409, "impersonation_target_unavailable", "L’utente operativo non è più disponibile. Torna alla dashboard Super Admin.");
+  }
+
+  return {
+    ...target,
+    sessionActor,
+    impersonation: {
+      startedAt: new Date(claims.startedAt * 1000).toISOString(),
+      expiresAt: new Date(claims.expiresAt * 1000).toISOString(),
+    },
+  };
 }
 
 async function createChallenge(env: RuntimeEnv, email: string, purpose: "login" | "contract_sign", subjectId: string | null, requestedBy: string | null) {
@@ -1273,13 +1386,43 @@ async function assertChallenge(env: RuntimeEnv, challenge: ChallengeRow | null, 
   }
 }
 
-async function appendAudit(env: RuntimeEnv, request: Request, actorUserId: string | null, action: string, entityType: string, entityId: string, payload: unknown): Promise<void> {
-  const payloadJson = stableJson(payload);
+async function appendAudit(
+  env: RuntimeEnv,
+  request: Request,
+  actor: UserRow | AuthenticatedUser | string | null,
+  action: string,
+  entityType: string,
+  entityId: string,
+  payload: unknown,
+): Promise<void> {
+  const authenticated = typeof actor === "object" && actor !== null && "sessionActor" in actor ? actor as AuthenticatedUser : null;
+  const actorUserId = typeof actor === "string" || actor === null ? actor : authenticated?.sessionActor.id ?? actor.id;
+  const auditedPayload = authenticated?.impersonation
+    ? withImpersonationAudit(payload, authenticated)
+    : payload;
+  const payloadJson = stableJson(auditedPayload);
   const payloadSha256 = await sha256(payloadJson);
   const rawIp = request.headers.get("cf-connecting-ip");
   const ipHash = rawIp ? await sha256(`${env.AUTH_SECRET ?? "vlc"}:${rawIp}`) : null;
   await env.DB.prepare("INSERT INTO audit_events (id, actor_user_id, action, entity_type, entity_id, payload_json, payload_sha256, ip_hash, user_agent, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
     .bind(crypto.randomUUID(), actorUserId, action, entityType, entityId, payloadJson, payloadSha256, ipHash, cleanOptionalText(request.headers.get("user-agent"), 300), new Date().toISOString()).run();
+}
+
+function withImpersonationAudit(payload: unknown, user: AuthenticatedUser): Record<string, unknown> {
+  const base = payload !== null && typeof payload === "object" && !Array.isArray(payload)
+    ? payload as Record<string, unknown>
+    : { value: payload };
+  return {
+    ...base,
+    impersonation: {
+      actorUserId: user.sessionActor.id,
+      actorName: user.sessionActor.name,
+      effectiveUserId: user.id,
+      effectiveUserName: user.name,
+      effectiveRole: user.role,
+      startedAt: user.impersonation?.startedAt ?? null,
+    },
+  };
 }
 
 async function sendOtp(env: RuntimeEnv, to: string, code: string, subject: string, intro: string): Promise<void> {
@@ -1548,6 +1691,15 @@ function sessionCookie(token: string, request: Request, maxAge: number): string 
 
 function clearSessionCookie(request: Request): string {
   return sessionCookie("", request, 0);
+}
+
+function impersonationCookie(token: string, request: Request, maxAge: number): string {
+  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
+  return `${IMPERSONATION_COOKIE}=${encodeURIComponent(token)}; Path=/api; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure}`;
+}
+
+function clearImpersonationCookie(request: Request): string {
+  return impersonationCookie("", request, 0);
 }
 
 function randomToken(bytes: number): string {

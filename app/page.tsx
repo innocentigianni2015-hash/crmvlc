@@ -52,6 +52,9 @@ type Quote = {
 type Bootstrap = {
   user: User; clients: Client[]; contracts: Contract[]; quotes: Quote[]; deliveries: Delivery[]; templates: Template[]; users: User[];
   audit: AuditEvent[]; emailOutbox: EmailOutboxItem[]; priceList: PriceList | null; priceItems: PriceItem[]; demoMode?: boolean;
+  sessionActor?: User;
+  impersonation?: { startedAt: string; expiresAt: string } | null;
+  impersonationUsers?: User[];
 };
 
 const ISLANDS = ["Tenerife", "Gran Canaria", "Lanzarote", "Fuerteventura", "La Palma"];
@@ -107,6 +110,7 @@ export default function Home() {
   const [superseding, setSuperseding] = useState<Contract | null>(null);
   const [deliveryModal, setDeliveryModal] = useState<Delivery | "new" | null>(null);
   const [profileModal, setProfileModal] = useState(false);
+  const [impersonationModal, setImpersonationModal] = useState<"sales" | "distributor" | null>(null);
 
   const refresh = useCallback(async () => {
     const emailChangeToken = new URLSearchParams(window.location.search).get("email-change");
@@ -263,12 +267,33 @@ export default function Home() {
     const timer = window.setTimeout(() => setNotice(null), 4200);
     return () => window.clearTimeout(timer);
   }, [notice]);
+  useEffect(() => {
+    const expiresAt = data?.impersonation?.expiresAt;
+    if (!expiresAt) return;
+    const delay = Math.max(0, Date.parse(expiresAt) - Date.now());
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          await api("/api/admin/impersonation/stop", { method: "POST" });
+          await clearOfflineSnapshots();
+          setActive("crm");
+          await refresh();
+          setNotice({ tone: "error", text: "La modalità operativa di un’ora è terminata. Sei tornato al Super Admin." });
+        } catch (error) {
+          setNotice({ tone: "error", text: error instanceof Error ? error.message : "Modalità operativa scaduta." });
+        }
+      })();
+    }, Math.min(delay + 250, 2_147_000_000));
+    return () => window.clearTimeout(timer);
+  }, [data?.impersonation?.expiresAt, refresh]);
 
   const notify = (text: string, tone: "ok" | "error" = "ok") => setNotice({ text, tone });
 
   if (loading) return <div className="loading-screen"><div className="loading-mark">C</div><p>Caricamento area operativa…</p></div>;
   if (authRequired || !data) return <Login onAuthenticated={refresh} initialNotice={authNotice} />;
 
+  const sessionActor = data.sessionActor ?? data.user;
+  const canImpersonate = sessionActor.role === "super_admin";
   const filteredClients = data.clients.filter((client) => `${client.company_name} ${client.contact_name} ${client.email} ${client.island}`.toLowerCase().includes(search.toLowerCase()));
   const filteredContracts = data.contracts.filter((contract) => `${contract.title} ${contract.client_company ?? ""} ${contract.island}`.toLowerCase().includes(search.toLowerCase()));
   const filteredQuotes = data.quotes.filter((quote) => `${quote.quote_number} ${quote.customer_company} ${quote.customer_contact} ${quote.customer_email} ${quote.island}`.toLowerCase().includes(search.toLowerCase()));
@@ -300,6 +325,26 @@ export default function Home() {
       : "Apri il menu del browser e scegli “Installa app” o “Aggiungi alla schermata Home”.");
   }
 
+  async function impersonationStarted(role: "sales" | "distributor") {
+    await clearOfflineSnapshots();
+    setImpersonationModal(null);
+    setActive(role === "distributor" ? "distribution" : "crm");
+    await refresh();
+    notify(`Modalità ${roleLabels[role]} attivata. Stai lavorando su dati reali.`);
+  }
+
+  async function stopImpersonation() {
+    try {
+      await api("/api/admin/impersonation/stop", { method: "POST" });
+      await clearOfflineSnapshots();
+      setActive("crm");
+      await refresh();
+      notify("Sei tornato alla dashboard Super Admin.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Impossibile terminare la modalità operativa.", "error");
+    }
+  }
+
   async function changeStage(client: Client, stage: string) {
     try {
       await api(`/api/clients/${client.id}`, {
@@ -325,8 +370,10 @@ export default function Home() {
           {["super_admin", "admin", "sales_manager", "distributor"].includes(data.user.role) && <button className={active === "distribution" ? "active" : ""} onClick={() => setActive("distribution")}><i>06</i> Consegne</button>}
           {["super_admin", "admin"].includes(data.user.role) && <button className={active === "admin" ? "active" : ""} onClick={() => setActive("admin")}><i>07</i> Utenti</button>}
           {data.user.role === "super_admin" && <button className={active === "audit" ? "active" : ""} onClick={() => setActive("audit")}><i>08</i> Audit</button>}
+          {canImpersonate && <button className={data.impersonation && data.user.role === "sales" ? "active impersonation-nav" : "impersonation-nav"} onClick={() => setImpersonationModal("sales")}><i>09</i> Vista Sales</button>}
+          {canImpersonate && <button className={data.impersonation && data.user.role === "distributor" ? "active impersonation-nav" : "impersonation-nav"} onClick={() => setImpersonationModal("distributor")}><i>10</i> Vista Distributore</button>}
         </nav>
-        <div className="ops-scope"><span className="live-dot" /><div><strong>{data.demoMode ? "Dati dimostrativi" : "Dati reali"}</strong><small>{data.user.island ?? "Tutte le isole"}</small></div></div>
+        <div className="ops-scope"><span className="live-dot" /><div><strong>{data.demoMode ? "Dati dimostrativi" : "Dati reali"}</strong><small>{data.impersonation ? `Come ${data.user.name}` : data.user.island ?? "Tutte le isole"}</small></div></div>
       </aside>
 
       <main className="ops-main">
@@ -334,6 +381,7 @@ export default function Home() {
           <div className="ops-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Cerca clienti, preventivi, contratti o consegne…" aria-label="Cerca" /></div>
           <div className="ops-user">{!standalone && <button className="install-button" onClick={() => void installApp()}>Installa</button>}<button className="profile-trigger" onClick={() => setProfileModal(true)} aria-label="Modifica il profilo"><span>{initials(data.user.name)}</span><div><strong>{data.user.name}</strong><small>{roleLabels[data.user.role]}{data.user.island ? ` · ${data.user.island}` : ""}</small></div></button><button onClick={logout}>Esci</button></div>
         </header>
+        {data.impersonation && <div className="impersonation-strip"><div><strong>Modalità operativa · {roleLabels[data.user.role]}</strong><span>Stai lavorando come {data.user.name}. Le modifiche sono reali e l’audit registra anche {sessionActor.name}.</span></div><button onClick={() => void stopImpersonation()}>Torna Super Admin</button></div>}
         {(offlineMode || pendingCount > 0) && <div className={`connectivity-strip ${offlineMode ? "offline" : "pending"}`}><strong>{offlineMode ? "Modalità offline" : "Sincronizzazione"}</strong><span>{offlineMode ? `Dati salvati ${offlineSavedAt ? dateTime(new Date(offlineSavedAt).toISOString()) : "sul dispositivo"} · contratti e amministrazione richiedono la rete.` : `${pendingCount} acquisizion${pendingCount === 1 ? "e in attesa" : "i in attesa"} di invio.`}</span></div>}
         {data.demoMode && <div className="demo-strip"><strong>Modalità demo</strong><span>Usa esclusivamente dati fittizi. Le email OTP non sono attive.</span></div>}
 
@@ -381,6 +429,7 @@ export default function Home() {
       {superseding && <SupersedeModal contract={superseding} onClose={() => setSuperseding(null)} onSaved={async () => { setSuperseding(null); notify("Contratto annullato e nuova versione creata."); await refresh(); }} />}
       {deliveryModal && <DeliveryModal data={data} delivery={deliveryModal === "new" ? null : deliveryModal} onClose={() => setDeliveryModal(null)} onSaved={async () => { setDeliveryModal(null); notify(deliveryModal === "new" ? "Consegna assegnata." : "Consegna aggiornata."); await refresh(); }} />}
       {profileModal && <ProfileModal user={data.user} onClose={() => setProfileModal(false)} onSaved={async (message) => { setProfileModal(false); notify(message); await refresh(); }} />}
+      {impersonationModal && <ImpersonationModal role={impersonationModal} users={data.impersonationUsers ?? []} currentUserId={data.impersonation ? data.user.id : null} onClose={() => setImpersonationModal(null)} onStarted={impersonationStarted} />}
       {notice && <div className={`ops-toast ${notice.tone}`}>{notice.tone === "ok" ? "✓" : "!"} {notice.text}</div>}
     </div>
   );
@@ -733,6 +782,38 @@ function DeliveryModal({ data, delivery, onClose, onSaved }: { data: Bootstrap; 
   return <Modal title={delivery ? "Gestisci consegna" : "Nuova consegna"} subtitle={delivery ? `${delivery.client_company} · ${delivery.island}` : "Assegna quantità e azienda a un Distributore."} onClose={onClose}><form className="form-grid" onSubmit={submit}>{!delivery && <><label className="span-2">Azienda<select name="clientId" required value={clientId} onChange={(event) => setClientId(event.target.value)}>{data.clients.map((item) => <option key={item.id} value={item.id}>{item.company_name} · {item.island}</option>)}</select></label><label className="span-2">Distributore<select name="distributorUserId" required>{distributors.map((user) => <option key={user.id} value={user.id}>{user.name} · {user.island}</option>)}</select></label></>}{delivery && <label>Stato<select name="status" defaultValue={delivery.status}><option value="assigned">Assegnata</option><option value="in_progress">In corso</option><option value="delivered">Consegnata</option><option value="issue">Problema</option></select></label>}<label>Quantità<input name="quantity" type="number" min="1" max="1000000" step="1" required defaultValue={delivery?.quantity ?? 1} /></label><label>Unità<input name="unit" required maxLength={30} defaultValue={delivery?.unit ?? "copie"} /></label><label>Data programmata<input name="scheduledFor" type="date" defaultValue={delivery?.scheduled_for ?? ""} /></label><label>Referente consegna<input name="deliveryContactName" required maxLength={120} defaultValue={delivery?.delivery_contact_name ?? client?.contact_name ?? ""} /></label><label>Email referente<input name="deliveryContactEmail" type="email" required defaultValue={delivery?.delivery_contact_email ?? client?.email ?? ""} /></label><label>Telefono referente<input name="deliveryContactPhone" maxLength={40} defaultValue={delivery?.delivery_contact_phone ?? client?.phone ?? ""} /></label><label className="span-2">Indirizzo consegna<input name="deliveryAddress" maxLength={300} defaultValue={delivery?.delivery_address ?? ""} /></label><label className="span-2">Note operative<textarea name="notes" rows={3} maxLength={2000} defaultValue={delivery?.notes ?? ""} /></label>{!delivery && !distributors.length && <div className="form-error span-2">Non esiste un Distributore attivo assegnato all’isola selezionata.</div>}{error && <div className="form-error span-2">{error}</div>}<div className="modal-actions span-2"><button type="button" onClick={onClose}>Annulla</button><button className="primary" disabled={busy || (!delivery && !distributors.length)}>{busy ? "Salvataggio…" : delivery ? "Aggiorna consegna" : "Assegna consegna"}</button></div></form></Modal>;
 }
 
+function ImpersonationModal({ role, users, currentUserId, onClose, onStarted }: {
+  role: "sales" | "distributor";
+  users: User[];
+  currentUserId: string | null;
+  onClose: () => void;
+  onStarted: (role: "sales" | "distributor") => Promise<void>;
+}) {
+  const candidates = users.filter((user) => user.role === role && user.active !== 0);
+  const [userId, setUserId] = useState(() => candidates.some((user) => user.id === currentUserId) ? String(currentUserId) : candidates[0]?.id ?? "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!userId) return;
+    setBusy(true);
+    setError("");
+    try {
+      await api("/api/admin/impersonation/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ userId }),
+      });
+      await onStarted(role);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Avvio della modalità operativa non riuscito.");
+      setBusy(false);
+    }
+  }
+  const label = roleLabels[role];
+  return <Modal title={`Vista ${label}`} subtitle={`Seleziona un ${label} attivo: vedrai i suoi dati e potrai usare tutti i moduli consentiti al ruolo.`} onClose={onClose}><form className="form-grid impersonation-form" onSubmit={submit}><label className="span-2">Utente<select required value={userId} onChange={(event) => setUserId(event.target.value)} disabled={!candidates.length}>{candidates.map((user) => <option key={user.id} value={user.id}>{user.name} · {user.island ?? "Nessuna isola"} · {user.email}</option>)}</select></label>{!candidates.length && <div className="form-error span-2">Non esiste alcun {label} attivo. Crealo prima dalla sezione Utenti.</div>}<div className="impersonation-warning span-2"><strong>Attenzione: non è una simulazione</strong><p>Clienti, preventivi, contratti, consegne e Moduli OS useranno il perimetro reale dell’utente scelto. La sessione dura massimo un’ora.</p></div><label className="confirmation span-2"><input type="checkbox" required /><span><strong>Confermo l’accesso operativo</strong>Ogni modifica sarà registrata nell’audit con il Super Admin e l’utente selezionato.</span></label>{error && <div className="form-error span-2">{error}</div>}<div className="modal-actions span-2"><button type="button" onClick={onClose}>Annulla</button><button className="primary" disabled={busy || !candidates.length}>{busy ? "Accesso…" : `Lavora come ${label}`}</button></div></form></Modal>;
+}
+
 function ProfileModal({ user, onClose, onSaved }: { user: User; onClose: () => void; onSaved: (message: string) => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -830,10 +911,19 @@ function AdminPanel({ data, refresh, notify }: { data: Bootstrap; refresh: () =>
   return <section className="ops-page"><PageHeading eyebrow="Amministrazione" title="Utenti" subtitle="Crea account, assegna ruolo e isola e revoca immediatamente gli accessi." action={<span className="admin-badge">{superAdmin ? "Super Admin" : "Admin operativo"}</span>} /><div className="admin-grid"><article className="data-card"><div className="card-head"><div><h2>Nuovo utente</h2><p>{superAdmin ? "Admin operativo, Sales Manager, Sales o Distributore." : "Sales Manager, Sales o Distributore."}</p></div></div><form className="stack-form" onSubmit={createUser}><label>Nome e cognome<input name="name" required maxLength={120} /></label><label>Email aziendale<input name="email" type="email" required /></label><label>Password temporanea<input name="temporaryPassword" type="password" required minLength={12} maxLength={256} autoComplete="new-password" /><small>Almeno 12 caratteri. Al primo accesso dovrà essere cambiata.</small></label><div className="two-cols"><label>Ruolo<select name="role" value={newRole} onChange={(event) => setNewRole(event.target.value as Role)}>{creatableRoles.map((role) => <option key={role} value={role}>{roleLabels[role]}</option>)}</select></label>{newRole !== "admin" && <label>Isola<select name="island">{ISLANDS.map((island) => <option key={island}>{island}</option>)}</select></label>}</div><button className="primary" disabled={userBusy}>{userBusy ? "Creazione…" : "Crea utente"}</button></form></article>{superAdmin ? <article className="data-card"><div className="card-head"><div><h2>Carica modello</h2><p>PDF o DOCX, massimo 8 MB.</p></div></div><form className="stack-form" onSubmit={uploadTemplate}><label>Nome modello<input name="name" required placeholder="Contratto sponsor" /></label><label>Versione<input name="version" required defaultValue="1.0" /></label><label>Documento<input name="file" type="file" accept="application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required /></label><button className="primary" disabled={templateBusy}>{templateBusy ? "Caricamento…" : "Archivia modello"}</button></form></article> : <article className="data-card permission-card"><div className="card-head"><div><h2>Permessi Admin operativo</h2><p>Gestione quotidiana senza accesso alle configurazioni sensibili.</p></div></div><ul><li>CRM e consegne su tutte le isole</li><li>Crea e gestisce ruoli operativi</li><li>Non crea altri Admin</li><li>Nessun accesso ad audit, listino o commissioni</li></ul></article>}</div><div className={`admin-grid lower ${superAdmin ? "" : "single"}`}><article className="data-card"><div className="card-head"><div><h2>Utenti autorizzati</h2><p>{data.users.length} account · contatti personali modificabili dal profilo</p></div></div><div className="simple-list">{data.users.map((target) => <div key={target.id}><span className="avatar">{initials(target.name)}</span><div><strong>{target.name}</strong><small>{target.email}{target.phone ? ` · ${target.phone}` : ""}</small></div><p>{roleLabels[target.role]}<small>{target.island ?? "Tutte le isole"}{target.active === 0 ? " · Disattivato" : ""}</small>{canEdit(target) && <button className="mini-link" onClick={() => setEditing(target)}>Modifica ruolo e accesso</button>}</p></div>)}</div></article>{superAdmin && <article className="data-card"><div className="card-head"><div><h2>Modelli contrattuali</h2><p>{data.templates.length} versioni attive</p></div></div><div className="simple-list">{data.templates.map((template) => <div key={template.id}><span className="file-badge">{template.mime_type.includes("pdf") ? "PDF" : "DOC"}</span><div><strong>{template.name}</strong><small>{template.original_filename}</small></div><p>v{template.version}<button className="mini-link" onClick={() => window.open(`/api/templates/${template.id}/download`, "_blank")}>Scarica</button></p></div>)}{!data.templates.length && <Empty title="Nessun modello" text="Carica i documenti già pronti." />}</div></article>}</div>{editing && <UserEditModal actor={data.user} target={editing} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); notify("Ruolo, isola e accesso aggiornati. Le sessioni precedenti sono state revocate."); await refresh(); }} />}</section>;
 }
 
+function AuditActor({ event }: { event: AuditEvent }) {
+  let effectiveName: string | null = null;
+  try {
+    const payload = JSON.parse(event.payload_json) as { impersonation?: { effectiveUserName?: string } };
+    effectiveName = payload.impersonation?.effectiveUserName ?? null;
+  } catch { /* Un payload storico può non essere JSON valido. */ }
+  return <><strong>{event.actor_name ?? "Sistema"}</strong>{effectiveName && <small>come {effectiveName}</small>}</>;
+}
+
 function AuditPanel({ events, emails, refresh, notify }: { events: AuditEvent[]; emails: EmailOutboxItem[]; refresh: () => Promise<void>; notify: (text: string, tone?: "ok" | "error") => void }) {
   const [retrying, setRetrying] = useState("");
   async function retryEmail(message: EmailOutboxItem) { setRetrying(message.id); try { await api(`/api/email-outbox/${message.id}/retry`, { method: "POST" }); notify("Nuovo tentativo email avviato."); await refresh(); } catch (cause) { notify(cause instanceof Error ? cause.message : "Nuovo tentativo non riuscito.", "error"); } finally { setRetrying(""); } }
-  return <section className="ops-page"><PageHeading eyebrow="Tracciabilità" title="Audit" subtitle="Registro append-only e controllo degli invii email." action={<span className="admin-badge">Ultimi {events.length} eventi</span>} />{emails.length > 0 && <div className="data-card email-alerts"><div className="card-head"><div><h2>Email da controllare</h2><p>Invii in attesa o terminati con errore.</p></div></div><div className="table-wrap"><table><thead><tr><th>Destinatario</th><th>Oggetto</th><th>Stato</th><th>Tentativi</th><th>Prossimo tentativo</th><th /></tr></thead><tbody>{emails.map((message) => <tr key={message.id}><td data-label="Destinatario">{message.recipient}</td><td data-label="Oggetto">{message.subject}<small>{message.last_error ?? "In attesa di consegna"}</small></td><td data-label="Stato"><span className={`delivery-status ${message.status === "dead" ? "issue" : "in_progress"}`}>{message.status === "dead" ? "Errore" : "In attesa"}</span></td><td data-label="Tentativi">{message.attempts}/5</td><td data-label="Prossimo tentativo">{dateTime(message.next_attempt_at)}</td><td data-label="Azioni"><button className="table-action" disabled={retrying === message.id} onClick={() => void retryEmail(message)}>{retrying === message.id ? "Invio…" : "Riprova"}</button></td></tr>)}</tbody></table></div></div>}<div className="data-card"><div className="table-wrap"><table><thead><tr><th>Data</th><th>Utente</th><th>Azione</th><th>Entità</th><th>Riferimento</th></tr></thead><tbody>{events.map((event) => <tr key={event.id}><td data-label="Data">{dateTime(event.created_at)}</td><td data-label="Utente">{event.actor_name ?? "Sistema"}</td><td data-label="Azione"><code>{event.action}</code></td><td data-label="Entità">{event.entity_type}</td><td data-label="Riferimento"><span className="hash">{event.entity_id}</span></td></tr>)}{!events.length && <tr><td colSpan={5}><Empty title="Registro vuoto" text="Gli eventi compariranno dopo le prime operazioni." /></td></tr>}</tbody></table></div></div></section>;
+  return <section className="ops-page"><PageHeading eyebrow="Tracciabilità" title="Audit" subtitle="Registro append-only e controllo degli invii email." action={<span className="admin-badge">Ultimi {events.length} eventi</span>} />{emails.length > 0 && <div className="data-card email-alerts"><div className="card-head"><div><h2>Email da controllare</h2><p>Invii in attesa o terminati con errore.</p></div></div><div className="table-wrap"><table><thead><tr><th>Destinatario</th><th>Oggetto</th><th>Stato</th><th>Tentativi</th><th>Prossimo tentativo</th><th /></tr></thead><tbody>{emails.map((message) => <tr key={message.id}><td data-label="Destinatario">{message.recipient}</td><td data-label="Oggetto">{message.subject}<small>{message.last_error ?? "In attesa di consegna"}</small></td><td data-label="Stato"><span className={`delivery-status ${message.status === "dead" ? "issue" : "in_progress"}`}>{message.status === "dead" ? "Errore" : "In attesa"}</span></td><td data-label="Tentativi">{message.attempts}/5</td><td data-label="Prossimo tentativo">{dateTime(message.next_attempt_at)}</td><td data-label="Azioni"><button className="table-action" disabled={retrying === message.id} onClick={() => void retryEmail(message)}>{retrying === message.id ? "Invio…" : "Riprova"}</button></td></tr>)}</tbody></table></div></div>}<div className="data-card"><div className="table-wrap"><table><thead><tr><th>Data</th><th>Utente</th><th>Azione</th><th>Entità</th><th>Riferimento</th></tr></thead><tbody>{events.map((event) => <tr key={event.id}><td data-label="Data">{dateTime(event.created_at)}</td><td data-label="Utente"><AuditActor event={event} /></td><td data-label="Azione"><code>{event.action}</code></td><td data-label="Entità">{event.entity_type}</td><td data-label="Riferimento"><span className="hash">{event.entity_id}</span></td></tr>)}{!events.length && <tr><td colSpan={5}><Empty title="Registro vuoto" text="Gli eventi compariranno dopo le prime operazioni." /></td></tr>}</tbody></table></div></div></section>;
 }
 
 function Modal({ title, subtitle, onClose, children }: { title: string; subtitle: string; onClose: () => void; children: React.ReactNode }) {

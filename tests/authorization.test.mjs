@@ -16,6 +16,7 @@ import {
   normalizeEmail,
   recordScope,
 } from "../worker/authorization.js";
+import { createImpersonationToken, verifyImpersonationToken } from "../worker/impersonation.ts";
 
 const client = { island: "Tenerife", owner_user_id: "agent-1" };
 
@@ -110,4 +111,13 @@ test("keeps privileged user management under the super admin", () => {
   assert.equal(canUpdateUserRole({ role: "admin" }, "sales", "admin"), false);
   assert.equal(canUpdateUserRole({ role: "admin" }, "sales", "sales_manager"), true);
   assert.equal(canUpdateUserRole({ role: "super_admin" }, "super_admin", "admin"), false);
+});
+
+test("signs, validates and expires administrative impersonation tokens", async () => {
+  const claims = { version: 1, actorId: "super-admin", targetId: "sales-1", startedAt: 2_000, expiresAt: 5_600 };
+  const token = await createImpersonationToken("a-long-production-secret", claims);
+  assert.deepEqual(await verifyImpersonationToken("a-long-production-secret", token, 2_100), claims);
+  assert.equal(await verifyImpersonationToken("wrong-secret", token, 2_100), null);
+  assert.equal(await verifyImpersonationToken("a-long-production-secret", `${token.slice(0, -1)}x`, 2_100), null);
+  assert.equal(await verifyImpersonationToken("a-long-production-secret", token, 5_600), null);
 });

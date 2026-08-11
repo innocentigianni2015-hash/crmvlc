@@ -1,5 +1,5 @@
 const AI_MODEL = "@cf/openai/gpt-oss-20b" as const;
-const MAX_AI_REQUEST_MICRO_USD = 2_500;
+const MAX_AI_REQUEST_MICRO_USD = 5_000;
 const DEFAULT_MONTHLY_BUDGET_MICRO_USD = 25_000_000;
 const FAQ_CONTEXT_LIMIT = 6;
 const AI_RATE_LIMIT_PER_HOUR = 60;
@@ -185,7 +185,7 @@ async function askAssistant(request: Request, env: HelpEnv, user: HelpUser, writ
     `[FONTE ${index + 1} | id=${row.id} | modulo=${row.module_key}]`,
     `Titolo: ${row.title}`,
     `Domanda approvata: ${row.question}`,
-    `Procedura approvata: ${row.answer}`,
+    `Procedura approvata: ${row.answer.slice(0, 2_000)}`,
   ].join("\n")).join("\n\n");
   const system = language === "es"
     ? "Eres el asistente interno de CRMVLC. Responde solo con las fuentes aprobadas proporcionadas. No inventes pasos, permisos, datos ni funciones. No ejecutes acciones. Si las fuentes no bastan, usa confidence=low. Respeta el rol del usuario y no describas procedimientos que no puede ejecutar. Devuelve solo JSON válido con answer, confidence (high o low) y sourceIds."

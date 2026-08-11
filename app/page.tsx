@@ -4,8 +4,10 @@ import { FormEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect, u
 import QRCode from "qrcode";
 import { OperationsHub } from "./operations-hub";
 import { clearOfflineSnapshots, loadOfflineSnapshot, pendingOutboxCount, saveOfflineSnapshot, syncPhotoAuditOutbox } from "./offline";
+import { HelpAssistantDrawer, HelpBootstrap, HelpPage } from "./help-assistant";
 
 type Role = "super_admin" | "admin" | "sales_manager" | "sales" | "distributor";
+type ActiveModule = "crm" | "operations" | "pricing" | "quotes" | "contracts" | "distribution" | "admin" | "audit" | "podcast" | "help";
 type InstallPromptEvent = Event & { prompt(): Promise<void>; userChoice: Promise<{ outcome: "accepted" | "dismissed" }> };
 const BACKGROUND_LOCK_MS = 60 * 60 * 1000;
 const BACKGROUND_AT_KEY = "crmvlc:backgrounded-at";
@@ -68,6 +70,7 @@ type Bootstrap = {
   sessionActor?: User;
   impersonation?: { startedAt: string; expiresAt: string } | null;
   impersonationUsers?: User[];
+  help?: HelpBootstrap;
 };
 
 const ISLANDS = ["Tenerife", "Gran Canaria", "Lanzarote", "Fuerteventura", "La Palma"];
@@ -138,7 +141,7 @@ export default function Home() {
   const [pendingCount, setPendingCount] = useState(0);
   const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(null);
   const [standalone, setStandalone] = useState(false);
-  const [active, setActive] = useState<"crm" | "operations" | "pricing" | "quotes" | "contracts" | "distribution" | "admin" | "audit" | "podcast">("crm");
+  const [active, setActive] = useState<ActiveModule>("crm");
   const [notice, setNotice] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const [search, setSearch] = useState("");
   const [clientModal, setClientModal] = useState(false);
@@ -341,6 +344,11 @@ export default function Home() {
   if (authRequired || !data) return <Login onAuthenticated={refresh} initialNotice={authNotice} />;
 
   const sessionActor = data.sessionActor ?? data.user;
+  const effectiveRole = data.user.role;
+  const helpData: HelpBootstrap = data.help ?? {
+    entries: [], drafts: [], history: [], tickets: [], aiEnabled: false,
+    usage: { month_key: "—", spent_micro_usd: 0, reserved_micro_usd: 0, request_count: 0, budget_micro_usd: 25_000_000, updated_at: new Date().toISOString() },
+  };
   const canImpersonate = sessionActor.role === "super_admin";
   const filteredClients = data.clients.filter((client) => `${client.company_name} ${client.contact_name} ${client.email} ${client.island}`.toLowerCase().includes(search.toLowerCase()));
   const filteredContracts = data.contracts.filter((contract) => `${contract.title} ${contract.client_company ?? ""} ${contract.island}`.toLowerCase().includes(search.toLowerCase()));
@@ -418,6 +426,17 @@ export default function Home() {
     } catch (error) { notify(error instanceof Error ? error.message : "Riassegnazione non riuscita.", "error"); }
   }
 
+  function navigateFromHelp(moduleKey: string) {
+    if (moduleKey === "sales_view" && canImpersonate) { setImpersonationModal("sales"); return; }
+    if (moduleKey === "distributor_view" && canImpersonate) { setImpersonationModal("distributor"); return; }
+    const allowed = new Set<ActiveModule>(["operations", "help"]);
+    if (effectiveRole !== "distributor") ["crm", "pricing", "quotes", "contracts", "podcast"].forEach((key) => allowed.add(key as ActiveModule));
+    if (["super_admin", "admin", "sales_manager", "distributor"].includes(effectiveRole)) allowed.add("distribution");
+    if (["super_admin", "admin"].includes(effectiveRole)) allowed.add("admin");
+    if (effectiveRole === "super_admin") allowed.add("audit");
+    setActive(allowed.has(moduleKey as ActiveModule) ? moduleKey as ActiveModule : "help");
+  }
+
   return (
     <div className="ops-shell">
       <aside className="ops-sidebar">
@@ -434,6 +453,7 @@ export default function Home() {
           {canImpersonate && <button className={data.impersonation && data.user.role === "sales" ? "active impersonation-nav" : "impersonation-nav"} onClick={() => setImpersonationModal("sales")}><i>09</i> Vista Sales</button>}
           {canImpersonate && <button className={data.impersonation && data.user.role === "distributor" ? "active impersonation-nav" : "impersonation-nav"} onClick={() => setImpersonationModal("distributor")}><i>10</i> Vista Distributore</button>}
           {data.user.role !== "distributor" && <button className={active === "podcast" ? "active" : ""} onClick={() => setActive("podcast")}><i>11</i> Podcast</button>}
+          <button className={active === "help" ? "active" : ""} onClick={() => setActive("help")}><i>12</i> Guida & AI</button>
         </nav>
         <div className="ops-scope"><span className="live-dot" /><div><strong>{data.demoMode ? "Dati dimostrativi" : "Dati reali"}</strong><small>{data.impersonation ? `Come ${data.user.name}` : data.user.island ?? "Tutte le isole"}</small></div></div>
       </aside>
@@ -484,6 +504,7 @@ export default function Home() {
         {active === "admin" && ["super_admin", "admin"].includes(data.user.role) && <AdminPanel data={data} refresh={refresh} notify={notify} />}
         {active === "audit" && data.user.role === "super_admin" && <AuditPanel events={data.audit} emails={data.emailOutbox} refresh={refresh} notify={notify} />}
         {active === "podcast" && data.user.role !== "distributor" && <PodcastCalendar data={data} refresh={refresh} notify={notify} />}
+        {active === "help" && <HelpPage user={data.user} help={helpData} offline={offlineMode} refresh={refresh} notify={notify} onNavigate={navigateFromHelp} />}
       </main>
 
       {clientModal && <ClientModal data={data} onClose={() => setClientModal(false)} onSaved={async () => { setClientModal(false); notify("Cliente creato."); await refresh(); }} />}
@@ -501,6 +522,7 @@ export default function Home() {
         }
         setPromotionPopup(null);
       }} />}
+      <HelpAssistantDrawer currentModule={active} offline={offlineMode} onNavigate={navigateFromHelp} />
       {notice && <div className={`ops-toast ${notice.tone}`}>{notice.tone === "ok" ? "✓" : "!"} {notice.text}</div>}
     </div>
   );

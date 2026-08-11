@@ -277,7 +277,8 @@ export async function handleCrmApi(
     }
 
     if (url.pathname === "/api/profile/email/confirm" && request.method === "POST") {
-      return confirmProfileEmail(request, env);
+      const confirmationResponse = await confirmProfileEmail(request, env);
+      return confirmationResponse;
     }
 
     const vipResponse = await handleVipPublicApi(request, env, ctx);
@@ -289,7 +290,8 @@ export async function handleCrmApi(
       return bootstrap(user, env);
     }
     if (url.pathname === "/api/profile" && request.method === "PATCH") {
-      return updateProfile(request, user, env);
+      const profileResponse = await updateProfile(request, user, env);
+      return profileResponse;
     }
     if (url.pathname === "/api/clients" && request.method === "POST") {
       return createClient(request, user, env);

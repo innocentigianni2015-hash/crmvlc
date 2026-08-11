@@ -329,7 +329,7 @@ export async function handleCrmApi(
     }
 
     if (url.pathname === "/api/public/leads" && request.method === "POST") {
-      return createPublicLandingLead(request, env);
+      return await createPublicLandingLead(request, env);
     }
 
     if (url.pathname.startsWith("/api/auth/password/") || url.pathname.startsWith("/api/auth/totp/")) {

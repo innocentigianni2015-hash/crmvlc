@@ -2,11 +2,11 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "CRMVLC — CRM Operativo",
-  description: "Il sistema operativo commerciale di Vivi le Canarie.",
+  title: "CRMVLC — Vivi le Canarie",
+  description: "CRM, contratti e operatività commerciale di Vivi le Canarie.",
   applicationName: "CRMVLC",
   manifest: "/manifest.webmanifest",
-  icons: { icon: "/favicon.svg", apple: "/icons/apple-touch-icon.png" },
+  icons: { icon: "/brand/viv-le-canarie-icon.svg", apple: "/brand/viv-le-canarie-icon.svg" },
   appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "CRMVLC" },
   other: { "codex-preview": "development" },
 };

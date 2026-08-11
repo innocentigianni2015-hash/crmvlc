@@ -200,7 +200,7 @@ async function operationsSnapshot(env: RuntimeEnv, user: OperationsUser): Promis
     bundles,
     integrations: {
       email: Boolean(env.EMAIL && env.EMAIL_FROM),
-      whatsapp: Boolean(env.WHATSAPP_TOKEN && env.WHATSAPP_PHONE_NUMBER_ID),
+      whatsapp: true,
       payments: Boolean(env.STRIPE_SECRET_KEY),
       maps: Boolean(env.MAPS_TOKEN),
       photoAi: false,

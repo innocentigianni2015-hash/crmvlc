@@ -5,10 +5,10 @@
   "start_url": "/vip",
   "scope": "/vip",
   "display": "standalone",
-  "background_color": "#f3efe4",
-  "theme_color": "#10382f",
+  "background_color": "#f33e30",
+  "theme_color": "#f33e30",
   "lang": "it",
   "icons": [
-    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+    { "src": "/brand/viv-le-canarie-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
   ]
 }

@@ -56,6 +56,9 @@ type DiscountCampaign = {
 type PodcastAppointment = {
   id: string; guest_name: string; topic: string; interviewer_user_id: string; interviewer_name?: string;
   starts_at: string; ends_at: string; notes: string | null; status: "scheduled" | "cancelled";
+  package_code: PodcastPackageCode; package_name: string; package_price_cents: number;
+  marcolifestyle_add_on: number; marcolifestyle_price_cents: number; subtotal_cents: number;
+  tax_name: string; tax_rate_bps: number; tax_cents: number; total_cents: number;
   version: number; created_by: string; created_at: string; updated_at: string;
 };
 type Bootstrap = {
@@ -75,6 +78,14 @@ const quoteStatusLabels: Record<Quote["status"], string> = { issued: "Emesso", c
 const deliveryStatusLabels: Record<Delivery["status"], string> = { assigned: "Assegnata", in_progress: "In corso", delivered: "Consegnata", issue: "Problema" };
 const roleLabels: Record<Role, string> = { super_admin: "Super Admin", admin: "Admin operativo", sales_manager: "Sales Manager", sales: "Sales", distributor: "Distributore" };
 const priceCategoryLabels: Record<PriceItem["category"], string> = { cover: "Copertina", internal_high: "Pagine interne · fascia alta", internal_low: "Pagine interne · fascia bassa", back_cover: "Ultima pagina" };
+const BRAND_LOGO = "/brand/viv-le-canarie-icon.svg";
+const WHATSAPP_URL = "https://wa.me/34602576044?text=Buongiorno%2C%20contatto%20CRMVLC%20per%20un%27informazione.";
+const PODCAST_PACKAGES = {
+  one_minute_free: { name: "1 minuto · 1 telecamera", description: "Video finale di 1 minuto", priceCents: 0 },
+  three_to_five_minutes: { name: "3–5 minuti · 3 telecamere", description: "Video finale e montaggio inclusi", priceCents: 49_900 },
+} as const;
+type PodcastPackageCode = keyof typeof PODCAST_PACKAGES;
+const MARCOLIFESTYLE_PRICE_CENTS = 50_000;
 
 class RequestError extends Error {
   constructor(message: string, readonly status: number) { super(message); }
@@ -326,7 +337,7 @@ export default function Home() {
 
   const notify = (text: string, tone: "ok" | "error" = "ok") => setNotice({ text, tone });
 
-  if (loading) return <div className="loading-screen"><div className="loading-mark">C</div><p>Caricamento area operativa…</p></div>;
+  if (loading) return <div className="loading-screen"><img className="loading-logo" src={BRAND_LOGO} alt="ViV! Le Canarie" /><p>Caricamento area operativa…</p></div>;
   if (authRequired || !data) return <Login onAuthenticated={refresh} initialNotice={authNotice} />;
 
   const sessionActor = data.sessionActor ?? data.user;
@@ -410,7 +421,7 @@ export default function Home() {
   return (
     <div className="ops-shell">
       <aside className="ops-sidebar">
-        <button className="ops-brand" onClick={() => setActive(data.user.role === "distributor" ? "distribution" : "crm")}><span>C</span><div><strong>CRMVLC</strong><small>CRM & Contratti</small></div></button>
+        <button className="ops-brand" onClick={() => setActive(data.user.role === "distributor" ? "distribution" : "crm")}><img src={BRAND_LOGO} alt="" /><div><strong>CRMVLC</strong><small>CRM & Contratti</small></div></button>
         <nav>
           {data.user.role !== "distributor" && <button className={active === "crm" ? "active" : ""} onClick={() => setActive("crm")}><i>01</i> CRM</button>}
           <button className={active === "operations" ? "active" : ""} onClick={() => setActive("operations")}><i>02</i> Moduli OS</button>
@@ -430,7 +441,7 @@ export default function Home() {
       <main className="ops-main">
         <header className="ops-topbar">
           <div className="ops-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Cerca clienti, preventivi, contratti o consegne…" aria-label="Cerca" /></div>
-          <div className="ops-user">{!standalone && <button className="install-button" onClick={() => void installApp()}>Installa</button>}<button className="profile-trigger" onClick={() => setProfileModal(true)} aria-label="Modifica il profilo"><span>{initials(data.user.name)}</span><div><strong>{data.user.name}</strong><small>{roleLabels[data.user.role]}{data.user.island ? ` · ${data.user.island}` : ""}</small></div></button><button onClick={logout}>Esci</button></div>
+          <div className="ops-user"><a className="whatsapp-button" href={WHATSAPP_URL} target="_blank" rel="noopener noreferrer" aria-label="Apri WhatsApp con CRMVLC">WA<span>WhatsApp</span></a>{!standalone && <button className="install-button" onClick={() => void installApp()}>Installa</button>}<button className="profile-trigger" onClick={() => setProfileModal(true)} aria-label="Modifica il profilo"><span>{initials(data.user.name)}</span><div><strong>{data.user.name}</strong><small>{roleLabels[data.user.role]}{data.user.island ? ` · ${data.user.island}` : ""}</small></div></button><button onClick={logout}>Esci</button></div>
         </header>
         {data.impersonation && <div className="impersonation-strip"><div><strong>Modalità operativa · {roleLabels[data.user.role]}</strong><span>Stai lavorando come {data.user.name}. Le modifiche sono reali e l’audit registra anche {sessionActor.name}.</span></div><button onClick={() => void stopImpersonation()}>Torna Super Admin</button></div>}
         {(offlineMode || pendingCount > 0) && <div className={`connectivity-strip ${offlineMode ? "offline" : "pending"}`}><strong>{offlineMode ? "Modalità offline" : "Sincronizzazione"}</strong><span>{offlineMode ? `Dati salvati ${offlineSavedAt ? dateTime(new Date(offlineSavedAt).toISOString()) : "sul dispositivo"} · contratti e amministrazione richiedono la rete.` : `${pendingCount} acquisizion${pendingCount === 1 ? "e in attesa" : "i in attesa"} di invio.`}</span></div>}
@@ -605,7 +616,7 @@ function Login({ onAuthenticated, initialNotice }: { onAuthenticated: () => Prom
 
   const passwordFields = <><label>Nuova password<input type="password" required minLength={12} maxLength={256} autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} /></label><label>Conferma password<input type="password" required minLength={12} maxLength={256} autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} /></label></>;
 
-  return <main className="auth-screen"><section className="auth-visual"><div className="auth-brand"><span>C</span><strong>CRMVLC</strong></div><div><small>CRM OPERATIVO · CINQUE ISOLE</small><h1>Relazioni commerciali e contratti, senza zone grigie.</h1><p>Accesso nominativo con password; OTP riservato alla firma verificata dei contratti.</p></div><div className="auth-islands">{ISLANDS.map((island) => <span key={island}>{island}</span>)}</div></section><section className="auth-panel"><div className="auth-box"><span className="secure-label">● Accesso protetto</span><h2>{mode === "login" ? "Entra nel CRM" : mode === "forgot" ? "Recupera password" : mode === "reset" ? "Imposta password" : mode === "change" ? "Cambia la password temporanea" : mode === "totp_setup" ? "Configura l’autenticatore" : "Codice autenticatore"}</h2><p>{mode === "totp_setup" ? "Scansiona il QR con Google Authenticator, Microsoft Authenticator o un’app compatibile." : mode === "totp" ? "Inserisci il codice a 6 cifre generato dall’app autenticatore." : "Le credenziali sono personali e non devono essere condivise."}</p>
+  return <main className="auth-screen"><section className="auth-visual"><div className="auth-brand"><img src={BRAND_LOGO} alt="ViV! Le Canarie" /><div><strong>CRMVLC</strong><span>CRM & contratti</span></div></div><div className="auth-promise"><small>CRM OPERATIVO · CINQUE ISOLE</small><h1>Il lavoro commerciale, in un unico posto.</h1><p>Clienti, pipeline, preventivi, contratti, consegne e podcast: dati reali, permessi per ruolo e operatività pensata per il cellulare.</p><div className="auth-trust"><span><b>01</b> Dati per ruolo</span><span><b>02</b> Contratti con audit</span><span><b>03</b> PWA installabile</span></div></div><div className="auth-islands">{ISLANDS.map((island) => <span key={island}>{island}</span>)}</div></section><section className="auth-panel"><div className="auth-box"><div className="auth-mobile-brand"><img src={BRAND_LOGO} alt="ViV! Le Canarie" /><div><strong>CRMVLC</strong><small>Area operativa</small></div></div><span className="secure-label">● Accesso protetto</span><h2>{mode === "login" ? "Bentornato" : mode === "forgot" ? "Recupera password" : mode === "reset" ? "Imposta password" : mode === "change" ? "Cambia la password temporanea" : mode === "totp_setup" ? "Configura l’autenticatore" : "Codice autenticatore"}</h2><p>{mode === "totp_setup" ? "Scansiona il QR con Google Authenticator, Microsoft Authenticator o un’app compatibile." : mode === "totp" ? "Inserisci il codice a 6 cifre generato dall’app autenticatore." : "Accedi alla tua area di lavoro CRMVLC."}</p>
     {mode === "login" && <form onSubmit={login}><label>Email aziendale<input type="email" required autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} /></label><label>Password<input type="password" required maxLength={256} autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label><button className="primary wide" disabled={busy}>{busy ? "Accesso…" : "Accedi"}</button><button type="button" className="link-button" onClick={() => { setMode("forgot"); setError(""); setMessage(""); }}>Imposta o recupera password</button></form>}
     {mode === "forgot" && <form onSubmit={forgotPassword}><label>Email aziendale<input type="email" required autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label><button className="primary wide" disabled={busy}>{busy ? "Invio…" : "Invia collegamento"}</button><button type="button" className="link-button" onClick={() => setMode("login")}>Torna all’accesso</button></form>}
     {mode === "reset" && <form onSubmit={resetPassword}>{passwordFields}<button className="primary wide" disabled={busy}>{busy ? "Salvataggio…" : "Imposta password"}</button></form>}
@@ -840,6 +851,12 @@ function PodcastCalendar({ data, refresh, notify }: { data: Bootstrap; refresh: 
 
   return <section className="ops-page podcast-page">
     <PageHeading eyebrow="Programmazione editoriale" title="Calendario podcast" subtitle="Appuntamenti di un’ora nel fuso delle Canarie, senza sovrapposizioni per intervistatore." action={canManage ? <button className="primary" onClick={() => setEditing("new")}>＋ Nuovo appuntamento</button> : <span className="admin-badge">Sola lettura</span>} />
+    <div className="podcast-package-grid">
+      <article><span>ESSENTIAL</span><h2>1 minuto</h2><strong>Gratuito</strong><p>1 telecamera · video finale di 1 minuto</p></article>
+      <article className="featured"><span>PRO</span><h2>3–5 minuti</h2><strong>{money(49_900)}</strong><p>3 telecamere · montaggio incluso</p></article>
+      <article><span>ADD-ON</span><h2>MarcoLifestyle</h2><strong>+ {money(MARCOLIFESTYLE_PRICE_CENTS)}</strong><p>Aggiungibile a entrambi i pacchetti</p></article>
+      <small>Ogni registrazione occupa 1 ora. Prezzi netti; {data.priceList?.tax_name ?? "IGIC"} escluso.</small>
+    </div>
     <div className="metric-grid podcast-metrics"><Metric label="Nel mese" value={String(monthAppointments.filter((item) => item.status === "scheduled").length)} note="appuntamenti programmati" /><Metric label="Prossimi" value={String(upcoming.length)} note="da oggi in avanti" /><Metric label="Intervistatori" value={String((data.podcastInterviewers ?? []).length)} note="utenti attivi disponibili" /></div>
     <article className="data-card podcast-calendar-card">
       <div className="calendar-toolbar"><button onClick={() => moveMonth(-1)} aria-label="Mese precedente">←</button><h2>{monthLabel}</h2><button onClick={() => moveMonth(1)} aria-label="Mese successivo">→</button></div>
@@ -852,20 +869,24 @@ function PodcastCalendar({ data, refresh, notify }: { data: Bootstrap; refresh: 
           const dayAppointments = monthAppointments.filter((item) => canaryParts(item.starts_at).date === key).sort((a, b) => a.starts_at.localeCompare(b.starts_at));
           return <div className={`calendar-day ${key === canaryToday() ? "today" : ""}`} key={key}><strong>{day}</strong><div>{dayAppointments.map((item) => {
             const ended = Date.parse(item.ends_at) < Date.now();
-            return <button key={item.id} className={`podcast-slot ${item.status} ${ended && item.status === "scheduled" ? "completed" : ""}`} disabled={!canManage || item.status === "cancelled"} onClick={() => setEditing(item)}><b>{canaryParts(item.starts_at).time}</b><span>{item.guest_name}</span><small>{item.interviewer_name}</small></button>;
+            return <button key={item.id} className={`podcast-slot ${item.status} ${ended && item.status === "scheduled" ? "completed" : ""}`} disabled={!canManage || item.status === "cancelled"} onClick={() => setEditing(item)}><b>{canaryParts(item.starts_at).time}</b><span>{item.guest_name}</span><small>{item.interviewer_name} · {money(item.subtotal_cents ?? 0)} netti</small></button>;
           })}</div></div>;
         })}
       </div>
     </article>
-    <article className="data-card podcast-agenda"><div className="card-head"><div><h2>Prossimi appuntamenti</h2><p>Agenda ottimizzata per la consultazione dal cellulare.</p></div></div><div className="podcast-agenda-list">{upcoming.slice(0, 20).map((item) => <button key={item.id} disabled={!canManage} onClick={() => setEditing(item)}><time>{canaryDateTime(item.starts_at)}</time><div><strong>{item.guest_name}</strong><span>{item.topic}</span><small>Intervistatore: {item.interviewer_name} · 1 ora</small></div></button>)}{!upcoming.length && <Empty title="Agenda libera" text="Non ci sono appuntamenti podcast futuri." />}</div></article>
-    {editing && <PodcastAppointmentModal appointment={editing === "new" ? null : editing} interviewers={data.podcastInterviewers ?? []} onClose={() => setEditing(null)} onSaved={async (message) => { setEditing(null); notify(message); await refresh(); }} />}
+    <article className="data-card podcast-agenda"><div className="card-head"><div><h2>Prossimi appuntamenti</h2><p>Agenda ottimizzata per la consultazione dal cellulare.</p></div></div><div className="podcast-agenda-list">{upcoming.slice(0, 20).map((item) => <button key={item.id} disabled={!canManage} onClick={() => setEditing(item)}><time>{canaryDateTime(item.starts_at)}</time><div><strong>{item.guest_name}</strong><span>{item.topic}</span><small>Intervistatore: {item.interviewer_name} · 1 ora</small><small>{item.package_name ?? PODCAST_PACKAGES.one_minute_free.name}{item.marcolifestyle_add_on ? " + MarcoLifestyle" : ""} · {money(item.subtotal_cents ?? 0)} netti</small></div></button>)}{!upcoming.length && <Empty title="Agenda libera" text="Non ci sono appuntamenti podcast futuri." />}</div></article>
+    {editing && <PodcastAppointmentModal appointment={editing === "new" ? null : editing} interviewers={data.podcastInterviewers ?? []} taxName={data.priceList?.tax_name ?? "IGIC"} taxRateBps={data.priceList?.tax_rate_bps ?? 700} onClose={() => setEditing(null)} onSaved={async (message) => { setEditing(null); notify(message); await refresh(); }} />}
   </section>;
 }
 
-function PodcastAppointmentModal({ appointment, interviewers, onClose, onSaved }: { appointment: PodcastAppointment | null; interviewers: User[]; onClose: () => void; onSaved: (message: string) => Promise<void> }) {
+function PodcastAppointmentModal({ appointment, interviewers, taxName, taxRateBps, onClose, onSaved }: { appointment: PodcastAppointment | null; interviewers: User[]; taxName: string; taxRateBps: number; onClose: () => void; onSaved: (message: string) => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [packageCode, setPackageCode] = useState<PodcastPackageCode>(appointment?.package_code ?? "one_minute_free");
+  const [marcolifestyleAddOn, setMarcolifestyleAddOn] = useState(Boolean(appointment?.marcolifestyle_add_on));
   const initial = appointment ? canaryParts(appointment.starts_at) : { date: (() => { const value = new Date(`${canaryToday()}T12:00:00Z`); value.setUTCDate(value.getUTCDate() + 1); return value.toISOString().slice(0, 10); })(), time: "10:00" };
+  const netCents = PODCAST_PACKAGES[packageCode].priceCents + (marcolifestyleAddOn ? MARCOLIFESTYLE_PRICE_CENTS : 0);
+  const taxCents = Math.round(netCents * taxRateBps / 10_000);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError("");
@@ -873,7 +894,7 @@ function PodcastAppointmentModal({ appointment, interviewers, onClose, onSaved }
     try {
       await api(appointment ? `/api/podcast-appointments/${appointment.id}` : "/api/podcast-appointments", {
         method: appointment ? "PATCH" : "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ...Object.fromEntries(form.entries()), version: appointment?.version }),
+        body: JSON.stringify({ ...Object.fromEntries(form.entries()), packageCode, marcolifestyleAddOn, version: appointment?.version }),
       });
       await onSaved(appointment ? "Appuntamento podcast aggiornato." : "Appuntamento podcast creato.");
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Salvataggio non riuscito."); setBusy(false); }
@@ -891,7 +912,10 @@ function PodcastAppointmentModal({ appointment, interviewers, onClose, onSaved }
   return <Modal title={appointment ? "Modifica appuntamento" : "Nuovo appuntamento podcast"} subtitle="Durata fissa: 1 ora · fuso Atlantic/Canary" onClose={onClose}><form className="form-grid" onSubmit={submit}>
     <label>Ospite<input name="guestName" required maxLength={120} defaultValue={appointment?.guest_name ?? ""} /></label><label>Intervistatore<select name="interviewerUserId" required defaultValue={appointment?.interviewer_user_id ?? interviewers[0]?.id}>{interviewers.map((user) => <option key={user.id} value={user.id}>{user.name} · {roleLabels[user.role]}</option>)}</select></label>
     <label className="span-2">Argomento<input name="topic" required maxLength={180} defaultValue={appointment?.topic ?? ""} /></label><label>Giorno<input name="date" type="date" required defaultValue={initial.date} /></label><label>Orario<input name="time" type="time" required step="300" defaultValue={initial.time} /></label>
-    <label className="span-2">Note<textarea name="notes" rows={3} maxLength={1000} defaultValue={appointment?.notes ?? ""} /></label><p className="form-hint span-2">Il sistema riserva automaticamente l’ora successiva e impedisce altri appuntamenti allo stesso intervistatore.</p>
+    <label className="span-2">Pacchetto<select name="packageCode" value={packageCode} onChange={(event) => setPackageCode(event.target.value as PodcastPackageCode)}>{Object.entries(PODCAST_PACKAGES).map(([code, item]) => <option value={code} key={code}>{item.name} · {item.priceCents ? money(item.priceCents) : "Gratuito"}</option>)}</select></label>
+    <label className="confirmation span-2 podcast-addon"><input name="marcolifestyleAddOn" type="checkbox" checked={marcolifestyleAddOn} onChange={(event) => setMarcolifestyleAddOn(event.target.checked)} /><span><strong>Aggiungi MarcoLifestyle · + {money(MARCOLIFESTYLE_PRICE_CENTS)}</strong>Disponibile con entrambi i pacchetti.</span></label>
+    <div className="podcast-price-summary span-2"><div><span>Pacchetto</span><strong>{PODCAST_PACKAGES[packageCode].name}</strong></div><div><span>Netto</span><strong>{money(netCents)}</strong></div><div><span>{taxName} escluso ({taxRateBps / 100}%)</span><strong>{money(taxCents)}</strong></div><div className="total"><span>Totale con {taxName}</span><strong>{money(netCents + taxCents)}</strong></div></div>
+    <label className="span-2">Note<textarea name="notes" rows={3} maxLength={1000} defaultValue={appointment?.notes ?? ""} /></label><p className="form-hint span-2">Il sistema riserva automaticamente l’ora successiva, impedisce sovrapposizioni e salva il prezzo applicato nello storico.</p>
     {error && <div className="form-error span-2">{error}</div>}<div className="modal-actions span-2">{appointment && <button className="danger" type="button" disabled={busy} onClick={() => void cancelAppointment()}>Annulla appuntamento</button>}<button type="button" onClick={onClose}>Chiudi</button><button className="primary" disabled={busy || !interviewers.length}>{busy ? "Salvataggio…" : "Salva"}</button></div>
   </form></Modal>;
 }

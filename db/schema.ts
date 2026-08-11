@@ -80,6 +80,29 @@ export const clients = sqliteTable("clients", {
   archivedAt: text("archived_at"),
 }, (table) => [index("clients_owner_idx").on(table.ownerUserId), index("clients_island_idx").on(table.island), index("clients_stage_idx").on(table.stage)]);
 
+export const landingLeads = sqliteTable("landing_leads", {
+  id: text("id").primaryKey(),
+  company: text("company").notNull(),
+  contact: text("contact").notNull(),
+  phone: text("phone").notNull(),
+  email: text("email").notNull(),
+  city: text("city").notNull(),
+  island: text("island").notNull(),
+  service: text("service", { enum: ["magazine", "podcast", "both"] }).notNull(),
+  notes: text("notes").notNull().default(""),
+  locale: text("locale", { enum: ["it", "es"] }).notNull().default("it"),
+  source: text("source").notNull().default("crmvlc_landing"),
+  status: text("status", { enum: ["pending_manager", "assigned"] }).notNull().default("pending_manager"),
+  assignedManagerId: text("assigned_manager_id").references(() => users.id),
+  clientId: text("client_id").references(() => clients.id),
+  consentAt: text("consent_at").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (table) => [
+  index("landing_leads_island_status_idx").on(table.island, table.status),
+  index("landing_leads_manager_idx").on(table.assignedManagerId, table.createdAt),
+  index("landing_leads_email_idx").on(table.email, table.createdAt),
+]);
+
 export const deliveries = sqliteTable("deliveries", {
   id: text("id").primaryKey(),
   clientId: text("client_id").notNull().references(() => clients.id),

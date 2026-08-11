@@ -4,13 +4,14 @@ import {
   canCreateQuote,
   canManageDeliveries,
   canManagePriceList,
+  canCreateUserWithRole,
   canReadPriceList,
   canReadRecord,
   canWriteDelivery,
   canWriteRecord,
+  canUpdateUserRole,
   deliveryScope,
   isIsland,
-  isRole,
   normalizeEmail,
   recordScope,
 } from "./authorization.js";
@@ -33,7 +34,8 @@ type UserRow = {
   id: string;
   email: string;
   name: string;
-  role: "super_admin" | "sales_manager" | "sales" | "distributor";
+  phone: string | null;
+  role: "super_admin" | "admin" | "sales_manager" | "sales" | "distributor";
   island: string | null;
   active: number;
   created_at?: string;
@@ -125,6 +127,15 @@ type EmailOutboxRow = {
   attachment_r2_key: string | null;
   attachment_filename: string | null;
   attempts: number;
+};
+
+type EmailChangeFlowRow = {
+  id: string;
+  user_id: string;
+  data_json: string | null;
+  expires_at: string;
+  consumed_at: string | null;
+  old_email: string;
 };
 
 type PriceListRow = {
@@ -265,6 +276,10 @@ export async function handleCrmApi(
       return logout(request, env);
     }
 
+    if (url.pathname === "/api/profile/email/confirm" && request.method === "POST") {
+      return confirmProfileEmail(request, env);
+    }
+
     const vipResponse = await handleVipPublicApi(request, env, ctx);
     if (vipResponse) return vipResponse;
 
@@ -272,6 +287,9 @@ export async function handleCrmApi(
 
     if (url.pathname === "/api/bootstrap" && request.method === "GET") {
       return bootstrap(user, env);
+    }
+    if (url.pathname === "/api/profile" && request.method === "PATCH") {
+      return updateProfile(request, user, env);
     }
     if (url.pathname === "/api/clients" && request.method === "POST") {
       return createClient(request, user, env);
@@ -404,6 +422,130 @@ async function logout(request: Request, env: RuntimeEnv): Promise<Response> {
   return response;
 }
 
+async function updateProfile(request: Request, user: UserRow, env: RuntimeEnv): Promise<Response> {
+  const body = await readJson<Record<string, unknown>>(request);
+  const name = body.name === undefined ? user.name : cleanText(body.name, 120);
+  const phone = body.phone === undefined ? user.phone : normalizePhone(body.phone);
+  const requestedEmail = body.email === undefined ? user.email : normalizeEmail(body.email);
+  if (!name || !isEmail(requestedEmail)) throw new ApiError(400, "invalid_profile", "Nome ed email devono essere validi.");
+
+  const emailChanged = requestedEmail !== user.email;
+  let verificationSent = false;
+  if (emailChanged) {
+    if (!env.AUTH_SECRET || !env.EMAIL || !env.EMAIL_FROM) {
+      throw new ApiError(503, "email_not_configured", "La verifica del nuovo indirizzo email non è configurata.");
+    }
+    const existing = await env.DB.prepare("SELECT id FROM users WHERE email = ? AND id <> ? LIMIT 1")
+      .bind(requestedEmail, user.id).first();
+    if (existing) throw new ApiError(409, "email_exists", "Esiste già un utente con questa email.");
+
+    const token = randomToken(32);
+    const tokenHash = await sha256(token);
+    const flowId = crypto.randomUUID();
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + 30 * 60_000).toISOString();
+    await env.DB.batch([
+      env.DB.prepare("UPDATE auth_flow_tokens SET consumed_at = ? WHERE user_id = ? AND purpose = 'email_change' AND consumed_at IS NULL")
+        .bind(now.toISOString(), user.id),
+      env.DB.prepare("INSERT INTO auth_flow_tokens (id, token_hash, user_id, purpose, data_json, expires_at, consumed_at, created_at) VALUES (?, ?, ?, 'email_change', ?, ?, NULL, ?)")
+        .bind(flowId, tokenHash, user.id, JSON.stringify({ newEmail: requestedEmail }), expiresAt, now.toISOString()),
+    ]);
+    const verificationUrl = new URL("/", request.url);
+    verificationUrl.searchParams.set("email-change", token);
+    try {
+      await env.EMAIL.send({
+        from: { name: "CRMVLC", email: env.EMAIL_FROM },
+        to: requestedEmail,
+        subject: "Conferma il nuovo indirizzo email CRMVLC",
+        text: `Conferma il nuovo indirizzo email aprendo questo collegamento entro 30 minuti: ${verificationUrl.toString()} Se non hai richiesto la modifica, ignora il messaggio.`,
+        html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto"><h2>CRMVLC</h2><p>Conferma il nuovo indirizzo email del tuo profilo.</p><p><a href="${escapeHtml(verificationUrl.toString())}" style="display:inline-block;padding:12px 18px;border-radius:8px;color:#fff;background:#ef6a54;text-decoration:none;font-weight:700">Conferma email</a></p><p>Il collegamento scade tra 30 minuti.</p><p style="color:#667085">Se non hai richiesto la modifica, ignora il messaggio.</p></div>`,
+      });
+      verificationSent = true;
+    } catch (error) {
+      await env.DB.prepare("DELETE FROM auth_flow_tokens WHERE id = ?").bind(flowId).run();
+      console.error(JSON.stringify({ level: "error", event: "profile_email_verification_failed", userId: user.id, error: error instanceof Error ? error.message : "unknown" }));
+      throw new ApiError(503, "email_delivery_failed", "Non è stato possibile inviare la verifica al nuovo indirizzo.");
+    }
+  }
+
+  const now = new Date().toISOString();
+  await env.DB.prepare("UPDATE users SET name = ?, phone = ?, updated_at = ? WHERE id = ?")
+    .bind(name, phone, now, user.id).run();
+  await appendAudit(env, request, user.id, "user.profile_updated", "user", user.id, {
+    nameChanged: name !== user.name,
+    phoneChanged: phone !== user.phone,
+    emailChangeRequested: emailChanged,
+  });
+  if (emailChanged) {
+    await appendAudit(env, request, user.id, "user.email_change_requested", "user", user.id, { newEmail: requestedEmail });
+  }
+  return json({
+    user: publicUser({ ...user, name, phone }),
+    verificationSent,
+    message: verificationSent
+      ? "Profilo aggiornato. Apri il collegamento inviato al nuovo indirizzo per confermare l’email."
+      : "Profilo aggiornato.",
+  });
+}
+
+async function confirmProfileEmail(request: Request, env: RuntimeEnv): Promise<Response> {
+  const body = await readJson<{ token?: string }>(request);
+  const token = String(body.token ?? "");
+  if (token.length < 32 || token.length > 200) throw new ApiError(400, "invalid_email_change", "Collegamento di verifica non valido o scaduto.");
+  const tokenHash = await sha256(token);
+  const flow = await env.DB.prepare(
+    "SELECT f.id, f.user_id, f.data_json, f.expires_at, f.consumed_at, u.email AS old_email FROM auth_flow_tokens f JOIN users u ON u.id = f.user_id WHERE f.token_hash = ? AND f.purpose = 'email_change' LIMIT 1",
+  ).bind(tokenHash).first<EmailChangeFlowRow>();
+  if (!flow || flow.consumed_at || Date.parse(flow.expires_at) <= Date.now()) {
+    throw new ApiError(400, "invalid_email_change", "Collegamento di verifica non valido o scaduto.");
+  }
+
+  let newEmail = "";
+  try {
+    newEmail = normalizeEmail((JSON.parse(flow.data_json ?? "{}") as { newEmail?: string }).newEmail);
+  } catch {
+    throw new ApiError(400, "invalid_email_change", "Collegamento di verifica non valido o scaduto.");
+  }
+  if (!isEmail(newEmail)) throw new ApiError(400, "invalid_email_change", "Collegamento di verifica non valido o scaduto.");
+  const duplicate = await env.DB.prepare("SELECT id FROM users WHERE email = ? AND id <> ? LIMIT 1").bind(newEmail, flow.user_id).first();
+  if (duplicate) throw new ApiError(409, "email_exists", "Questo indirizzo email è già utilizzato.");
+
+  const now = new Date().toISOString();
+  try {
+    const results = await env.DB.batch([
+      env.DB.prepare("UPDATE users SET email = ?, updated_at = ? WHERE id = ? AND email = ?")
+        .bind(newEmail, now, flow.user_id, flow.old_email),
+      env.DB.prepare("UPDATE auth_flow_tokens SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL")
+        .bind(now, flow.id),
+      env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(flow.user_id),
+    ]);
+    if (Number(results[0].meta.changes ?? 0) !== 1 || Number(results[1].meta.changes ?? 0) !== 1) {
+      throw new ApiError(409, "email_change_conflict", "Il profilo è cambiato. Richiedi nuovamente la modifica email.");
+    }
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    if (String(error).includes("UNIQUE")) throw new ApiError(409, "email_exists", "Questo indirizzo email è già utilizzato.");
+    throw error;
+  }
+  await appendAudit(env, request, flow.user_id, "user.email_changed", "user", flow.user_id, { oldEmail: flow.old_email, newEmail });
+
+  if (env.EMAIL && env.EMAIL_FROM && flow.old_email !== newEmail) {
+    try {
+      await env.EMAIL.send({
+        from: { name: "CRMVLC", email: env.EMAIL_FROM },
+        to: flow.old_email,
+        subject: "Indirizzo email CRMVLC modificato",
+        text: `L’indirizzo email del tuo account CRMVLC è stato modificato in ${newEmail}. Se non riconosci questa operazione, contatta subito il Super Admin.`,
+      });
+    } catch (error) {
+      console.error(JSON.stringify({ level: "error", event: "profile_email_security_notice_failed", userId: flow.user_id, error: error instanceof Error ? error.message : "unknown" }));
+    }
+  }
+  const response = json({ message: "Email confermata. Accedi nuovamente con il nuovo indirizzo." });
+  response.headers.append("Set-Cookie", clearSessionCookie(request));
+  return response;
+}
+
 async function bootstrap(user: UserRow, env: RuntimeEnv): Promise<Response> {
   const scope = recordScope(user);
   const clients = user.role === "distributor"
@@ -449,12 +591,14 @@ async function bootstrap(user: UserRow, env: RuntimeEnv): Promise<Response> {
   let users: Record<string, unknown>[] = [];
   let audit: Record<string, unknown>[] = [];
   let emailOutbox: Record<string, unknown>[] = [];
+  if (user.role === "super_admin" || user.role === "admin") {
+    users = (await env.DB.prepare("SELECT id, email, name, phone, role, island, active, created_at FROM users ORDER BY role, name").all()).results;
+  }
   if (user.role === "super_admin") {
-    users = (await env.DB.prepare("SELECT id, email, name, role, island, active, created_at FROM users ORDER BY role, name").all()).results;
     audit = (await env.DB.prepare("SELECT a.id, a.action, a.entity_type, a.entity_id, a.payload_json, a.created_at, u.name AS actor_name FROM audit_events a LEFT JOIN users u ON u.id = a.actor_user_id ORDER BY a.created_at DESC LIMIT 80").all()).results;
     emailOutbox = (await env.DB.prepare("SELECT id, recipient, subject, status, attempts, next_attempt_at, last_error, created_at, sent_at FROM email_outbox WHERE status <> 'sent' ORDER BY created_at DESC LIMIT 50").all()).results;
   } else if (user.role === "sales_manager") {
-    users = (await env.DB.prepare("SELECT id, email, name, role, island, active, created_at FROM users WHERE island = ? AND active = 1 ORDER BY role, name")
+    users = (await env.DB.prepare("SELECT id, email, name, phone, role, island, active, created_at FROM users WHERE island = ? AND active = 1 ORDER BY role, name")
       .bind(user.island).all()).results;
   }
 
@@ -688,7 +832,7 @@ async function createClient(request: Request, user: UserRow, env: RuntimeEnv): P
   const notes = cleanOptionalText(body.notes, 2000);
   const stage = String(body.stage ?? "lead");
   const requestedIsland = String(body.island ?? "");
-  const island = user.role === "super_admin" ? requestedIsland : String(user.island ?? "");
+  const island = isGlobalOperator(user) ? requestedIsland : String(user.island ?? "");
   if (!companyName || !contactName || !isEmail(email) || !isIsland(island)) {
     throw new ApiError(400, "invalid_client", "Azienda, contatto, email e isola sono obbligatori.");
   }
@@ -791,17 +935,18 @@ async function updateDelivery(request: Request, deliveryId: string, user: UserRo
 }
 
 async function createUser(request: Request, user: UserRow, env: RuntimeEnv): Promise<Response> {
-  requireSuperAdmin(user);
+  requireUserManager(user);
   const body = await readJson<Record<string, unknown>>(request);
   const email = normalizeEmail(body.email);
   const name = cleanText(body.name, 120);
   const role = String(body.role ?? "");
-  const island = String(body.island ?? "");
+  const requestedIsland = String(body.island ?? "");
   const temporaryPassword = String(body.temporaryPassword ?? "");
-  if (!isEmail(email) || !name || !isRole(role) || role === "super_admin") {
+  if (!isEmail(email) || !name || !canCreateUserWithRole(user, role)) {
     throw new ApiError(400, "invalid_user", "Nome, email e ruolo operativo sono obbligatori.");
   }
-  if (!isIsland(island)) throw new ApiError(400, "invalid_island", "Assegna una delle cinque isole.");
+  const island = role === "admin" ? null : requestedIsland;
+  if (role !== "admin" && !isIsland(requestedIsland)) throw new ApiError(400, "invalid_island", "Assegna una delle cinque isole.");
   if (temporaryPassword.length < 12 || temporaryPassword.length > 256) throw new ApiError(400, "weak_password", "La password temporanea deve contenere almeno 12 caratteri.");
   const credentials = await createPasswordHash(temporaryPassword, env.AUTH_SECRET ?? "");
   const id = crypto.randomUUID();
@@ -817,15 +962,18 @@ async function createUser(request: Request, user: UserRow, env: RuntimeEnv): Pro
 }
 
 async function updateUser(request: Request, targetUserId: string, user: UserRow, env: RuntimeEnv): Promise<Response> {
-  requireSuperAdmin(user);
-  const target = await env.DB.prepare("SELECT id, email, name, role, island, active FROM users WHERE id = ? LIMIT 1")
+  requireUserManager(user);
+  const target = await env.DB.prepare("SELECT id, email, name, phone, role, island, active FROM users WHERE id = ? LIMIT 1")
     .bind(targetUserId).first<UserRow>();
-  if (!target || target.role === "super_admin") throw new ApiError(404, "user_not_found", "Utente operativo non trovato.");
+  if (!target || target.role === "super_admin" || (target.role === "admin" && user.role !== "super_admin")) {
+    throw new ApiError(404, "user_not_found", "Utente operativo non trovato.");
+  }
   const body = await readJson<Record<string, unknown>>(request);
   const role = body.role === undefined ? target.role : String(body.role);
-  const island = body.island === undefined ? target.island : String(body.island);
+  const requestedIsland = body.island === undefined ? target.island : String(body.island);
+  const island = role === "admin" ? null : requestedIsland;
   const active = body.active === undefined ? target.active : body.active === true ? 1 : body.active === false ? 0 : -1;
-  if (!isRole(role) || role === "super_admin" || !isIsland(island) || ![0, 1].includes(active)) {
+  if (!canUpdateUserRole(user, target.role, role) || (role !== "admin" && !isIsland(String(island ?? ""))) || ![0, 1].includes(active)) {
     throw new ApiError(400, "invalid_user", "Ruolo, isola o stato utente non validi.");
   }
   const now = new Date().toISOString();
@@ -1060,7 +1208,7 @@ async function ensureBootstrapAdmin(env: RuntimeEnv): Promise<void> {
 
 async function ensureDemoAccount(env: RuntimeEnv): Promise<UserRow> {
   const email = normalizeEmail(env.DEMO_EMAIL);
-  let user = await env.DB.prepare("SELECT id, email, name, role, island, active FROM users WHERE email = ? LIMIT 1")
+  let user = await env.DB.prepare("SELECT id, email, name, phone, role, island, active FROM users WHERE email = ? LIMIT 1")
     .bind(email).first<UserRow>();
   const now = new Date().toISOString();
 
@@ -1068,7 +1216,7 @@ async function ensureDemoAccount(env: RuntimeEnv): Promise<UserRow> {
     const id = crypto.randomUUID();
     await env.DB.prepare("INSERT INTO users (id, email, name, role, island, active, created_at, updated_at) VALUES (?, ?, 'Demo Super Admin', 'super_admin', NULL, 1, ?, ?)")
       .bind(id, email, now, now).run();
-    user = { id, email, name: "Demo Super Admin", role: "super_admin", island: null, active: 1 };
+    user = { id, email, name: "Demo Super Admin", phone: null, role: "super_admin", island: null, active: 1 };
   } else if (user.role !== "super_admin" || user.active !== 1) {
     await env.DB.prepare("UPDATE users SET name = 'Demo Super Admin', role = 'super_admin', island = NULL, active = 1, updated_at = ? WHERE id = ?")
       .bind(now, user.id).run();
@@ -1084,7 +1232,7 @@ async function requireUser(request: Request, env: RuntimeEnv, ctx: ExecutionCont
   const sessionId = await sha256(token);
   const now = new Date().toISOString();
   const user = await env.DB.prepare(
-    "SELECT u.id, u.email, u.name, u.role, u.island, u.active FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id = ? AND s.expires_at > ? AND u.active = 1 LIMIT 1",
+    "SELECT u.id, u.email, u.name, u.phone, u.role, u.island, u.active FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id = ? AND s.expires_at > ? AND u.active = 1 LIMIT 1",
   ).bind(sessionId, now).first<UserRow>();
   if (!user) throw new ApiError(401, "session_expired", "Sessione scaduta. Accedi nuovamente.");
   ctx.waitUntil(env.DB.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?").bind(now, sessionId).run().then(() => undefined));
@@ -1209,8 +1357,8 @@ async function getQuote(env: RuntimeEnv, id: string): Promise<QuoteRow | null> {
 
 async function resolveOwner(env: RuntimeEnv, actor: UserRow, requestedOwner: string, island: string): Promise<string> {
   if (actor.role === "sales") return actor.id;
-  if (actor.role === "super_admin" && requestedOwner === actor.id) return actor.id;
-  const owner = await env.DB.prepare("SELECT id, email, name, role, island, active FROM users WHERE id = ? AND active = 1 LIMIT 1")
+  if (isGlobalOperator(actor) && requestedOwner === actor.id) return actor.id;
+  const owner = await env.DB.prepare("SELECT id, email, name, phone, role, island, active FROM users WHERE id = ? AND active = 1 LIMIT 1")
     .bind(requestedOwner).first<UserRow>();
   if (!owner || !["sales_manager", "sales"].includes(owner.role)) return actor.id;
   if (owner.island !== island) throw new ApiError(400, "owner_island_mismatch", "Il responsabile del cliente deve appartenere alla stessa isola.");
@@ -1307,6 +1455,16 @@ function requireSuperAdmin(user: UserRow): void {
   if (user.role !== "super_admin") throw new ApiError(403, "super_admin_required", "Operazione riservata al Super Admin.");
 }
 
+function requireUserManager(user: UserRow): void {
+  if (user.role !== "super_admin" && user.role !== "admin") {
+    throw new ApiError(403, "user_manager_required", "Operazione riservata alla gestione utenti.");
+  }
+}
+
+function isGlobalOperator(user: UserRow): boolean {
+  return user.role === "super_admin" || user.role === "admin";
+}
+
 function verifySameOrigin(request: Request, url: URL): void {
   if (["GET", "HEAD", "OPTIONS"].includes(request.method)) return;
   const origin = request.headers.get("origin");
@@ -1369,7 +1527,7 @@ function apiError(error: ApiError): Response {
 }
 
 function publicUser(user: UserRow) {
-  return { id: user.id, email: user.email, name: user.name, role: user.role, island: user.island };
+  return { id: user.id, email: user.email, name: user.name, phone: user.phone, role: user.role, island: user.island };
 }
 
 function cookieValue(request: Request, name: string): string | null {
@@ -1452,6 +1610,14 @@ function cleanText(value: unknown, maxLength: number): string {
 function cleanOptionalText(value: unknown, maxLength: number): string | null {
   const cleaned = cleanText(value, maxLength);
   return cleaned || null;
+}
+
+function normalizePhone(value: unknown): string | null {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length < 7 || digits.length > 15) throw new ApiError(400, "invalid_phone", "Inserisci un numero di telefono valido.");
+  return `${raw.startsWith("+") ? "+" : ""}${digits}`;
 }
 
 function isEmail(value: string): boolean {

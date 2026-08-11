@@ -22,7 +22,9 @@ export function isRole(value) {
 
 export function canReadRecord(user, record) {
   if (user.role === "super_admin" || user.role === "admin") return true;
-  if (user.role === "sales_manager") return Boolean(user.island) && user.island === record.island;
+  if (user.role === "sales_manager") {
+    return user.id === record.owner_user_id || user.id === record.owner_sales_manager_id;
+  }
   if (user.role === "sales") return user.id === record.owner_user_id;
   return false;
 }
@@ -37,9 +39,21 @@ export function canCancelSignedContract(user, contract) {
 
 export function recordScope(user) {
   if (user.role === "super_admin" || user.role === "admin") return { sql: "", values: [] };
-  if (user.role === "sales_manager") return { sql: " AND island = ?", values: [user.island] };
+  if (user.role === "sales_manager") {
+    return {
+      sql: " AND (owner_user_id = ? OR owner_user_id IN (SELECT id FROM users WHERE role = 'sales' AND sales_manager_id = ?))",
+      values: [user.id, user.id],
+    };
+  }
   if (user.role === "sales") return { sql: " AND owner_user_id = ?", values: [user.id] };
   return { sql: " AND 1 = 0", values: [] };
+}
+
+export function canAssignClientOwner(actor, owner) {
+  if (!owner || owner.active === 0 || owner.role !== "sales") return false;
+  if (actor.role === "super_admin" || actor.role === "admin") return true;
+  if (actor.role === "sales_manager") return owner.sales_manager_id === actor.id;
+  return actor.role === "sales" && owner.id === actor.id;
 }
 
 export function canManageDeliveries(user) {

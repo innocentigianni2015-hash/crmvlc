@@ -369,6 +369,8 @@ code { padding: 4px 7px; border-radius: 6px; color: #22516d; background: #eaf3f7
 .kanban-cards article > div:last-child { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; }
 .kanban-cards article b { font-size: 11px; }
 .kanban-cards select { width: 22px; height: 24px; padding: 0; border: 0; color: transparent; background: #edf2f5; }
+.kanban-cards .kanban-owner { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; color: #718392; font-size: 9px; font-weight: 900; letter-spacing: .03em; text-transform: uppercase; }
+.kanban-cards .kanban-owner select { width: 100%; height: 36px; padding: 6px 8px; border: 1px solid #d9e1e6; border-radius: 7px; color: var(--navy); background: #f8fafb; font-size: 11px; font-weight: 700; text-transform: none; }
 .kanban-empty { min-height: 70px; display: grid; place-items: center; border: 1px dashed #cbd5dc; border-radius: 9px; color: #9aa9b4; font-size: 9px; }
 
 /* Complete operations hub */

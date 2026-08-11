@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   canCancelSignedContract,
   canApplyQuoteDiscount,
+  canAssignClientOwner,
   canCreateQuote,
   canCreateUserWithRole,
   canManageDeliveries,
@@ -22,7 +23,7 @@ import {
 import { createImpersonationToken, verifyImpersonationToken } from "../worker/impersonation.ts";
 import { canaryDateKey, canaryLocalToIso, oneHourAfter } from "../worker/podcast-scheduling.ts";
 
-const client = { island: "Tenerife", owner_user_id: "agent-1" };
+const client = { island: "Tenerife", owner_user_id: "agent-1", owner_sales_manager_id: "manager-1" };
 
 test("normalizes and validates identity inputs", () => {
   assert.equal(normalizeEmail("  AGENTE@EXAMPLE.COM "), "agente@example.com");
@@ -33,8 +34,8 @@ test("normalizes and validates identity inputs", () => {
 test("enforces record visibility by role", () => {
   assert.equal(canReadRecord({ id: "admin", role: "super_admin", island: null }, client), true);
   assert.equal(canReadRecord({ id: "operator", role: "admin", island: null }, client), true);
-  assert.equal(canReadRecord({ id: "manager", role: "sales_manager", island: "Tenerife" }, client), true);
-  assert.equal(canReadRecord({ id: "manager", role: "sales_manager", island: "Lanzarote" }, client), false);
+  assert.equal(canReadRecord({ id: "manager-1", role: "sales_manager", island: "Tenerife" }, client), true);
+  assert.equal(canReadRecord({ id: "manager-2", role: "sales_manager", island: "Tenerife" }, client), false);
   assert.equal(canReadRecord({ id: "agent-1", role: "sales", island: "Tenerife" }, client), true);
   assert.equal(canReadRecord({ id: "agent-2", role: "sales", island: "Tenerife" }, client), false);
   assert.equal(canReadRecord({ id: "driver-1", role: "distributor", island: "Tenerife" }, client), false);
@@ -50,9 +51,9 @@ test("limits signed-contract cancellation to the super admin", () => {
 test("builds the expected database scope", () => {
   assert.deepEqual(recordScope({ role: "super_admin" }), { sql: "", values: [] });
   assert.deepEqual(recordScope({ role: "admin" }), { sql: "", values: [] });
-  assert.deepEqual(recordScope({ role: "sales_manager", island: "Gran Canaria" }), {
-    sql: " AND island = ?",
-    values: ["Gran Canaria"],
+  assert.deepEqual(recordScope({ id: "manager-1", role: "sales_manager", island: "Gran Canaria" }), {
+    sql: " AND (owner_user_id = ? OR owner_user_id IN (SELECT id FROM users WHERE role = 'sales' AND sales_manager_id = ?))",
+    values: ["manager-1", "manager-1"],
   });
   assert.deepEqual(recordScope({ role: "sales", id: "agent-1" }), {
     sql: " AND owner_user_id = ?",
@@ -62,6 +63,16 @@ test("builds the expected database scope", () => {
     sql: " AND 1 = 0",
     values: [],
   });
+});
+
+test("allows client reassignment only inside the explicit sales team", () => {
+  const teamSales = { id: "sales-1", role: "sales", island: "Tenerife", sales_manager_id: "manager-1", active: 1 };
+  const otherSales = { id: "sales-2", role: "sales", island: "Tenerife", sales_manager_id: "manager-2", active: 1 };
+  assert.equal(canAssignClientOwner({ id: "manager-1", role: "sales_manager" }, teamSales), true);
+  assert.equal(canAssignClientOwner({ id: "manager-1", role: "sales_manager" }, otherSales), false);
+  assert.equal(canAssignClientOwner({ id: "admin", role: "admin" }, otherSales), true);
+  assert.equal(canAssignClientOwner({ id: "sales-1", role: "sales" }, teamSales), true);
+  assert.equal(canAssignClientOwner({ id: "sales-1", role: "sales" }, { ...teamSales, active: 0 }), false);
 });
 
 test("enforces delivery visibility and management", () => {

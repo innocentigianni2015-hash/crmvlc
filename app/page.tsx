@@ -9,7 +9,7 @@ type Role = "super_admin" | "admin" | "sales_manager" | "sales" | "distributor";
 type InstallPromptEvent = Event & { prompt(): Promise<void>; userChoice: Promise<{ outcome: "accepted" | "dismissed" }> };
 const BACKGROUND_LOCK_MS = 60 * 60 * 1000;
 const BACKGROUND_AT_KEY = "crmvlc:backgrounded-at";
-type User = { id: string; email: string; name: string; phone: string | null; role: Role; island: string | null; active?: number };
+type User = { id: string; email: string; name: string; phone: string | null; role: Role; island: string | null; sales_manager_id?: string | null; sales_manager_name?: string | null; active?: number };
 type Client = {
   id: string; company_name: string; contact_name: string; email: string; phone: string | null;
   island: string; stage: string; value_cents: number; owner_user_id: string; owner_name?: string;
@@ -394,6 +394,19 @@ export default function Home() {
     } catch (error) { notify(error instanceof Error ? error.message : "Aggiornamento non riuscito.", "error"); }
   }
 
+  async function changeOwner(client: Client, ownerUserId: string) {
+    if (!ownerUserId || ownerUserId === client.owner_user_id) return;
+    try {
+      await api(`/api/clients/${client.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ownerUserId, version: client.version }),
+      });
+      notify("Cliente, preventivi e contratti riassegnati al nuovo Sales.");
+      await refresh();
+    } catch (error) { notify(error instanceof Error ? error.message : "Riassegnazione non riuscita.", "error"); }
+  }
+
   return (
     <div className="ops-shell">
       <aside className="ops-sidebar">
@@ -431,7 +444,7 @@ export default function Home() {
             <Metric label="Proposte" value={String(data.clients.filter((client) => client.stage === "proposal").length)} note="in fase proposta" />
             <Metric label="Contratti firmati" value={String(data.contracts.filter((contract) => contract.status === "signed").length)} note="con evidenza OTP" />
           </div>
-          <CrmKanban clients={filteredClients} onStageChange={changeStage} />
+          <CrmKanban actor={data.user} users={data.users} clients={filteredClients} onStageChange={changeStage} onOwnerChange={changeOwner} />
         </section>}
 
         {active === "operations" && <OperationsHub user={data.user} clients={data.clients} users={data.users} deliveries={data.deliveries} notify={notify} />}
@@ -613,8 +626,9 @@ function Empty({ title, text }: { title: string; text: string }) {
   return <div className="empty"><span>＋</span><strong>{title}</strong><p>{text}</p></div>;
 }
 
-function CrmKanban({ clients, onStageChange }: { clients: Client[]; onStageChange: (client: Client, stage: string) => Promise<void> }) {
+function CrmKanban({ actor, users, clients, onStageChange, onOwnerChange }: { actor: User; users: User[]; clients: Client[]; onStageChange: (client: Client, stage: string) => Promise<void>; onOwnerChange: (client: Client, ownerUserId: string) => Promise<void> }) {
   const [draggedId, setDraggedId] = useState<string | null>(null);
+  const canReassign = ["super_admin", "admin", "sales_manager"].includes(actor.role);
   return <div className="kanban-shell">
     <div className="kanban-head"><div><h2>Pipeline commerciale</h2><p>Trascina le schede oppure usa il selettore su mobile.</p></div><span>{clients.length} opportunità</span></div>
     <div className="kanban-board">
@@ -623,9 +637,16 @@ function CrmKanban({ clients, onStageChange }: { clients: Client[]; onStageChang
         return <section className={`kanban-column kanban-${stage}`} key={stage} onDragOver={(event) => event.preventDefault()} onDrop={() => { const client = clients.find((item) => item.id === draggedId); setDraggedId(null); if (client && client.stage !== stage) void onStageChange(client, stage); }}>
           <header><span>{stageLabels[stage]}</span><b>{stageClients.length}</b></header>
           <div className="kanban-cards">
-            {stageClients.map((client) => <article key={client.id} draggable onDragStart={() => setDraggedId(client.id)} onDragEnd={() => setDraggedId(null)} className={draggedId === client.id ? "dragging" : ""}>
-              <div className="kanban-grip">⠿</div><strong>{client.company_name}</strong><p>{client.contact_name} · {client.island}</p><small>{client.owner_name ?? "—"}</small><div><b>{money(client.value_cents)}</b><select aria-label={`Fase ${client.company_name}`} value={client.stage} onChange={(event) => void onStageChange(client, event.target.value)}>{STAGES.map((option) => <option key={option} value={option}>{stageLabels[option]}</option>)}</select></div>
-            </article>)}
+            {stageClients.map((client) => {
+              const eligibleSales = users.filter((candidate) => candidate.role === "sales" && candidate.active !== 0 && candidate.island === client.island
+                && (actor.role !== "sales_manager" || candidate.sales_manager_id === actor.id));
+              const currentOwnerEligible = eligibleSales.some((candidate) => candidate.id === client.owner_user_id);
+              return <article key={client.id} draggable onDragStart={() => setDraggedId(client.id)} onDragEnd={() => setDraggedId(null)} className={draggedId === client.id ? "dragging" : ""}>
+                <div className="kanban-grip">⠿</div><strong>{client.company_name}</strong><p>{client.contact_name} · {client.island}</p><small>{client.owner_name ?? "—"}</small>
+                {canReassign && <label className="kanban-owner">Sales responsabile<select aria-label={`Sales responsabile ${client.company_name}`} value={client.owner_user_id} onChange={(event) => void onOwnerChange(client, event.target.value)}>{!currentOwnerEligible && <option value={client.owner_user_id}>{client.owner_name ?? "Responsabile attuale"} · da riassegnare</option>}{eligibleSales.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}</select></label>}
+                <div><b>{money(client.value_cents)}</b><select aria-label={`Fase ${client.company_name}`} value={client.stage} onChange={(event) => void onStageChange(client, event.target.value)}>{STAGES.map((option) => <option key={option} value={option}>{stageLabels[option]}</option>)}</select></div>
+              </article>;
+            })}
             {!stageClients.length && <div className="kanban-empty">Trascina qui</div>}
           </div>
         </section>;
@@ -914,7 +935,9 @@ function PriceEditModal({ item, onClose, onSaved }: { item: PriceItem; onClose: 
 
 function ClientModal({ data, onClose, onSaved }: { data: Bootstrap; onClose: () => void; onSaved: () => Promise<void> }) {
   const [busy, setBusy] = useState(false); const [error, setError] = useState("");
-  const assignable = data.users.filter((user) => ["sales_manager", "sales"].includes(user.role) && user.active !== 0 && (["super_admin", "admin"].includes(data.user.role) || user.island === data.user.island));
+  const [island, setIsland] = useState(data.user.island ?? ISLANDS[0]);
+  const assignable = data.users.filter((candidate) => candidate.role === "sales" && candidate.active !== 0 && candidate.island === island
+    && (data.user.role !== "sales_manager" || candidate.sales_manager_id === data.user.id));
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError("");
     const form = new FormData(event.currentTarget);
@@ -925,7 +948,7 @@ function ClientModal({ data, onClose, onSaved }: { data: Bootstrap; onClose: () 
   }
   const canAssign = ["super_admin", "admin", "sales_manager"].includes(data.user.role);
   const globalOperator = ["super_admin", "admin"].includes(data.user.role);
-  return <Modal title="Nuovo cliente" subtitle="Il proprietario del record determina la visibilità del Sales." onClose={onClose}><form className="form-grid" onSubmit={submit}><label className="span-2">Azienda<input name="companyName" required maxLength={120} /></label><label>Referente<input name="contactName" required maxLength={120} /></label><label>Email<input name="email" type="email" required /></label><label>Telefono<input name="phone" /></label><label>Isola<select name="island" required defaultValue={data.user.island ?? ""} disabled={!globalOperator}>{ISLANDS.map((island) => <option key={island}>{island}</option>)}</select>{!globalOperator && <input type="hidden" name="island" value={data.user.island ?? ""} />}</label><label>Valore stimato €<input name="valueEuros" type="number" min="0" step="0.01" defaultValue="0" /></label>{canAssign && <label>Assegnato a<select name="ownerUserId" defaultValue={data.user.id}><option value={data.user.id}>{data.user.name}</option>{assignable.filter((user) => user.id !== data.user.id).map((user) => <option key={user.id} value={user.id}>{user.name} · {user.island}</option>)}</select></label>}<label className="span-2">Note<textarea name="notes" rows={3} maxLength={2000} /></label>{error && <div className="form-error span-2">{error}</div>}<div className="modal-actions span-2"><button type="button" onClick={onClose}>Annulla</button><button className="primary" disabled={busy}>{busy ? "Salvataggio…" : "Crea cliente"}</button></div></form></Modal>;
+  return <Modal title="Nuovo cliente" subtitle="Il Sales assegnato determina la visibilità della pipeline e di tutti i documenti collegati." onClose={onClose}><form className="form-grid" onSubmit={submit}><label className="span-2">Azienda<input name="companyName" required maxLength={120} /></label><label>Referente<input name="contactName" required maxLength={120} /></label><label>Email<input name="email" type="email" required /></label><label>Telefono<input name="phone" /></label><label>Isola<select name="island" required value={island} onChange={(event) => setIsland(event.target.value)} disabled={!globalOperator}>{ISLANDS.map((value) => <option key={value}>{value}</option>)}</select>{!globalOperator && <input type="hidden" name="island" value={island} />}</label><label>Valore stimato €<input name="valueEuros" type="number" min="0" step="0.01" defaultValue="0" /></label>{canAssign && <label>Sales responsabile<select name="ownerUserId" required defaultValue={assignable[0]?.id ?? ""}><option value="" disabled>Seleziona un Sales</option>{assignable.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name} · {candidate.island}</option>)}</select></label>} {canAssign && !assignable.length && <div className="form-error span-2">Non esiste un Sales attivo autorizzato per questa isola. Assegna prima un Sales al team.</div>}<label className="span-2">Note<textarea name="notes" rows={3} maxLength={2000} /></label>{error && <div className="form-error span-2">{error}</div>}<div className="modal-actions span-2"><button type="button" onClick={onClose}>Annulla</button><button className="primary" disabled={busy || (canAssign && !assignable.length)}>{busy ? "Salvataggio…" : "Crea cliente"}</button></div></form></Modal>;
 }
 
 function ContractModal({ data, onClose, onSaved }: { data: Bootstrap; onClose: () => void; onSaved: () => Promise<void> }) {
@@ -1040,9 +1063,10 @@ function ProfileModal({ user, onClose, onSaved }: { user: User; onClose: () => v
   return <Modal title="Il mio profilo" subtitle="Telefono immediato; la nuova email richiede conferma dal collegamento ricevuto." onClose={onClose}><form className="form-grid" onSubmit={submit}><label className="span-2">Nome e cognome<input name="name" required maxLength={120} defaultValue={user.name} /></label><label>Email di accesso<input name="email" type="email" required defaultValue={user.email} /></label><label>Telefono<input name="phone" type="tel" inputMode="tel" maxLength={24} defaultValue={user.phone ?? ""} placeholder="+34…" /></label><div className="profile-security span-2"><strong>{roleLabels[user.role]}</strong><span>{user.island ?? "Accesso a tutte le isole"}</span><p>Ruolo e perimetro sono modificabili soltanto da un amministratore autorizzato.</p></div>{error && <div className="form-error span-2">{error}</div>}<div className="modal-actions span-2"><button type="button" onClick={onClose}>Annulla</button><button className="primary" disabled={busy}>{busy ? "Salvataggio…" : "Salva profilo"}</button></div></form></Modal>;
 }
 
-function UserEditModal({ actor, target, onClose, onSaved }: { actor: User; target: User; onClose: () => void; onSaved: () => Promise<void> }) {
+function UserEditModal({ actor, target, users, onClose, onSaved }: { actor: User; target: User; users: User[]; onClose: () => void; onSaved: () => Promise<void> }) {
   const [role, setRole] = useState<Role>(target.role);
   const [island, setIsland] = useState(target.island ?? ISLANDS[0]);
+  const [salesManagerId, setSalesManagerId] = useState(target.sales_manager_id ?? "");
   const [active, setActive] = useState(target.active !== 0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -1054,7 +1078,7 @@ function UserEditModal({ actor, target, onClose, onSaved }: { actor: User; targe
       await api(`/api/users/${target.id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ role, island, active }),
+        body: JSON.stringify({ role, island, salesManagerId: role === "sales" ? salesManagerId : null, active }),
       });
       await onSaved();
     } catch (cause) {
@@ -1065,13 +1089,15 @@ function UserEditModal({ actor, target, onClose, onSaved }: { actor: User; targe
   const roles: Role[] = actor.role === "super_admin"
     ? ["admin", "sales_manager", "sales", "distributor"]
     : ["sales_manager", "sales", "distributor"];
-  return <Modal title="Gestisci utente" subtitle={`${target.name} · ${target.email}`} onClose={onClose}><form className="form-grid" onSubmit={submit}><label>Ruolo<select value={role} onChange={(event) => setRole(event.target.value as Role)}>{roles.map((value) => <option key={value} value={value}>{roleLabels[value]}</option>)}</select></label>{role !== "admin" && <label>Isola<select value={island} onChange={(event) => setIsland(event.target.value)}>{ISLANDS.map((value) => <option key={value}>{value}</option>)}</select></label>}<label className="confirmation span-2"><input type="checkbox" checked={active} onChange={(event) => setActive(event.target.checked)} /><span><strong>Account attivo</strong>Disattivandolo vengono revocate tutte le sessioni aperte.</span></label><div className="profile-security span-2"><strong>Contatti personali</strong><span>{target.phone || "Telefono non inserito"}</span><p>L’utente modifica direttamente email e telefono dal proprio profilo.</p></div>{error && <div className="form-error span-2">{error}</div>}<div className="modal-actions span-2"><button type="button" onClick={onClose}>Annulla</button><button className="primary" disabled={busy}>{busy ? "Aggiornamento…" : "Aggiorna utente"}</button></div></form></Modal>;
+  const managers = users.filter((candidate) => candidate.role === "sales_manager" && candidate.active !== 0 && candidate.island === island && candidate.id !== target.id);
+  return <Modal title="Gestisci utente" subtitle={`${target.name} · ${target.email}`} onClose={onClose}><form className="form-grid" onSubmit={submit}><label>Ruolo<select value={role} onChange={(event) => setRole(event.target.value as Role)}>{roles.map((value) => <option key={value} value={value}>{roleLabels[value]}</option>)}</select></label>{role !== "admin" && <label>Isola<select value={island} onChange={(event) => { setIsland(event.target.value); setSalesManagerId(""); }}>{ISLANDS.map((value) => <option key={value}>{value}</option>)}</select></label>}{role === "sales" && <label className="span-2">Sales Manager<select value={salesManagerId} onChange={(event) => setSalesManagerId(event.target.value)}><option value="">Nessuno · visibile solo ad Admin e Super Admin</option>{managers.map((manager) => <option key={manager.id} value={manager.id}>{manager.name} · {manager.island}</option>)}</select></label>}<label className="confirmation span-2"><input type="checkbox" checked={active} onChange={(event) => setActive(event.target.checked)} /><span><strong>Account attivo</strong>Disattivandolo vengono revocate tutte le sessioni aperte.</span></label><div className="profile-security span-2"><strong>Contatti personali</strong><span>{target.phone || "Telefono non inserito"}</span><p>L’utente modifica direttamente email e telefono dal proprio profilo.</p></div>{error && <div className="form-error span-2">{error}</div>}<div className="modal-actions span-2"><button type="button" onClick={onClose}>Annulla</button><button className="primary" disabled={busy}>{busy ? "Aggiornamento…" : "Aggiorna utente"}</button></div></form></Modal>;
 }
 
 function AdminPanel({ data, refresh, notify }: { data: Bootstrap; refresh: () => Promise<void>; notify: (text: string, tone?: "ok" | "error") => void }) {
   const [userBusy, setUserBusy] = useState(false);
   const [templateBusy, setTemplateBusy] = useState(false);
   const [newRole, setNewRole] = useState<Role>("sales");
+  const [newIsland, setNewIsland] = useState(ISLANDS[0]);
   const [editing, setEditing] = useState<User | null>(null);
   const superAdmin = data.user.role === "super_admin";
   const creatableRoles: Role[] = superAdmin ? ["admin", "sales_manager", "sales", "distributor"] : ["sales_manager", "sales", "distributor"];
@@ -1085,6 +1111,7 @@ function AdminPanel({ data, refresh, notify }: { data: Bootstrap; refresh: () =>
       await api("/api/users", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(values) });
       formElement.reset();
       setNewRole("sales");
+      setNewIsland(ISLANDS[0]);
       notify("Utente creato. Al primo accesso dovrà cambiare la password temporanea.");
       await refresh();
     } catch (cause) {
@@ -1111,7 +1138,29 @@ function AdminPanel({ data, refresh, notify }: { data: Bootstrap; refresh: () =>
   }
 
   const canEdit = (target: User) => target.role !== "super_admin" && (superAdmin || target.role !== "admin");
-  return <section className="ops-page"><PageHeading eyebrow="Amministrazione" title="Utenti" subtitle="Crea account, assegna ruolo e isola e revoca immediatamente gli accessi." action={<span className="admin-badge">{superAdmin ? "Super Admin" : "Admin operativo"}</span>} /><div className="admin-grid"><article className="data-card"><div className="card-head"><div><h2>Nuovo utente</h2><p>{superAdmin ? "Admin operativo, Sales Manager, Sales o Distributore." : "Sales Manager, Sales o Distributore."}</p></div></div><form className="stack-form" onSubmit={createUser}><label>Nome e cognome<input name="name" required maxLength={120} /></label><label>Email aziendale<input name="email" type="email" required /></label><label>Password temporanea<input name="temporaryPassword" type="password" required minLength={12} maxLength={256} autoComplete="new-password" /><small>Almeno 12 caratteri. Al primo accesso dovrà essere cambiata.</small></label><div className="two-cols"><label>Ruolo<select name="role" value={newRole} onChange={(event) => setNewRole(event.target.value as Role)}>{creatableRoles.map((role) => <option key={role} value={role}>{roleLabels[role]}</option>)}</select></label>{newRole !== "admin" && <label>Isola<select name="island">{ISLANDS.map((island) => <option key={island}>{island}</option>)}</select></label>}</div><button className="primary" disabled={userBusy}>{userBusy ? "Creazione…" : "Crea utente"}</button></form></article>{superAdmin ? <article className="data-card"><div className="card-head"><div><h2>Carica modello</h2><p>PDF o DOCX, massimo 8 MB.</p></div></div><form className="stack-form" onSubmit={uploadTemplate}><label>Nome modello<input name="name" required placeholder="Contratto sponsor" /></label><label>Versione<input name="version" required defaultValue="1.0" /></label><label>Documento<input name="file" type="file" accept="application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required /></label><button className="primary" disabled={templateBusy}>{templateBusy ? "Caricamento…" : "Archivia modello"}</button></form></article> : <article className="data-card permission-card"><div className="card-head"><div><h2>Permessi Admin operativo</h2><p>Gestione quotidiana senza accesso alle configurazioni sensibili.</p></div></div><ul><li>CRM e consegne su tutte le isole</li><li>Crea e gestisce ruoli operativi</li><li>Non crea altri Admin</li><li>Nessun accesso ad audit, listino o commissioni</li></ul></article>}</div><div className={`admin-grid lower ${superAdmin ? "" : "single"}`}><article className="data-card"><div className="card-head"><div><h2>Utenti autorizzati</h2><p>{data.users.length} account · contatti personali modificabili dal profilo</p></div></div><div className="simple-list">{data.users.map((target) => <div key={target.id}><span className="avatar">{initials(target.name)}</span><div><strong>{target.name}</strong><small>{target.email}{target.phone ? ` · ${target.phone}` : ""}</small></div><p>{roleLabels[target.role]}<small>{target.island ?? "Tutte le isole"}{target.active === 0 ? " · Disattivato" : ""}</small>{canEdit(target) && <button className="mini-link" onClick={() => setEditing(target)}>Modifica ruolo e accesso</button>}</p></div>)}</div></article>{superAdmin && <article className="data-card"><div className="card-head"><div><h2>Modelli contrattuali</h2><p>{data.templates.length} versioni attive</p></div></div><div className="simple-list">{data.templates.map((template) => <div key={template.id}><span className="file-badge">{template.mime_type.includes("pdf") ? "PDF" : "DOC"}</span><div><strong>{template.name}</strong><small>{template.original_filename}</small></div><p>v{template.version}<button className="mini-link" onClick={() => window.open(`/api/templates/${template.id}/download`, "_blank")}>Scarica</button></p></div>)}{!data.templates.length && <Empty title="Nessun modello" text="Carica i documenti già pronti." />}</div></article>}</div>{editing && <UserEditModal actor={data.user} target={editing} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); notify("Ruolo, isola e accesso aggiornati. Le sessioni precedenti sono state revocate."); await refresh(); }} />}</section>;
+  const newUserManagers = data.users.filter((candidate) => candidate.role === "sales_manager" && candidate.active !== 0 && candidate.island === newIsland);
+  return <section className="ops-page">
+    <PageHeading eyebrow="Amministrazione" title="Utenti" subtitle="Crea account, assegna gerarchie commerciali e revoca immediatamente gli accessi." action={<span className="admin-badge">{superAdmin ? "Super Admin" : "Admin operativo"}</span>} />
+    <div className="admin-grid">
+      <article className="data-card">
+        <div className="card-head"><div><h2>Nuovo utente</h2><p>{superAdmin ? "Admin operativo, Sales Manager, Sales o Distributore." : "Sales Manager, Sales o Distributore."}</p></div></div>
+        <form className="stack-form" onSubmit={createUser}>
+          <label>Nome e cognome<input name="name" required maxLength={120} /></label>
+          <label>Email aziendale<input name="email" type="email" required /></label>
+          <label>Password temporanea<input name="temporaryPassword" type="password" required minLength={12} maxLength={256} autoComplete="new-password" /><small>Almeno 12 caratteri. Al primo accesso dovrà essere cambiata.</small></label>
+          <div className="two-cols"><label>Ruolo<select name="role" value={newRole} onChange={(event) => setNewRole(event.target.value as Role)}>{creatableRoles.map((role) => <option key={role} value={role}>{roleLabels[role]}</option>)}</select></label>{newRole !== "admin" && <label>Isola<select name="island" value={newIsland} onChange={(event) => setNewIsland(event.target.value)}>{ISLANDS.map((island) => <option key={island}>{island}</option>)}</select></label>}</div>
+          {newRole === "sales" && <label>Sales Manager<select name="salesManagerId"><option value="">Nessuno · solo Admin e Super Admin</option>{newUserManagers.map((manager) => <option key={manager.id} value={manager.id}>{manager.name} · {manager.island}</option>)}</select><small>Il Sales resta operativo anche senza manager, ma nessun Sales Manager vedrà i suoi clienti.</small></label>}
+          <button className="primary" disabled={userBusy}>{userBusy ? "Creazione…" : "Crea utente"}</button>
+        </form>
+      </article>
+      {superAdmin ? <article className="data-card"><div className="card-head"><div><h2>Carica modello</h2><p>PDF o DOCX, massimo 8 MB.</p></div></div><form className="stack-form" onSubmit={uploadTemplate}><label>Nome modello<input name="name" required placeholder="Contratto sponsor" /></label><label>Versione<input name="version" required defaultValue="1.0" /></label><label>Documento<input name="file" type="file" accept="application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required /></label><button className="primary" disabled={templateBusy}>{templateBusy ? "Caricamento…" : "Archivia modello"}</button></form></article> : <article className="data-card permission-card"><div className="card-head"><div><h2>Permessi Admin operativo</h2><p>Gestione quotidiana senza accesso alle configurazioni sensibili.</p></div></div><ul><li>CRM e consegne su tutte le isole</li><li>Crea e gestisce ruoli operativi</li><li>Non crea altri Admin</li><li>Nessun accesso ad audit, listino o commissioni</li></ul></article>}
+    </div>
+    <div className={`admin-grid lower ${superAdmin ? "" : "single"}`}>
+      <article className="data-card"><div className="card-head"><div><h2>Utenti autorizzati</h2><p>{data.users.length} account · gerarchia Sales–Manager esplicita</p></div></div><div className="simple-list">{data.users.map((target) => <div key={target.id}><span className="avatar">{initials(target.name)}</span><div><strong>{target.name}</strong><small>{target.email}{target.phone ? ` · ${target.phone}` : ""}</small></div><p>{roleLabels[target.role]}<small>{target.island ?? "Tutte le isole"}{target.role === "sales" ? ` · ${target.sales_manager_name ? `Manager: ${target.sales_manager_name}` : "Senza Sales Manager"}` : ""}{target.active === 0 ? " · Disattivato" : ""}</small>{canEdit(target) && <button className="mini-link" onClick={() => setEditing(target)}>Modifica ruolo e accesso</button>}</p></div>)}</div></article>
+      {superAdmin && <article className="data-card"><div className="card-head"><div><h2>Modelli contrattuali</h2><p>{data.templates.length} versioni attive</p></div></div><div className="simple-list">{data.templates.map((template) => <div key={template.id}><span className="file-badge">{template.mime_type.includes("pdf") ? "PDF" : "DOC"}</span><div><strong>{template.name}</strong><small>{template.original_filename}</small></div><p>v{template.version}<button className="mini-link" onClick={() => window.open(`/api/templates/${template.id}/download`, "_blank")}>Scarica</button></p></div>)}{!data.templates.length && <Empty title="Nessun modello" text="Carica i documenti già pronti." />}</div></article>}
+    </div>
+    {editing && <UserEditModal actor={data.user} target={editing} users={data.users} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); notify("Ruolo, gerarchia e accesso aggiornati. Le sessioni precedenti sono state revocate."); await refresh(); }} />}
+  </section>;
 }
 
 function AuditActor({ event }: { event: AuditEvent }) {

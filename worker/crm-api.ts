@@ -1,5 +1,6 @@
 import {
   canApplyQuoteDiscount,
+  canAssignClientOwner,
   canCancelSignedContract,
   canCreateQuote,
   canManagePodcastCalendar,
@@ -42,6 +43,8 @@ type UserRow = {
   phone: string | null;
   role: "super_admin" | "admin" | "sales_manager" | "sales" | "distributor";
   island: string | null;
+  sales_manager_id?: string | null;
+  sales_manager_name?: string | null;
   active: number;
   created_at?: string;
 };
@@ -62,6 +65,7 @@ type ClientRow = {
   value_cents: number;
   owner_user_id: string;
   owner_name?: string;
+  owner_sales_manager_id?: string | null;
   notes: string | null;
   version: number;
   created_at: string;
@@ -78,6 +82,7 @@ type ContractRow = {
   title: string;
   status: "draft" | "awaiting_signature" | "signed" | "cancelled";
   owner_user_id: string;
+  owner_sales_manager_id?: string | null;
   island: string;
   signer_name: string | null;
   signer_email: string | null;
@@ -187,6 +192,7 @@ type QuoteRow = {
   price_list_id: string;
   status: "issued" | "converted";
   owner_user_id: string;
+  owner_sales_manager_id?: string | null;
   island: string;
   customer_company: string;
   customer_contact: string;
@@ -503,7 +509,7 @@ async function startImpersonation(request: Request, user: AuthenticatedUser, env
   const body = await readJson<{ userId?: string }>(request);
   const targetId = cleanText(body.userId, 128);
   const target = targetId ? await env.DB.prepare(
-    "SELECT id, email, name, phone, role, island, active FROM users WHERE id = ? AND active = 1 LIMIT 1",
+    "SELECT id, email, name, phone, role, island, sales_manager_id, active FROM users WHERE id = ? AND active = 1 LIMIT 1",
   ).bind(targetId).first<UserRow>() : null;
   if (!target || !["sales", "distributor"].includes(target.role)) {
     throw new ApiError(404, "impersonation_target_not_found", "Seleziona un Sales o Distributore attivo.");
@@ -678,20 +684,20 @@ async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Resp
   const scope = recordScope(user);
   const clients = user.role === "distributor"
     ? (await env.DB.prepare(
-      "SELECT DISTINCT c.*, u.name AS owner_name FROM clients c JOIN users u ON u.id = c.owner_user_id JOIN deliveries d ON d.client_id = c.id WHERE c.archived_at IS NULL AND d.distributor_user_id = ? ORDER BY c.updated_at DESC LIMIT 250",
+      "SELECT DISTINCT c.*, u.name AS owner_name, u.sales_manager_id AS owner_sales_manager_id FROM clients c JOIN users u ON u.id = c.owner_user_id JOIN deliveries d ON d.client_id = c.id WHERE c.archived_at IS NULL AND d.distributor_user_id = ? ORDER BY c.updated_at DESC LIMIT 250",
     ).bind(user.id).all<ClientRow>()).results
     : (await env.DB.prepare(
-      `SELECT c.*, u.name AS owner_name FROM clients c JOIN users u ON u.id = c.owner_user_id WHERE c.archived_at IS NULL${scope.sql.replaceAll("island", "c.island").replaceAll("owner_user_id", "c.owner_user_id")} ORDER BY c.updated_at DESC LIMIT 250`,
+      `SELECT c.*, u.name AS owner_name, u.sales_manager_id AS owner_sales_manager_id FROM clients c JOIN users u ON u.id = c.owner_user_id WHERE c.archived_at IS NULL${scope.sql.replaceAll("island", "c.island").replaceAll("owner_user_id", "c.owner_user_id")} ORDER BY c.updated_at DESC LIMIT 250`,
     ).bind(...scope.values).all<ClientRow>()).results;
   const contracts = user.role === "distributor"
     ? []
     : (await env.DB.prepare(
-      `SELECT ct.*, c.company_name AS client_company, q.quote_number FROM contracts ct JOIN clients c ON c.id = ct.client_id LEFT JOIN quotes q ON q.id = ct.quote_id WHERE 1 = 1${scope.sql.replaceAll("island", "ct.island").replaceAll("owner_user_id", "ct.owner_user_id")} ORDER BY ct.updated_at DESC LIMIT 250`,
+      `SELECT ct.*, c.company_name AS client_company, q.quote_number, ou.sales_manager_id AS owner_sales_manager_id FROM contracts ct JOIN clients c ON c.id = ct.client_id JOIN users ou ON ou.id = ct.owner_user_id LEFT JOIN quotes q ON q.id = ct.quote_id WHERE 1 = 1${scope.sql.replaceAll("island", "ct.island").replaceAll("owner_user_id", "ct.owner_user_id")} ORDER BY ct.updated_at DESC LIMIT 250`,
     ).bind(...scope.values).all<ContractRow>()).results;
   const quotes = user.role === "distributor"
     ? []
     : (await env.DB.prepare(
-      `SELECT q.*, c.company_name AS client_company FROM quotes q JOIN clients c ON c.id = q.client_id WHERE 1 = 1${scope.sql.replaceAll("island", "q.island").replaceAll("owner_user_id", "q.owner_user_id")} ORDER BY q.created_at DESC LIMIT 250`,
+      `SELECT q.*, c.company_name AS client_company, ou.sales_manager_id AS owner_sales_manager_id FROM quotes q JOIN clients c ON c.id = q.client_id JOIN users ou ON ou.id = q.owner_user_id WHERE 1 = 1${scope.sql.replaceAll("island", "q.island").replaceAll("owner_user_id", "q.owner_user_id")} ORDER BY q.created_at DESC LIMIT 250`,
     ).bind(...scope.values).all<QuoteRow>()).results;
   const templates = user.role === "distributor"
     ? []
@@ -743,19 +749,19 @@ async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Resp
   let audit: Record<string, unknown>[] = [];
   let emailOutbox: Record<string, unknown>[] = [];
   if (user.role === "super_admin" || user.role === "admin") {
-    users = (await env.DB.prepare("SELECT id, email, name, phone, role, island, active, created_at FROM users ORDER BY role, name").all()).results;
+    users = (await env.DB.prepare("SELECT u.id, u.email, u.name, u.phone, u.role, u.island, u.sales_manager_id, u.active, u.created_at, m.name AS sales_manager_name FROM users u LEFT JOIN users m ON m.id = u.sales_manager_id ORDER BY u.role, u.name").all()).results;
   }
   if (user.role === "super_admin") {
     audit = (await env.DB.prepare("SELECT a.id, a.action, a.entity_type, a.entity_id, a.payload_json, a.created_at, u.name AS actor_name FROM audit_events a LEFT JOIN users u ON u.id = a.actor_user_id ORDER BY a.created_at DESC LIMIT 80").all()).results;
     emailOutbox = (await env.DB.prepare("SELECT id, recipient, subject, status, attempts, next_attempt_at, last_error, created_at, sent_at FROM email_outbox WHERE status <> 'sent' ORDER BY created_at DESC LIMIT 50").all()).results;
   } else if (user.role === "sales_manager") {
-    users = (await env.DB.prepare("SELECT id, email, name, phone, role, island, active, created_at FROM users WHERE island = ? AND active = 1 ORDER BY role, name")
-      .bind(user.island).all()).results;
+    users = (await env.DB.prepare("SELECT u.id, u.email, u.name, u.phone, u.role, u.island, u.sales_manager_id, u.active, u.created_at, m.name AS sales_manager_name FROM users u LEFT JOIN users m ON m.id = u.sales_manager_id WHERE u.active = 1 AND ((u.role = 'sales' AND u.sales_manager_id = ?) OR (u.role = 'distributor' AND u.island = ?) OR u.id = ?) ORDER BY u.role, u.name")
+      .bind(user.id, user.island, user.id).all()).results;
   }
 
   const impersonationUsers = user.sessionActor.role === "super_admin"
     ? (await env.DB.prepare(
-      "SELECT id, email, name, phone, role, island, active, created_at FROM users WHERE active = 1 AND role IN ('sales', 'distributor') ORDER BY role, island, name",
+      "SELECT id, email, name, phone, role, island, sales_manager_id, active, created_at FROM users WHERE active = 1 AND role IN ('sales', 'distributor') ORDER BY role, island, name",
     ).all()).results
     : [];
 
@@ -1177,12 +1183,30 @@ async function updateClient(request: Request, clientId: string, user: UserRow, e
   if (!["lead", "qualified", "proposal", "standby", "won", "lost"].includes(stage)) throw new ApiError(400, "invalid_stage", "Fase CRM non valida.");
   const notes = body.notes === undefined ? current.notes : cleanOptionalText(body.notes, 2000);
   const valueCents = body.valueEuros === undefined ? current.value_cents : Math.round(clampNumber(Number(body.valueEuros), 0, 100_000_000) * 100);
+  let ownerUserId = current.owner_user_id;
+  if (body.ownerUserId !== undefined && String(body.ownerUserId) !== current.owner_user_id) {
+    if (user.role === "sales") throw new ApiError(403, "owner_not_allowed", "Il Sales non può riassegnare i clienti.");
+    ownerUserId = await resolveOwner(env, user, String(body.ownerUserId), current.island);
+  }
   const now = new Date().toISOString();
-  const result = await env.DB.prepare(
-    "UPDATE clients SET stage = ?, notes = ?, value_cents = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?",
-  ).bind(stage, notes, valueCents, now, clientId, version).run();
-  if (Number(result.meta.changes ?? 0) !== 1) throw new ApiError(409, "version_conflict", "Aggiornamento concorrente rilevato.");
-  await appendAudit(env, request, user, "client.updated", "client", clientId, { stage, valueCents, version: version + 1 });
+  const results = await env.DB.batch([
+    env.DB.prepare(
+      "UPDATE clients SET stage = ?, notes = ?, value_cents = ?, owner_user_id = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?",
+    ).bind(stage, notes, valueCents, ownerUserId, now, clientId, version),
+    env.DB.prepare("UPDATE quotes SET owner_user_id = ? WHERE client_id = ? AND owner_user_id <> ? AND EXISTS (SELECT 1 FROM clients WHERE id = ? AND version = ? AND owner_user_id = ?)")
+      .bind(ownerUserId, clientId, ownerUserId, clientId, version + 1, ownerUserId),
+    env.DB.prepare("UPDATE contracts SET owner_user_id = ?, updated_at = ? WHERE client_id = ? AND owner_user_id <> ? AND EXISTS (SELECT 1 FROM clients WHERE id = ? AND version = ? AND owner_user_id = ?)")
+      .bind(ownerUserId, now, clientId, ownerUserId, clientId, version + 1, ownerUserId),
+  ]);
+  if (Number(results[0].meta.changes ?? 0) !== 1) throw new ApiError(409, "version_conflict", "Aggiornamento concorrente rilevato.");
+  await appendAudit(env, request, user, "client.updated", "client", clientId, {
+    stage,
+    valueCents,
+    previousOwnerUserId: current.owner_user_id,
+    ownerUserId,
+    relatedRecordsTransferred: ownerUserId !== current.owner_user_id,
+    version: version + 1,
+  });
   return json({ ok: true });
 }
 
@@ -1264,23 +1288,26 @@ async function createUser(request: Request, user: UserRow, env: RuntimeEnv): Pro
   }
   const island = role === "admin" ? null : requestedIsland;
   if (role !== "admin" && !isIsland(requestedIsland)) throw new ApiError(400, "invalid_island", "Assegna una delle cinque isole.");
+  const salesManagerId = role === "sales"
+    ? await validateSalesManager(env, cleanOptionalText(body.salesManagerId, 128), String(island ?? ""))
+    : null;
   if (temporaryPassword.length < 12 || temporaryPassword.length > 256) throw new ApiError(400, "weak_password", "La password temporanea deve contenere almeno 12 caratteri.");
   const credentials = await createPasswordHash(temporaryPassword, env.AUTH_SECRET ?? "");
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   try {
-    await env.DB.prepare("INSERT INTO users (id, email, name, role, island, active, password_hash, password_salt, password_iterations, must_change_password, password_changed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, 1, NULL, ?, ?)")
-      .bind(id, email, name, role, island, credentials.hash, credentials.salt, credentials.iterations, now, now).run();
+    await env.DB.prepare("INSERT INTO users (id, email, name, role, island, sales_manager_id, active, password_hash, password_salt, password_iterations, must_change_password, password_changed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 1, NULL, ?, ?)")
+      .bind(id, email, name, role, island, salesManagerId, credentials.hash, credentials.salt, credentials.iterations, now, now).run();
   } catch {
     throw new ApiError(409, "email_exists", "Esiste già un utente con questa email.");
   }
-  await appendAudit(env, request, user, "user.created", "user", id, { email, role, island });
+  await appendAudit(env, request, user, "user.created", "user", id, { email, role, island, salesManagerId });
   return json({ id }, 201);
 }
 
 async function updateUser(request: Request, targetUserId: string, user: UserRow, env: RuntimeEnv): Promise<Response> {
   requireUserManager(user);
-  const target = await env.DB.prepare("SELECT id, email, name, phone, role, island, active FROM users WHERE id = ? LIMIT 1")
+  const target = await env.DB.prepare("SELECT id, email, name, phone, role, island, sales_manager_id, active FROM users WHERE id = ? LIMIT 1")
     .bind(targetUserId).first<UserRow>();
   if (!target || target.role === "super_admin" || (target.role === "admin" && user.role !== "super_admin")) {
     throw new ApiError(404, "user_not_found", "Utente operativo non trovato.");
@@ -1293,13 +1320,37 @@ async function updateUser(request: Request, targetUserId: string, user: UserRow,
   if (!canUpdateUserRole(user, target.role, role) || (role !== "admin" && !isIsland(String(island ?? ""))) || ![0, 1].includes(active)) {
     throw new ApiError(400, "invalid_user", "Ruolo, isola o stato utente non validi.");
   }
+  const requestedManagerId = body.salesManagerId === undefined ? target.sales_manager_id ?? null : cleanOptionalText(body.salesManagerId, 128);
+  const salesManagerId = role === "sales"
+    ? await validateSalesManager(env, requestedManagerId, String(island ?? ""))
+    : null;
+  if (target.role === "sales_manager" && (role !== "sales_manager" || island !== target.island || active === 0)) {
+    const assignedSales = await env.DB.prepare("SELECT COUNT(*) AS count FROM users WHERE role = 'sales' AND sales_manager_id = ?")
+      .bind(target.id).first<{ count: number }>();
+    if (Number(assignedSales?.count ?? 0) > 0) {
+      throw new ApiError(409, "manager_has_sales", "Prima di modificare o disattivare questo Sales Manager, trasferisci o rimuovi tutti i Sales assegnati.");
+    }
+  }
+  if (target.role === "sales" && (role !== "sales" || island !== target.island)) {
+    const ownedClients = await env.DB.prepare("SELECT COUNT(*) AS count FROM clients WHERE owner_user_id = ? AND archived_at IS NULL")
+      .bind(target.id).first<{ count: number }>();
+    if (Number(ownedClients?.count ?? 0) > 0) {
+      throw new ApiError(409, "sales_has_clients", "Prima di cambiare ruolo o isola a questo Sales, riassegna tutti i suoi clienti dalla pipeline.");
+    }
+  }
   const now = new Date().toISOString();
   await env.DB.batch([
-    env.DB.prepare("UPDATE users SET role = ?, island = ?, active = ?, updated_at = ? WHERE id = ? AND role <> 'super_admin'")
-      .bind(role, island, active, now, target.id),
+    env.DB.prepare("UPDATE users SET role = ?, island = ?, sales_manager_id = ?, active = ?, updated_at = ? WHERE id = ? AND role <> 'super_admin'")
+      .bind(role, island, salesManagerId, active, now, target.id),
     env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(target.id),
   ]);
-  await appendAudit(env, request, user, "user.updated", "user", target.id, { role, island, active: active === 1 });
+  await appendAudit(env, request, user, "user.updated", "user", target.id, {
+    role,
+    island,
+    active: active === 1,
+    previousSalesManagerId: target.sales_manager_id ?? null,
+    salesManagerId,
+  });
   return json({ ok: true });
 }
 
@@ -1525,7 +1576,7 @@ async function ensureBootstrapAdmin(env: RuntimeEnv): Promise<void> {
 
 async function ensureDemoAccount(env: RuntimeEnv): Promise<UserRow> {
   const email = normalizeEmail(env.DEMO_EMAIL);
-  let user = await env.DB.prepare("SELECT id, email, name, phone, role, island, active FROM users WHERE email = ? LIMIT 1")
+  let user = await env.DB.prepare("SELECT id, email, name, phone, role, island, sales_manager_id, active FROM users WHERE email = ? LIMIT 1")
     .bind(email).first<UserRow>();
   const now = new Date().toISOString();
 
@@ -1549,7 +1600,7 @@ async function requireUser(request: Request, env: RuntimeEnv, ctx: ExecutionCont
   const sessionId = await sha256(token);
   const now = new Date().toISOString();
   const sessionActor = await env.DB.prepare(
-    "SELECT u.id, u.email, u.name, u.phone, u.role, u.island, u.active FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id = ? AND s.expires_at > ? AND u.active = 1 LIMIT 1",
+    "SELECT u.id, u.email, u.name, u.phone, u.role, u.island, u.sales_manager_id, u.active FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id = ? AND s.expires_at > ? AND u.active = 1 LIMIT 1",
   ).bind(sessionId, now).first<UserRow>();
   if (!sessionActor) throw new ApiError(401, "session_expired", "Sessione scaduta. Accedi nuovamente.");
   ctx.waitUntil(env.DB.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?").bind(now, sessionId).run().then(() => undefined));
@@ -1569,7 +1620,7 @@ async function requireUser(request: Request, env: RuntimeEnv, ctx: ExecutionCont
     throw new ApiError(409, "impersonation_expired", "La modalità operativa è scaduta. Torna alla dashboard Super Admin e riaprila.");
   }
   const target = await env.DB.prepare(
-    "SELECT id, email, name, phone, role, island, active FROM users WHERE id = ? AND active = 1 LIMIT 1",
+    "SELECT id, email, name, phone, role, island, sales_manager_id, active FROM users WHERE id = ? AND active = 1 LIMIT 1",
   ).bind(claims.targetId).first<UserRow>();
   if (!target || !["sales", "distributor"].includes(target.role)) {
     if (stoppingImpersonation) return authenticatedActor;
@@ -1717,11 +1768,11 @@ async function deliverOutboxMessage(env: RuntimeEnv, messageId: string): Promise
 }
 
 async function getClient(env: RuntimeEnv, id: string): Promise<ClientRow | null> {
-  return env.DB.prepare("SELECT * FROM clients WHERE id = ? AND archived_at IS NULL LIMIT 1").bind(id).first<ClientRow>();
+  return env.DB.prepare("SELECT c.*, owner.sales_manager_id AS owner_sales_manager_id FROM clients c JOIN users owner ON owner.id = c.owner_user_id WHERE c.id = ? AND c.archived_at IS NULL LIMIT 1").bind(id).first<ClientRow>();
 }
 
 async function getContract(env: RuntimeEnv, id: string): Promise<ContractRow | null> {
-  return env.DB.prepare("SELECT * FROM contracts WHERE id = ? LIMIT 1").bind(id).first<ContractRow>();
+  return env.DB.prepare("SELECT ct.*, owner.sales_manager_id AS owner_sales_manager_id FROM contracts ct JOIN users owner ON owner.id = ct.owner_user_id WHERE ct.id = ? LIMIT 1").bind(id).first<ContractRow>();
 }
 
 async function getDelivery(env: RuntimeEnv, id: string): Promise<DeliveryRow | null> {
@@ -1729,18 +1780,33 @@ async function getDelivery(env: RuntimeEnv, id: string): Promise<DeliveryRow | n
 }
 
 async function getQuote(env: RuntimeEnv, id: string): Promise<QuoteRow | null> {
-  return env.DB.prepare("SELECT * FROM quotes WHERE id = ? LIMIT 1").bind(id).first<QuoteRow>();
+  return env.DB.prepare("SELECT q.*, owner.sales_manager_id AS owner_sales_manager_id FROM quotes q JOIN users owner ON owner.id = q.owner_user_id WHERE q.id = ? LIMIT 1").bind(id).first<QuoteRow>();
 }
 
 async function resolveOwner(env: RuntimeEnv, actor: UserRow, requestedOwner: string, island: string): Promise<string> {
   if (actor.role === "sales") return actor.id;
-  if (isGlobalOperator(actor) && requestedOwner === actor.id) return actor.id;
-  const owner = await env.DB.prepare("SELECT id, email, name, phone, role, island, active FROM users WHERE id = ? AND active = 1 LIMIT 1")
+  const owner = await env.DB.prepare("SELECT id, email, name, phone, role, island, sales_manager_id, active FROM users WHERE id = ? AND active = 1 LIMIT 1")
     .bind(requestedOwner).first<UserRow>();
-  if (!owner || !["sales_manager", "sales"].includes(owner.role)) return actor.id;
+  if (!owner || !canAssignClientOwner(actor, owner)) {
+    throw new ApiError(403, "owner_not_allowed", actor.role === "sales_manager"
+      ? "Puoi assegnare clienti soltanto ai Sales attivi del tuo team."
+      : "Seleziona un Sales attivo autorizzato.");
+  }
   if (owner.island !== island) throw new ApiError(400, "owner_island_mismatch", "Il responsabile del cliente deve appartenere alla stessa isola.");
-  if (actor.role === "sales_manager" && owner.island !== actor.island) throw new ApiError(403, "owner_not_allowed", "Non puoi assegnare clienti fuori dalla tua isola.");
   return owner.id;
+}
+
+async function validateSalesManager(env: RuntimeEnv, requestedManagerId: string | null, island: string): Promise<string | null> {
+  if (!requestedManagerId) return null;
+  const manager = await env.DB.prepare("SELECT id, role, island, active FROM users WHERE id = ? LIMIT 1")
+    .bind(requestedManagerId).first<UserRow>();
+  if (!manager || manager.role !== "sales_manager" || manager.active !== 1) {
+    throw new ApiError(400, "invalid_sales_manager", "Seleziona un Sales Manager attivo.");
+  }
+  if (manager.island !== island) {
+    throw new ApiError(400, "manager_island_mismatch", "Sales e Sales Manager devono appartenere alla stessa isola.");
+  }
+  return manager.id;
 }
 
 async function r2Download(env: RuntimeEnv, key: string, contentType: string, filename: string): Promise<Response> {
@@ -1910,7 +1976,16 @@ function apiError(error: ApiError): Response {
 }
 
 function publicUser(user: UserRow) {
-  return { id: user.id, email: user.email, name: user.name, phone: user.phone, role: user.role, island: user.island };
+  return {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    phone: user.phone,
+    role: user.role,
+    island: user.island,
+    sales_manager_id: user.sales_manager_id ?? null,
+    sales_manager_name: user.sales_manager_name ?? null,
+  };
 }
 
 function cookieValue(request: Request, name: string): string | null {

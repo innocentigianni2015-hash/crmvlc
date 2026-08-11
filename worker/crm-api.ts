@@ -23,6 +23,7 @@ import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import { timingSafeEqual } from "node:crypto";
 import { calculateQuoteTotals, formatQuoteNumber } from "./quote-calculations.js";
 import { buildQuotePdf } from "./quote-pdf.js";
+import { buildContractPdf } from "./contract-pdf.js";
 import { handleOperationsApi } from "./operations-api.js";
 import { handleVipPublicApi } from "./vip-public-api.js";
 import { createPasswordHash, handlePasswordAuth } from "./password-auth.js";
@@ -65,6 +66,11 @@ type ClientRow = {
   contact_name: string;
   email: string;
   phone: string | null;
+  tax_id: string | null;
+  fiscal_address: string | null;
+  billing_email: string | null;
+  legal_signer_name: string | null;
+  legal_signer_role: string | null;
   island: string;
   stage: string;
   value_cents: number;
@@ -95,6 +101,7 @@ type ContractRow = {
   signed_r2_key: string | null;
   evidence_r2_key: string | null;
   document_sha256: string;
+  contract_data_json?: string | null;
   signed_document_sha256: string | null;
   signature_sha256: string | null;
   version: number;
@@ -1280,22 +1287,101 @@ async function convertQuoteToContract(request: Request, quoteId: string, user: U
   if (quote.status !== "issued") throw new ApiError(409, "quote_already_converted", "Il preventivo è già stato convertito in contratto.");
   if (quote.valid_until < new Date().toISOString().slice(0, 10)) throw new ApiError(409, "quote_expired", "Il preventivo è scaduto e non può essere convertito.");
 
-  const source = await env.BUCKET.get(quote.pdf_r2_key);
-  if (!source) throw new ApiError(404, "file_not_found", "Il PDF del preventivo non è disponibile.");
-  const pdfBytes = await source.arrayBuffer();
+  const client = await getClient(env, quote.client_id);
+  if (!client || !canWriteRecord(user, client)) throw new ApiError(404, "client_not_found", "Cliente non trovato nel tuo perimetro.");
+  const body = await readJson<Record<string, unknown>>(request);
+  const taxId = cleanText(body.taxId, 40);
+  const fiscalAddress = cleanText(body.fiscalAddress, 300);
+  const billingEmail = normalizeEmail(body.billingEmail);
+  const legalSignerName = cleanText(body.legalSignerName, 120);
+  const legalSignerRole = cleanText(body.legalSignerRole, 120);
+  const customerPhone = normalizePhone(body.customerPhone);
+  const campaignStartDate = strictDateKey(body.campaignStartDate);
+  const destinationUrl = cleanText(body.destinationUrl, 500);
+  const printEdition = cleanText(body.printEdition, 120);
+  const printRun = positiveInteger(body.printRun, 10_000_000);
+  const distribution = cleanText(body.distribution, 500);
+  if (!taxId || !fiscalAddress || !isEmail(billingEmail) || !legalSignerName || !legalSignerRole || !customerPhone || !printEdition || !distribution) {
+    throw new ApiError(400, "contract_data_incomplete", "Completa tutti i dati fiscali, del firmatario e della campagna prima di generare il contratto.");
+  }
+  let parsedDestination: URL;
+  try {
+    parsedDestination = new URL(destinationUrl);
+  } catch {
+    throw new ApiError(400, "invalid_destination_url", "Inserisci un URL di destinazione completo, ad esempio https://azienda.es.");
+  }
+  if (!["http:", "https:"].includes(parsedDestination.protocol)) {
+    throw new ApiError(400, "invalid_destination_url", "L’URL di destinazione deve iniziare con http:// o https://.");
+  }
+  const items = (await env.DB.prepare(
+    "SELECT code, name, dimensions, monthly_price_cents, quantity, months, line_subtotal_cents FROM quote_items WHERE quote_id = ? ORDER BY rowid",
+  ).bind(quote.id).all<{
+    code: string; name: string; dimensions: string; monthly_price_cents: number; quantity: number; months: number; line_subtotal_cents: number;
+  }>()).results;
+  if (!items.length) throw new ApiError(409, "quote_items_missing", "Il preventivo non contiene prodotti convertibili.");
+
   const contractId = crypto.randomUUID();
   const now = new Date().toISOString();
+  const campaignEndDate = contractEndDate(campaignStartDate, quote.months);
+  const contractData = {
+    schema: "crmvlc.dynamic-contract.v1",
+    documentLanguage: "es",
+    sourceTemplate: "Acuerdo comercial publicidad Vivi le Canarie",
+    quoteId: quote.id,
+    quoteNumber: quote.quote_number,
+    customerCompany: quote.customer_company,
+    customerEmail: quote.customer_email,
+    customerPhone,
+    taxId,
+    fiscalAddress,
+    billingEmail,
+    legalSignerName,
+    legalSignerRole,
+    island: quote.island,
+    campaignStartDate,
+    campaignEndDate,
+    destinationUrl: parsedDestination.toString(),
+    printEdition,
+    printRun,
+    distribution,
+    months: quote.months,
+    currency: quote.currency,
+    taxName: quote.tax_name,
+    taxRateBps: quote.tax_rate_bps,
+    subtotalCents: quote.subtotal_cents,
+    discountBps: quote.discount_bps,
+    discountReason: quote.discount_reason,
+    discountCents: quote.discount_cents,
+    netCents: quote.net_cents,
+    taxCents: quote.tax_cents,
+    totalCents: quote.total_cents,
+    generatedAt: now,
+    editorSigner: { name: "Marco Notarbartolo", role: "Director Canarias" },
+    items: items.map((item) => ({
+      code: item.code,
+      name: item.name,
+      dimensions: item.dimensions,
+      monthlyPriceCents: item.monthly_price_cents,
+      quantity: item.quantity,
+      months: item.months,
+      lineSubtotalCents: item.line_subtotal_cents,
+    })),
+  };
+  const pdfBytes = await buildContractPdf(contractData);
+  const documentSha256 = await sha256(pdfBytes);
   const contractKey = `contracts/${contractId}/v1/document.pdf`;
   await env.BUCKET.put(contractKey, pdfBytes, {
     httpMetadata: { contentType: "application/pdf" },
-    customMetadata: { sha256: quote.pdf_sha256, convertedFromQuote: quote.id, quoteNumber: quote.quote_number },
+    customMetadata: { sha256: documentSha256, convertedFromQuote: quote.id, quoteNumber: quote.quote_number, language: "es" },
   });
   try {
     const results = await env.DB.batch([
       env.DB.prepare("UPDATE quotes SET status = 'converted', converted_contract_id = ?, converted_at = ? WHERE id = ? AND status = 'issued'")
         .bind(contractId, now, quote.id),
-      env.DB.prepare("INSERT INTO contracts (id, client_id, quote_id, template_id, title, status, owner_user_id, island, draft_r2_key, document_sha256, version, created_by, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, 'draft', ?, ?, ?, ?, 1, ?, ?, ?)")
-        .bind(contractId, quote.client_id, quote.id, `Contrato del presupuesto ${quote.quote_number}`, quote.owner_user_id, quote.island, contractKey, quote.pdf_sha256, user.id, now, now),
+      env.DB.prepare("INSERT INTO contracts (id, client_id, quote_id, template_id, title, status, owner_user_id, island, draft_r2_key, document_sha256, contract_data_json, version, created_by, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, 'draft', ?, ?, ?, ?, ?, 1, ?, ?, ?)")
+        .bind(contractId, quote.client_id, quote.id, `Acuerdo comercial ${quote.quote_number}`, quote.owner_user_id, quote.island, contractKey, documentSha256, JSON.stringify(contractData), user.id, now, now),
+      env.DB.prepare("UPDATE clients SET phone = ?, tax_id = ?, fiscal_address = ?, billing_email = ?, legal_signer_name = ?, legal_signer_role = ?, version = version + 1, updated_at = ? WHERE id = ?")
+        .bind(customerPhone, taxId, fiscalAddress, billingEmail, legalSignerName, legalSignerRole, now, client.id),
     ]);
     if (Number(results[0].meta.changes ?? 0) !== 1 || Number(results[1].meta.changes ?? 0) !== 1) {
       throw new ApiError(409, "quote_already_converted", "Il preventivo è già stato convertito in contratto.");
@@ -1310,7 +1396,8 @@ async function convertQuoteToContract(request: Request, quoteId: string, user: U
   await appendAudit(env, request, user, "quote.converted_to_contract", "quote", quote.id, {
     quoteNumber: quote.quote_number,
     contractId,
-    documentSha256: quote.pdf_sha256,
+    documentSha256,
+    contractData,
   });
   return json({ contractId, quoteNumber: quote.quote_number }, 201);
 }
@@ -2332,6 +2419,17 @@ function strictDateKey(value: unknown): string {
     throw new ApiError(400, "invalid_date", "Inserisci una data valida.");
   }
   return date;
+}
+
+function contractEndDate(startDate: string, months: number): string {
+  const start = new Date(`${startDate}T00:00:00Z`);
+  const targetMonth = start.getUTCMonth() + months;
+  const targetYear = start.getUTCFullYear() + Math.floor(targetMonth / 12);
+  const normalizedMonth = ((targetMonth % 12) + 12) % 12;
+  const targetDay = Math.min(start.getUTCDate(), new Date(Date.UTC(targetYear, normalizedMonth + 1, 0)).getUTCDate());
+  const end = new Date(Date.UTC(targetYear, normalizedMonth, targetDay));
+  end.setUTCDate(end.getUTCDate() - 1);
+  return end.toISOString().slice(0, 10);
 }
 
 function isDeliveryStatus(value: string): value is DeliveryRow["status"] {

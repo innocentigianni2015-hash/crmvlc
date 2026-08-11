@@ -15,6 +15,8 @@ const BACKGROUND_AT_KEY = "crmvlc:backgrounded-at";
 type User = { id: string; email: string; name: string; phone: string | null; role: Role; island: string | null; language: UiLocale; sales_manager_id?: string | null; sales_manager_name?: string | null; active?: number };
 type Client = {
   id: string; company_name: string; contact_name: string; email: string; phone: string | null;
+  tax_id: string | null; fiscal_address: string | null; billing_email: string | null;
+  legal_signer_name: string | null; legal_signer_role: string | null;
   island: string; stage: string; value_cents: number; owner_user_id: string; owner_name?: string;
   notes: string | null; version: number; created_at: string; updated_at: string;
 };
@@ -514,7 +516,7 @@ export default function Home() {
 
         {active === "pricing" && data.user.role !== "distributor" && <PriceListPanel data={data} search={search} refresh={refresh} notify={notify} preferredCampaignId={preferredDiscountCampaignId} onQuoteCreated={() => setActive("quotes")} />}
 
-        {active === "quotes" && data.user.role !== "distributor" && <QuotesPanel quotes={filteredQuotes} onConverted={async () => { notify("Bozza contratto creata dal preventivo."); setActive("contracts"); await refresh(); }} notify={notify} />}
+        {active === "quotes" && data.user.role !== "distributor" && <QuotesPanel quotes={filteredQuotes} clients={data.clients} onConverted={async () => { notify("Contratto spagnolo generato dal preventivo e pronto per la firma OTP."); setActive("contracts"); await refresh(); }} />}
 
         {active === "distribution" && <DistributionPanel data={data} deliveries={filteredDeliveries} onCreate={() => setDeliveryModal("new")} onEdit={setDeliveryModal} />}
 
@@ -961,18 +963,19 @@ function PodcastAppointmentModal({ appointment, interviewers, taxName, taxRateBp
   </form></Modal>;
 }
 
-function QuotesPanel({ quotes, onConverted, notify }: { quotes: Quote[]; onConverted: () => Promise<void>; notify: (text: string, tone?: "ok" | "error") => void }) {
+function QuotesPanel({ quotes, clients, onConverted }: { quotes: Quote[]; clients: Client[]; onConverted: () => Promise<void> }) {
   const [converting, setConverting] = useState("");
+  const [selectedQuote, setSelectedQuote] = useState<Quote | null>(null);
   const today = new Date().toISOString().slice(0, 10);
 
-  async function convert(quote: Quote) {
-    if (!window.confirm(`Creare una bozza contratto dal preventivo ${quote.quote_number}? Il preventivo resterà immutabile.`)) return;
+  async function convert(quote: Quote, values: Record<string, FormDataEntryValue>) {
     setConverting(quote.id);
     try {
-      await api(`/api/quotes/${quote.id}/convert`, { method: "POST" });
+      await api(`/api/quotes/${quote.id}/convert`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(values) });
+      setSelectedQuote(null);
       await onConverted();
     } catch (cause) {
-      notify(cause instanceof Error ? cause.message : "Conversione non riuscita.", "error");
+      throw cause instanceof Error ? cause : new Error("Conversione non riuscita.");
     } finally {
       setConverting("");
     }
@@ -980,8 +983,41 @@ function QuotesPanel({ quotes, onConverted, notify }: { quotes: Quote[]; onConve
 
   return <section className="ops-page"><PageHeading eyebrow="Ciclo commerciale" title="Preventivi" subtitle="PDF numerati, collegati al cliente e congelati con prezzi, sconto e IGIC del momento." action={<span className="admin-badge">{quotes.length} preventivi visibili</span>} /><div className="data-card"><div className="card-head"><div><h2>Archivio preventivi</h2><p>La conversione crea una bozza contrattuale da verificare prima della firma.</p></div><div className="legend"><span className="status quote-issued">Emesso</span><span className="status quote-converted">Convertito</span></div></div><div className="table-wrap"><table><thead><tr><th>Numero</th><th>Cliente</th><th>Isola</th><th>Periodo</th><th>Imponibile</th><th>IGIC</th><th>Totale</th><th>Stato</th><th /></tr></thead><tbody>{quotes.map((quote) => {
     const expired = quote.status === "issued" && quote.valid_until < today;
-    return <tr key={quote.id}><td data-label="Numero"><strong>{quote.quote_number}</strong><small>{dateTime(quote.created_at)}</small></td><td data-label="Cliente"><strong>{quote.customer_company}</strong><small>{quote.customer_contact} · {quote.customer_email}</small></td><td data-label="Isola"><span className="island-pill">{quote.island}</span></td><td data-label="Periodo">{quote.months} {quote.months === 1 ? "mese" : "mesi"}<small>valido fino al {dateOnly(quote.valid_until)}</small></td><td data-label="Imponibile">{money(quote.net_cents)}{quote.discount_cents > 0 && <small>Sconto {(quote.discount_bps / 100).toLocaleString("it-IT")}%: −{money(quote.discount_cents)}</small>}</td><td data-label="IGIC">{money(quote.tax_cents)}<small>{quote.tax_name} {(quote.tax_rate_bps / 100).toLocaleString("it-IT")}%</small></td><td data-label="Totale"><strong>{money(quote.total_cents)}</strong></td><td data-label="Stato"><span className={`status ${expired ? "quote-expired" : `quote-${quote.status}`}`}>{expired ? "Scaduto" : quoteStatusLabels[quote.status]}</span></td><td data-label="Azioni"><div className="row-actions quote-actions"><button onClick={() => window.open(`/api/quotes/${quote.id}/download`, "_blank")}>PDF</button>{quote.status === "issued" && !expired && <button className="accent" disabled={converting === quote.id} onClick={() => void convert(quote)}>{converting === quote.id ? "Conversione…" : "Crea contratto"}</button>}{quote.converted_contract_id && <button onClick={() => window.open(`/api/contracts/${quote.converted_contract_id}/download`, "_blank")}>Contratto</button>}</div></td></tr>;
-  })}{!quotes.length && <tr><td colSpan={9}><Empty title="Nessun preventivo" text="Seleziona i formati nel Listino e genera il primo PDF numerato." /></td></tr>}</tbody></table></div></div></section>;
+    return <tr key={quote.id}><td data-label="Numero"><strong>{quote.quote_number}</strong><small>{dateTime(quote.created_at)}</small></td><td data-label="Cliente"><strong>{quote.customer_company}</strong><small>{quote.customer_contact} · {quote.customer_email}</small></td><td data-label="Isola"><span className="island-pill">{quote.island}</span></td><td data-label="Periodo">{quote.months} {quote.months === 1 ? "mese" : "mesi"}<small>valido fino al {dateOnly(quote.valid_until)}</small></td><td data-label="Imponibile">{money(quote.net_cents)}{quote.discount_cents > 0 && <small>Sconto {(quote.discount_bps / 100).toLocaleString("it-IT")}%: −{money(quote.discount_cents)}</small>}</td><td data-label="IGIC">{money(quote.tax_cents)}<small>{quote.tax_name} {(quote.tax_rate_bps / 100).toLocaleString("it-IT")}%</small></td><td data-label="Totale"><strong>{money(quote.total_cents)}</strong></td><td data-label="Stato"><span className={`status ${expired ? "quote-expired" : `quote-${quote.status}`}`}>{expired ? "Scaduto" : quoteStatusLabels[quote.status]}</span></td><td data-label="Azioni"><div className="row-actions quote-actions"><button onClick={() => window.open(`/api/quotes/${quote.id}/download`, "_blank")}>PDF</button>{quote.status === "issued" && !expired && <button className="accent" disabled={converting === quote.id} onClick={() => setSelectedQuote(quote)}>{converting === quote.id ? "Conversione…" : "Crea contratto"}</button>}{quote.converted_contract_id && <button onClick={() => window.open(`/api/contracts/${quote.converted_contract_id}/download`, "_blank")}>Contratto</button>}</div></td></tr>;
+  })}{!quotes.length && <tr><td colSpan={9}><Empty title="Nessun preventivo" text="Seleziona i formati nel Listino e genera il primo PDF numerato." /></td></tr>}</tbody></table></div></div>{selectedQuote && <ContractGenerationModal quote={selectedQuote} client={clients.find((client) => client.id === selectedQuote.client_id) ?? null} busy={converting === selectedQuote.id} onClose={() => setSelectedQuote(null)} onGenerate={(values) => convert(selectedQuote, values)} />}</section>;
+}
+
+function ContractGenerationModal({ quote, client, busy, onClose, onGenerate }: { quote: Quote; client: Client | null; busy: boolean; onClose: () => void; onGenerate: (values: Record<string, FormDataEntryValue>) => Promise<void> }) {
+  const [error, setError] = useState("");
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    try {
+      await onGenerate(Object.fromEntries(new FormData(event.currentTarget).entries()));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Generazione non riuscita.");
+    }
+  }
+  return <Modal title="Genera contratto spagnolo" subtitle={`${quote.quote_number} · ${quote.customer_company}`} onClose={onClose}><form className="form-grid contract-generator-form" onSubmit={submit}>
+    <div className="contract-wizard-note span-2"><strong>Documento definitivo</strong><span>Questi dati saranno congelati nel PDF. Dopo la firma OTP il contratto sarà immutabile.</span></div>
+    <label>NIF/CIF del cliente<input name="taxId" required maxLength={40} defaultValue={client?.tax_id ?? ""} /></label>
+    <label>Email di fatturazione<input name="billingEmail" type="email" required defaultValue={client?.billing_email ?? client?.email ?? quote.customer_email} /></label>
+    <label className="span-2">Domicilio fiscale e indirizzo di fatturazione<textarea name="fiscalAddress" rows={2} required maxLength={300} defaultValue={client?.fiscal_address ?? ""} /></label>
+    <label>Firmatario del cliente<input name="legalSignerName" required maxLength={120} defaultValue={client?.legal_signer_name ?? client?.contact_name ?? quote.customer_contact} /></label>
+    <label>Carica del firmatario<input name="legalSignerRole" required maxLength={120} defaultValue={client?.legal_signer_role ?? ""} placeholder="Administrador / Apoderado" /></label>
+    <label>Telefono del cliente<input name="customerPhone" type="tel" required maxLength={40} defaultValue={client?.phone ?? ""} /></label>
+    <label>Data inizio campagna<input name="campaignStartDate" type="date" required defaultValue={tomorrow.toISOString().slice(0, 10)} /></label>
+    <label className="span-2">URL di destinazione<input name="destinationUrl" type="url" required maxLength={500} placeholder="https://azienda.es" /></label>
+    <label>Edizione impresa<input name="printEdition" required maxLength={120} placeholder="N. 12 · settembre 2026" /></label>
+    <label>Tiratura prevista<input name="printRun" type="number" min="1" max="10000000" required placeholder="10000" /></label>
+    <label className="span-2">Zona e canali di distribuzione<textarea name="distribution" rows={2} required maxLength={500} placeholder="Tenerife · hotel, ristoranti e punti autorizzati" /></label>
+    <div className="contract-summary span-2"><span>Durata <strong>{quote.months} mesi</strong></span><span>Imponibile <strong>{money(quote.net_cents)}</strong></span><span>{quote.tax_name} <strong>{money(quote.tax_cents)}</strong></span><span>Totale <strong>{money(quote.total_cents)}</strong></span></div>
+    <label className="confirmation span-2 document-language-confirmation"><input type="checkbox" required /><span><strong>Confermo i dati contrattuali</strong>Il contratto sarà generato esclusivamente in spagnolo e collegato in modo immutabile al preventivo.</span></label>
+    {error && <div className="form-error span-2">{error}</div>}
+    <div className="modal-actions span-2"><button type="button" onClick={onClose}>Annulla</button><button className="primary" disabled={busy}>{busy ? "Generazione PDF…" : "Genera contratto"}</button></div>
+  </form></Modal>;
 }
 
 function PriceEditModal({ item, onClose, onSaved }: { item: PriceItem; onClose: () => void; onSaved: () => Promise<void> }) {

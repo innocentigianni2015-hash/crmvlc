@@ -5,11 +5,11 @@ import QRCode from "qrcode";
 import { OperationsHub } from "./operations-hub";
 import { clearOfflineSnapshots, loadOfflineSnapshot, pendingOutboxCount, saveOfflineSnapshot, syncPhotoAuditOutbox } from "./offline";
 
-type Role = "super_admin" | "sales_manager" | "sales" | "distributor";
+type Role = "super_admin" | "admin" | "sales_manager" | "sales" | "distributor";
 type InstallPromptEvent = Event & { prompt(): Promise<void>; userChoice: Promise<{ outcome: "accepted" | "dismissed" }> };
 const BACKGROUND_LOCK_MS = 60 * 60 * 1000;
 const BACKGROUND_AT_KEY = "crmvlc:backgrounded-at";
-type User = { id: string; email: string; name: string; role: Role; island: string | null; active?: number };
+type User = { id: string; email: string; name: string; phone: string | null; role: Role; island: string | null; active?: number };
 type Client = {
   id: string; company_name: string; contact_name: string; email: string; phone: string | null;
   island: string; stage: string; value_cents: number; owner_user_id: string; owner_name?: string;
@@ -60,7 +60,7 @@ const stageLabels: Record<string, string> = { lead: "Primo contatto", qualified:
 const statusLabels: Record<string, string> = { draft: "Bozza", awaiting_signature: "Firma in attesa", signed: "Firmato", cancelled: "Annullato" };
 const quoteStatusLabels: Record<Quote["status"], string> = { issued: "Emesso", converted: "Convertito" };
 const deliveryStatusLabels: Record<Delivery["status"], string> = { assigned: "Assegnata", in_progress: "In corso", delivered: "Consegnata", issue: "Problema" };
-const roleLabels: Record<Role, string> = { super_admin: "Super Admin", sales_manager: "Sales Manager", sales: "Sales", distributor: "Distributore" };
+const roleLabels: Record<Role, string> = { super_admin: "Super Admin", admin: "Admin operativo", sales_manager: "Sales Manager", sales: "Sales", distributor: "Distributore" };
 const priceCategoryLabels: Record<PriceItem["category"], string> = { cover: "Copertina", internal_high: "Pagine interne · fascia alta", internal_low: "Pagine interne · fascia bassa", back_cover: "Ultima pagina" };
 
 class RequestError extends Error {
@@ -92,6 +92,7 @@ export default function Home() {
   const [data, setData] = useState<Bootstrap | null>(null);
   const [loading, setLoading] = useState(true);
   const [authRequired, setAuthRequired] = useState(false);
+  const [authNotice, setAuthNotice] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const [offlineMode, setOfflineMode] = useState(false);
   const [offlineSavedAt, setOfflineSavedAt] = useState<number | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
@@ -105,8 +106,28 @@ export default function Home() {
   const [signing, setSigning] = useState<Contract | null>(null);
   const [superseding, setSuperseding] = useState<Contract | null>(null);
   const [deliveryModal, setDeliveryModal] = useState<Delivery | "new" | null>(null);
+  const [profileModal, setProfileModal] = useState(false);
 
   const refresh = useCallback(async () => {
+    const emailChangeToken = new URLSearchParams(window.location.search).get("email-change");
+    if (emailChangeToken) {
+      try {
+        const result = await api<{ message: string }>("/api/profile/email/confirm", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ token: emailChangeToken }),
+        });
+        setAuthNotice({ tone: "ok", text: result.message });
+      } catch (error) {
+        setAuthNotice({ tone: "error", text: error instanceof Error ? error.message : "Verifica email non riuscita." });
+      }
+      window.history.replaceState({}, "", window.location.pathname);
+      setData(null);
+      setAuthRequired(true);
+      setOfflineMode(false);
+      setLoading(false);
+      return;
+    }
     try {
       const result = await api<Bootstrap>("/api/bootstrap");
       setData(result);
@@ -246,7 +267,7 @@ export default function Home() {
   const notify = (text: string, tone: "ok" | "error" = "ok") => setNotice({ text, tone });
 
   if (loading) return <div className="loading-screen"><div className="loading-mark">C</div><p>Caricamento area operativa…</p></div>;
-  if (authRequired || !data) return <Login onAuthenticated={refresh} />;
+  if (authRequired || !data) return <Login onAuthenticated={refresh} initialNotice={authNotice} />;
 
   const filteredClients = data.clients.filter((client) => `${client.company_name} ${client.contact_name} ${client.email} ${client.island}`.toLowerCase().includes(search.toLowerCase()));
   const filteredContracts = data.contracts.filter((contract) => `${contract.title} ${contract.client_company ?? ""} ${contract.island}`.toLowerCase().includes(search.toLowerCase()));
@@ -301,8 +322,8 @@ export default function Home() {
           {data.user.role !== "distributor" && <button className={active === "pricing" ? "active" : ""} onClick={() => setActive("pricing")}><i>03</i> Listino</button>}
           {data.user.role !== "distributor" && <button className={active === "quotes" ? "active" : ""} onClick={() => setActive("quotes")}><i>04</i> Preventivi</button>}
           {data.user.role !== "distributor" && <button className={active === "contracts" ? "active" : ""} onClick={() => setActive("contracts")}><i>05</i> Contratti</button>}
-          {["super_admin", "sales_manager", "distributor"].includes(data.user.role) && <button className={active === "distribution" ? "active" : ""} onClick={() => setActive("distribution")}><i>06</i> Consegne</button>}
-          {data.user.role === "super_admin" && <button className={active === "admin" ? "active" : ""} onClick={() => setActive("admin")}><i>07</i> Utenti e modelli</button>}
+          {["super_admin", "admin", "sales_manager", "distributor"].includes(data.user.role) && <button className={active === "distribution" ? "active" : ""} onClick={() => setActive("distribution")}><i>06</i> Consegne</button>}
+          {["super_admin", "admin"].includes(data.user.role) && <button className={active === "admin" ? "active" : ""} onClick={() => setActive("admin")}><i>07</i> Utenti</button>}
           {data.user.role === "super_admin" && <button className={active === "audit" ? "active" : ""} onClick={() => setActive("audit")}><i>08</i> Audit</button>}
         </nav>
         <div className="ops-scope"><span className="live-dot" /><div><strong>{data.demoMode ? "Dati dimostrativi" : "Dati reali"}</strong><small>{data.user.island ?? "Tutte le isole"}</small></div></div>
@@ -311,7 +332,7 @@ export default function Home() {
       <main className="ops-main">
         <header className="ops-topbar">
           <div className="ops-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Cerca clienti, preventivi, contratti o consegne…" aria-label="Cerca" /></div>
-          <div className="ops-user">{!standalone && <button className="install-button" onClick={() => void installApp()}>Installa</button>}<span>{initials(data.user.name)}</span><div><strong>{data.user.name}</strong><small>{roleLabels[data.user.role]}{data.user.island ? ` · ${data.user.island}` : ""}</small></div><button onClick={logout}>Esci</button></div>
+          <div className="ops-user">{!standalone && <button className="install-button" onClick={() => void installApp()}>Installa</button>}<button className="profile-trigger" onClick={() => setProfileModal(true)} aria-label="Modifica il profilo"><span>{initials(data.user.name)}</span><div><strong>{data.user.name}</strong><small>{roleLabels[data.user.role]}{data.user.island ? ` · ${data.user.island}` : ""}</small></div></button><button onClick={logout}>Esci</button></div>
         </header>
         {(offlineMode || pendingCount > 0) && <div className={`connectivity-strip ${offlineMode ? "offline" : "pending"}`}><strong>{offlineMode ? "Modalità offline" : "Sincronizzazione"}</strong><span>{offlineMode ? `Dati salvati ${offlineSavedAt ? dateTime(new Date(offlineSavedAt).toISOString()) : "sul dispositivo"} · contratti e amministrazione richiedono la rete.` : `${pendingCount} acquisizion${pendingCount === 1 ? "e in attesa" : "i in attesa"} di invio.`}</span></div>}
         {data.demoMode && <div className="demo-strip"><strong>Modalità demo</strong><span>Usa esclusivamente dati fittizi. Le email OTP non sono attive.</span></div>}
@@ -350,7 +371,7 @@ export default function Home() {
 
         {active === "distribution" && <DistributionPanel data={data} deliveries={filteredDeliveries} onCreate={() => setDeliveryModal("new")} onEdit={setDeliveryModal} />}
 
-        {active === "admin" && data.user.role === "super_admin" && <AdminPanel data={data} refresh={refresh} notify={notify} />}
+        {active === "admin" && ["super_admin", "admin"].includes(data.user.role) && <AdminPanel data={data} refresh={refresh} notify={notify} />}
         {active === "audit" && data.user.role === "super_admin" && <AuditPanel events={data.audit} emails={data.emailOutbox} refresh={refresh} notify={notify} />}
       </main>
 
@@ -359,12 +380,13 @@ export default function Home() {
       {signing && <SignatureModal contract={signing} onClose={() => setSigning(null)} onSaved={async () => { setSigning(null); notify("Firma registrata con evidenza OTP."); await refresh(); }} />}
       {superseding && <SupersedeModal contract={superseding} onClose={() => setSuperseding(null)} onSaved={async () => { setSuperseding(null); notify("Contratto annullato e nuova versione creata."); await refresh(); }} />}
       {deliveryModal && <DeliveryModal data={data} delivery={deliveryModal === "new" ? null : deliveryModal} onClose={() => setDeliveryModal(null)} onSaved={async () => { setDeliveryModal(null); notify(deliveryModal === "new" ? "Consegna assegnata." : "Consegna aggiornata."); await refresh(); }} />}
+      {profileModal && <ProfileModal user={data.user} onClose={() => setProfileModal(false)} onSaved={async (message) => { setProfileModal(false); notify(message); await refresh(); }} />}
       {notice && <div className={`ops-toast ${notice.tone}`}>{notice.tone === "ok" ? "✓" : "!"} {notice.text}</div>}
     </div>
   );
 }
 
-function Login({ onAuthenticated }: { onAuthenticated: () => Promise<void> }) {
+function Login({ onAuthenticated, initialNotice }: { onAuthenticated: () => Promise<void>; initialNotice?: { tone: "ok" | "error"; text: string } | null }) {
   type NextStep = { authenticated?: boolean; next?: "change_password" | "totp_setup" | "totp"; token?: string };
   const [mode, setMode] = useState<"login" | "change" | "totp_setup" | "totp" | "forgot" | "reset">("login");
   const [email, setEmail] = useState("");
@@ -480,7 +502,7 @@ function Login({ onAuthenticated }: { onAuthenticated: () => Promise<void> }) {
     {mode === "reset" && <form onSubmit={resetPassword}>{passwordFields}<button className="primary wide" disabled={busy}>{busy ? "Salvataggio…" : "Imposta password"}</button></form>}
     {mode === "change" && <form onSubmit={changePassword}>{passwordFields}<button className="primary wide" disabled={busy}>{busy ? "Salvataggio…" : "Cambia e continua"}</button></form>}
     {(mode === "totp" || mode === "totp_setup") && <form onSubmit={confirmTotp}>{mode === "totp_setup" && <div style={{ textAlign: "center" }}>{qrCode && <img src={qrCode} width={240} height={240} alt="QR autenticatore CRMVLC" />}<small style={{ display: "block", overflowWrap: "anywhere" }}>Chiave manuale: {totpSecret}</small></div>}<label>Codice a 6 cifre<input className="otp-input" inputMode="numeric" autoComplete="one-time-code" maxLength={6} required value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, ""))} placeholder="000000" /></label><button className="primary wide" disabled={busy || code.length !== 6}>{busy ? "Verifica…" : mode === "totp_setup" ? "Conferma e accedi" : "Accedi"}</button></form>}
-    {message && <div className="form-success">{message}</div>}{error && <div className="form-error">{error}</div>}<small className="privacy-note">Password cifrate con derivazione PBKDF2. Il Super Admin usa anche l’autenticatore TOTP.</small></div></section></main>;
+    {initialNotice && <div className={initialNotice.tone === "ok" ? "form-success" : "form-error"}>{initialNotice.text}</div>}{message && <div className="form-success">{message}</div>}{error && <div className="form-error">{error}</div>}<small className="privacy-note">Password cifrate con derivazione PBKDF2. Il Super Admin usa anche l’autenticatore TOTP.</small></div></section></main>;
 }
 
 function PageHeading({ eyebrow, title, subtitle, action }: { eyebrow: string; title: string; subtitle: string; action: React.ReactNode }) {
@@ -640,7 +662,7 @@ function PriceEditModal({ item, onClose, onSaved }: { item: PriceItem; onClose: 
 
 function ClientModal({ data, onClose, onSaved }: { data: Bootstrap; onClose: () => void; onSaved: () => Promise<void> }) {
   const [busy, setBusy] = useState(false); const [error, setError] = useState("");
-  const assignable = data.users.filter((user) => ["sales_manager", "sales"].includes(user.role) && user.active !== 0 && (data.user.role === "super_admin" || user.island === data.user.island));
+  const assignable = data.users.filter((user) => ["sales_manager", "sales"].includes(user.role) && user.active !== 0 && (["super_admin", "admin"].includes(data.user.role) || user.island === data.user.island));
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError("");
     const form = new FormData(event.currentTarget);
@@ -649,8 +671,9 @@ function ClientModal({ data, onClose, onSaved }: { data: Bootstrap; onClose: () 
       await onSaved();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Creazione non riuscita."); setBusy(false); }
   }
-  const canAssign = data.user.role === "super_admin" || data.user.role === "sales_manager";
-  return <Modal title="Nuovo cliente" subtitle="Il proprietario del record determina la visibilità del Sales." onClose={onClose}><form className="form-grid" onSubmit={submit}><label className="span-2">Azienda<input name="companyName" required maxLength={120} /></label><label>Referente<input name="contactName" required maxLength={120} /></label><label>Email<input name="email" type="email" required /></label><label>Telefono<input name="phone" /></label><label>Isola<select name="island" required defaultValue={data.user.island ?? ""} disabled={data.user.role !== "super_admin"}>{ISLANDS.map((island) => <option key={island}>{island}</option>)}</select>{data.user.role !== "super_admin" && <input type="hidden" name="island" value={data.user.island ?? ""} />}</label><label>Valore stimato €<input name="valueEuros" type="number" min="0" step="0.01" defaultValue="0" /></label>{canAssign && <label>Assegnato a<select name="ownerUserId" defaultValue={data.user.id}><option value={data.user.id}>{data.user.name}</option>{assignable.filter((user) => user.id !== data.user.id).map((user) => <option key={user.id} value={user.id}>{user.name} · {user.island}</option>)}</select></label>}<label className="span-2">Note<textarea name="notes" rows={3} maxLength={2000} /></label>{error && <div className="form-error span-2">{error}</div>}<div className="modal-actions span-2"><button type="button" onClick={onClose}>Annulla</button><button className="primary" disabled={busy}>{busy ? "Salvataggio…" : "Crea cliente"}</button></div></form></Modal>;
+  const canAssign = ["super_admin", "admin", "sales_manager"].includes(data.user.role);
+  const globalOperator = ["super_admin", "admin"].includes(data.user.role);
+  return <Modal title="Nuovo cliente" subtitle="Il proprietario del record determina la visibilità del Sales." onClose={onClose}><form className="form-grid" onSubmit={submit}><label className="span-2">Azienda<input name="companyName" required maxLength={120} /></label><label>Referente<input name="contactName" required maxLength={120} /></label><label>Email<input name="email" type="email" required /></label><label>Telefono<input name="phone" /></label><label>Isola<select name="island" required defaultValue={data.user.island ?? ""} disabled={!globalOperator}>{ISLANDS.map((island) => <option key={island}>{island}</option>)}</select>{!globalOperator && <input type="hidden" name="island" value={data.user.island ?? ""} />}</label><label>Valore stimato €<input name="valueEuros" type="number" min="0" step="0.01" defaultValue="0" /></label>{canAssign && <label>Assegnato a<select name="ownerUserId" defaultValue={data.user.id}><option value={data.user.id}>{data.user.name}</option>{assignable.filter((user) => user.id !== data.user.id).map((user) => <option key={user.id} value={user.id}>{user.name} · {user.island}</option>)}</select></label>}<label className="span-2">Note<textarea name="notes" rows={3} maxLength={2000} /></label>{error && <div className="form-error span-2">{error}</div>}<div className="modal-actions span-2"><button type="button" onClick={onClose}>Annulla</button><button className="primary" disabled={busy}>{busy ? "Salvataggio…" : "Crea cliente"}</button></div></form></Modal>;
 }
 
 function ContractModal({ data, onClose, onSaved }: { data: Bootstrap; onClose: () => void; onSaved: () => Promise<void> }) {
@@ -684,7 +707,7 @@ function SupersedeModal({ contract, onClose, onSaved }: { contract: Contract; on
 }
 
 function DistributionPanel({ data, deliveries, onCreate, onEdit }: { data: Bootstrap; deliveries: Delivery[]; onCreate: () => void; onEdit: (delivery: Delivery) => void }) {
-  const canAssign = data.user.role === "super_admin" || data.user.role === "sales_manager";
+  const canAssign = ["super_admin", "admin", "sales_manager"].includes(data.user.role);
   const assignedQuantity = data.deliveries.filter((delivery) => delivery.status !== "delivered").reduce((sum, delivery) => sum + delivery.quantity, 0);
   const deliveredQuantity = data.deliveries.filter((delivery) => delivery.status === "delivered").reduce((sum, delivery) => sum + delivery.quantity, 0);
   return <section className="ops-page"><PageHeading eyebrow="Rete distributiva" title="Distribuzione" subtitle="Consegne, quantità e aziende visibili soltanto nel perimetro assegnato." action={canAssign ? <button className="primary" disabled={!data.clients.length || !data.users.some((user) => user.role === "distributor")} onClick={onCreate}>＋ Nuova consegna</button> : <span className="admin-badge">Solo consegne assegnate</span>} /><div className="metric-grid"><Metric label="Consegne visibili" value={String(data.deliveries.length)} note="nel tuo perimetro" /><Metric label="Quantità da consegnare" value={String(assignedQuantity)} note="esclude le consegnate" /><Metric label="Quantità consegnata" value={String(deliveredQuantity)} note="confermata dal distributore" /><Metric label="Problemi aperti" value={String(data.deliveries.filter((delivery) => delivery.status === "issue").length)} note="da risolvere" /></div><div className="data-card"><div className="card-head"><div><h2>Piano consegne</h2><p>{deliveries.length} incarichi</p></div></div><div className="table-wrap"><table><thead><tr><th>Azienda</th><th>Distributore</th><th>Isola</th><th>Quantità</th><th>Data</th><th>Stato</th><th /></tr></thead><tbody>{deliveries.map((delivery) => <tr key={delivery.id}><td data-label="Azienda"><strong>{delivery.client_company}</strong><small>{delivery.delivery_contact_name} · {delivery.delivery_contact_email}</small></td><td data-label="Distributore">{delivery.distributor_name ?? "—"}</td><td data-label="Isola"><span className="island-pill">{delivery.island}</span></td><td data-label="Quantità"><strong>{delivery.quantity}</strong> {delivery.unit}</td><td data-label="Data">{delivery.scheduled_for ?? "Da pianificare"}</td><td data-label="Stato"><span className={`delivery-status ${delivery.status}`}>{deliveryStatusLabels[delivery.status]}</span></td><td data-label="Azioni"><button className="table-action" onClick={() => onEdit(delivery)}>Gestisci</button></td></tr>)}{!deliveries.length && <tr><td colSpan={7}><Empty title="Nessuna consegna" text={canAssign ? "Assegna la prima consegna a un Distributore." : "Non hai ancora consegne assegnate."} /></td></tr>}</tbody></table></div></div></section>;
@@ -710,12 +733,101 @@ function DeliveryModal({ data, delivery, onClose, onSaved }: { data: Bootstrap; 
   return <Modal title={delivery ? "Gestisci consegna" : "Nuova consegna"} subtitle={delivery ? `${delivery.client_company} · ${delivery.island}` : "Assegna quantità e azienda a un Distributore."} onClose={onClose}><form className="form-grid" onSubmit={submit}>{!delivery && <><label className="span-2">Azienda<select name="clientId" required value={clientId} onChange={(event) => setClientId(event.target.value)}>{data.clients.map((item) => <option key={item.id} value={item.id}>{item.company_name} · {item.island}</option>)}</select></label><label className="span-2">Distributore<select name="distributorUserId" required>{distributors.map((user) => <option key={user.id} value={user.id}>{user.name} · {user.island}</option>)}</select></label></>}{delivery && <label>Stato<select name="status" defaultValue={delivery.status}><option value="assigned">Assegnata</option><option value="in_progress">In corso</option><option value="delivered">Consegnata</option><option value="issue">Problema</option></select></label>}<label>Quantità<input name="quantity" type="number" min="1" max="1000000" step="1" required defaultValue={delivery?.quantity ?? 1} /></label><label>Unità<input name="unit" required maxLength={30} defaultValue={delivery?.unit ?? "copie"} /></label><label>Data programmata<input name="scheduledFor" type="date" defaultValue={delivery?.scheduled_for ?? ""} /></label><label>Referente consegna<input name="deliveryContactName" required maxLength={120} defaultValue={delivery?.delivery_contact_name ?? client?.contact_name ?? ""} /></label><label>Email referente<input name="deliveryContactEmail" type="email" required defaultValue={delivery?.delivery_contact_email ?? client?.email ?? ""} /></label><label>Telefono referente<input name="deliveryContactPhone" maxLength={40} defaultValue={delivery?.delivery_contact_phone ?? client?.phone ?? ""} /></label><label className="span-2">Indirizzo consegna<input name="deliveryAddress" maxLength={300} defaultValue={delivery?.delivery_address ?? ""} /></label><label className="span-2">Note operative<textarea name="notes" rows={3} maxLength={2000} defaultValue={delivery?.notes ?? ""} /></label>{!delivery && !distributors.length && <div className="form-error span-2">Non esiste un Distributore attivo assegnato all’isola selezionata.</div>}{error && <div className="form-error span-2">{error}</div>}<div className="modal-actions span-2"><button type="button" onClick={onClose}>Annulla</button><button className="primary" disabled={busy || (!delivery && !distributors.length)}>{busy ? "Salvataggio…" : delivery ? "Aggiorna consegna" : "Assegna consegna"}</button></div></form></Modal>;
 }
 
+function ProfileModal({ user, onClose, onSaved }: { user: User; onClose: () => void; onSaved: (message: string) => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    const values = Object.fromEntries(new FormData(event.currentTarget).entries());
+    try {
+      const result = await api<{ message: string }>("/api/profile", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(values),
+      });
+      await onSaved(result.message);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Aggiornamento del profilo non riuscito.");
+      setBusy(false);
+    }
+  }
+  return <Modal title="Il mio profilo" subtitle="Telefono immediato; la nuova email richiede conferma dal collegamento ricevuto." onClose={onClose}><form className="form-grid" onSubmit={submit}><label className="span-2">Nome e cognome<input name="name" required maxLength={120} defaultValue={user.name} /></label><label>Email di accesso<input name="email" type="email" required defaultValue={user.email} /></label><label>Telefono<input name="phone" type="tel" inputMode="tel" maxLength={24} defaultValue={user.phone ?? ""} placeholder="+34…" /></label><div className="profile-security span-2"><strong>{roleLabels[user.role]}</strong><span>{user.island ?? "Accesso a tutte le isole"}</span><p>Ruolo e perimetro sono modificabili soltanto da un amministratore autorizzato.</p></div>{error && <div className="form-error span-2">{error}</div>}<div className="modal-actions span-2"><button type="button" onClick={onClose}>Annulla</button><button className="primary" disabled={busy}>{busy ? "Salvataggio…" : "Salva profilo"}</button></div></form></Modal>;
+}
+
+function UserEditModal({ actor, target, onClose, onSaved }: { actor: User; target: User; onClose: () => void; onSaved: () => Promise<void> }) {
+  const [role, setRole] = useState<Role>(target.role);
+  const [island, setIsland] = useState(target.island ?? ISLANDS[0]);
+  const [active, setActive] = useState(target.active !== 0);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/api/users/${target.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ role, island, active }),
+      });
+      await onSaved();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Aggiornamento utente non riuscito.");
+      setBusy(false);
+    }
+  }
+  const roles: Role[] = actor.role === "super_admin"
+    ? ["admin", "sales_manager", "sales", "distributor"]
+    : ["sales_manager", "sales", "distributor"];
+  return <Modal title="Gestisci utente" subtitle={`${target.name} · ${target.email}`} onClose={onClose}><form className="form-grid" onSubmit={submit}><label>Ruolo<select value={role} onChange={(event) => setRole(event.target.value as Role)}>{roles.map((value) => <option key={value} value={value}>{roleLabels[value]}</option>)}</select></label>{role !== "admin" && <label>Isola<select value={island} onChange={(event) => setIsland(event.target.value)}>{ISLANDS.map((value) => <option key={value}>{value}</option>)}</select></label>}<label className="confirmation span-2"><input type="checkbox" checked={active} onChange={(event) => setActive(event.target.checked)} /><span><strong>Account attivo</strong>Disattivandolo vengono revocate tutte le sessioni aperte.</span></label><div className="profile-security span-2"><strong>Contatti personali</strong><span>{target.phone || "Telefono non inserito"}</span><p>L’utente modifica direttamente email e telefono dal proprio profilo.</p></div>{error && <div className="form-error span-2">{error}</div>}<div className="modal-actions span-2"><button type="button" onClick={onClose}>Annulla</button><button className="primary" disabled={busy}>{busy ? "Aggiornamento…" : "Aggiorna utente"}</button></div></form></Modal>;
+}
+
 function AdminPanel({ data, refresh, notify }: { data: Bootstrap; refresh: () => Promise<void>; notify: (text: string, tone?: "ok" | "error") => void }) {
-  const [userBusy, setUserBusy] = useState(false); const [templateBusy, setTemplateBusy] = useState(false);
-  async function createUser(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setUserBusy(true); const form = new FormData(event.currentTarget); try { await api("/api/users", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(Object.fromEntries(form.entries())) }); event.currentTarget.reset(); notify("Utente creato. Al primo accesso dovrà cambiare la password temporanea."); await refresh(); } catch (cause) { notify(cause instanceof Error ? cause.message : "Creazione non riuscita.", "error"); } finally { setUserBusy(false); } }
-  async function toggleUser(target: User) { setUserBusy(true); try { await api(`/api/users/${target.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ active: target.active === 0 }) }); notify(target.active === 0 ? "Utente riattivato." : "Utente disattivato e sessioni revocate."); await refresh(); } catch (cause) { notify(cause instanceof Error ? cause.message : "Aggiornamento non riuscito.", "error"); } finally { setUserBusy(false); } }
-  async function uploadTemplate(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setTemplateBusy(true); try { await api("/api/templates", { method: "POST", body: new FormData(event.currentTarget) }); event.currentTarget.reset(); notify("Modello contrattuale archiviato."); await refresh(); } catch (cause) { notify(cause instanceof Error ? cause.message : "Caricamento non riuscito.", "error"); } finally { setTemplateBusy(false); } }
-  return <section className="ops-page"><PageHeading eyebrow="Amministrazione" title="Utenti e modelli" subtitle="Ruoli fissi, isola assegnata e documenti contrattuali versionati." action={<span className="admin-badge">Solo Super Admin</span>} /><div className="admin-grid"><article className="data-card"><div className="card-head"><div><h2>Nuovo utente</h2><p>Sales Manager, Sales o Distributore.</p></div></div><form className="stack-form" onSubmit={createUser}><label>Nome e cognome<input name="name" required /></label><label>Email aziendale<input name="email" type="email" required /></label><label>Password temporanea<input name="temporaryPassword" type="password" required minLength={12} maxLength={256} autoComplete="new-password" /><small>Almeno 12 caratteri. L’utente dovrà cambiarla al primo accesso.</small></label><div className="two-cols"><label>Ruolo<select name="role"><option value="sales">Sales</option><option value="sales_manager">Sales Manager</option><option value="distributor">Distributore</option></select></label><label>Isola<select name="island">{ISLANDS.map((island) => <option key={island}>{island}</option>)}</select></label></div><button className="primary" disabled={userBusy}>{userBusy ? "Creazione…" : "Crea utente"}</button></form></article><article className="data-card"><div className="card-head"><div><h2>Carica modello</h2><p>PDF o DOCX, massimo 8 MB.</p></div></div><form className="stack-form" onSubmit={uploadTemplate}><label>Nome modello<input name="name" required placeholder="Contratto sponsor" /></label><label>Versione<input name="version" required defaultValue="1.0" /></label><label>Documento<input name="file" type="file" accept="application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required /></label><button className="primary" disabled={templateBusy}>{templateBusy ? "Caricamento…" : "Archivia modello"}</button></form></article></div><div className="admin-grid lower"><article className="data-card"><div className="card-head"><div><h2>Utenti autorizzati</h2><p>{data.users.length} account</p></div></div><div className="simple-list">{data.users.map((user) => <div key={user.id}><span className="avatar">{initials(user.name)}</span><div><strong>{user.name}</strong><small>{user.email}</small></div><p>{roleLabels[user.role]}<small>{user.island ?? "Tutte le isole"}</small>{user.role !== "super_admin" && <button className="mini-link" disabled={userBusy} onClick={() => void toggleUser(user)}>{user.active === 0 ? "Riattiva" : "Disattiva"}</button>}</p></div>)}</div></article><article className="data-card"><div className="card-head"><div><h2>Modelli contrattuali</h2><p>{data.templates.length} versioni attive</p></div></div><div className="simple-list">{data.templates.map((template) => <div key={template.id}><span className="file-badge">{template.mime_type.includes("pdf") ? "PDF" : "DOC"}</span><div><strong>{template.name}</strong><small>{template.original_filename}</small></div><p>v{template.version}<button className="mini-link" onClick={() => window.open(`/api/templates/${template.id}/download`, "_blank")}>Scarica</button></p></div>)}{!data.templates.length && <Empty title="Nessun modello" text="Carica i documenti già pronti." />}</div></article></div></section>;
+  const [userBusy, setUserBusy] = useState(false);
+  const [templateBusy, setTemplateBusy] = useState(false);
+  const [newRole, setNewRole] = useState<Role>("sales");
+  const [editing, setEditing] = useState<User | null>(null);
+  const superAdmin = data.user.role === "super_admin";
+  const creatableRoles: Role[] = superAdmin ? ["admin", "sales_manager", "sales", "distributor"] : ["sales_manager", "sales", "distributor"];
+
+  async function createUser(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    setUserBusy(true);
+    try {
+      const values = Object.fromEntries(new FormData(formElement).entries());
+      await api("/api/users", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(values) });
+      formElement.reset();
+      setNewRole("sales");
+      notify("Utente creato. Al primo accesso dovrà cambiare la password temporanea.");
+      await refresh();
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "Creazione non riuscita.", "error");
+    } finally {
+      setUserBusy(false);
+    }
+  }
+
+  async function uploadTemplate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    setTemplateBusy(true);
+    try {
+      await api("/api/templates", { method: "POST", body: new FormData(formElement) });
+      formElement.reset();
+      notify("Modello contrattuale archiviato.");
+      await refresh();
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "Caricamento non riuscito.", "error");
+    } finally {
+      setTemplateBusy(false);
+    }
+  }
+
+  const canEdit = (target: User) => target.role !== "super_admin" && (superAdmin || target.role !== "admin");
+  return <section className="ops-page"><PageHeading eyebrow="Amministrazione" title="Utenti" subtitle="Crea account, assegna ruolo e isola e revoca immediatamente gli accessi." action={<span className="admin-badge">{superAdmin ? "Super Admin" : "Admin operativo"}</span>} /><div className="admin-grid"><article className="data-card"><div className="card-head"><div><h2>Nuovo utente</h2><p>{superAdmin ? "Admin operativo, Sales Manager, Sales o Distributore." : "Sales Manager, Sales o Distributore."}</p></div></div><form className="stack-form" onSubmit={createUser}><label>Nome e cognome<input name="name" required maxLength={120} /></label><label>Email aziendale<input name="email" type="email" required /></label><label>Password temporanea<input name="temporaryPassword" type="password" required minLength={12} maxLength={256} autoComplete="new-password" /><small>Almeno 12 caratteri. Al primo accesso dovrà essere cambiata.</small></label><div className="two-cols"><label>Ruolo<select name="role" value={newRole} onChange={(event) => setNewRole(event.target.value as Role)}>{creatableRoles.map((role) => <option key={role} value={role}>{roleLabels[role]}</option>)}</select></label>{newRole !== "admin" && <label>Isola<select name="island">{ISLANDS.map((island) => <option key={island}>{island}</option>)}</select></label>}</div><button className="primary" disabled={userBusy}>{userBusy ? "Creazione…" : "Crea utente"}</button></form></article>{superAdmin ? <article className="data-card"><div className="card-head"><div><h2>Carica modello</h2><p>PDF o DOCX, massimo 8 MB.</p></div></div><form className="stack-form" onSubmit={uploadTemplate}><label>Nome modello<input name="name" required placeholder="Contratto sponsor" /></label><label>Versione<input name="version" required defaultValue="1.0" /></label><label>Documento<input name="file" type="file" accept="application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required /></label><button className="primary" disabled={templateBusy}>{templateBusy ? "Caricamento…" : "Archivia modello"}</button></form></article> : <article className="data-card permission-card"><div className="card-head"><div><h2>Permessi Admin operativo</h2><p>Gestione quotidiana senza accesso alle configurazioni sensibili.</p></div></div><ul><li>CRM e consegne su tutte le isole</li><li>Crea e gestisce ruoli operativi</li><li>Non crea altri Admin</li><li>Nessun accesso ad audit, listino o commissioni</li></ul></article>}</div><div className={`admin-grid lower ${superAdmin ? "" : "single"}`}><article className="data-card"><div className="card-head"><div><h2>Utenti autorizzati</h2><p>{data.users.length} account · contatti personali modificabili dal profilo</p></div></div><div className="simple-list">{data.users.map((target) => <div key={target.id}><span className="avatar">{initials(target.name)}</span><div><strong>{target.name}</strong><small>{target.email}{target.phone ? ` · ${target.phone}` : ""}</small></div><p>{roleLabels[target.role]}<small>{target.island ?? "Tutte le isole"}{target.active === 0 ? " · Disattivato" : ""}</small>{canEdit(target) && <button className="mini-link" onClick={() => setEditing(target)}>Modifica ruolo e accesso</button>}</p></div>)}</div></article>{superAdmin && <article className="data-card"><div className="card-head"><div><h2>Modelli contrattuali</h2><p>{data.templates.length} versioni attive</p></div></div><div className="simple-list">{data.templates.map((template) => <div key={template.id}><span className="file-badge">{template.mime_type.includes("pdf") ? "PDF" : "DOC"}</span><div><strong>{template.name}</strong><small>{template.original_filename}</small></div><p>v{template.version}<button className="mini-link" onClick={() => window.open(`/api/templates/${template.id}/download`, "_blank")}>Scarica</button></p></div>)}{!data.templates.length && <Empty title="Nessun modello" text="Carica i documenti già pronti." />}</div></article>}</div>{editing && <UserEditModal actor={data.user} target={editing} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); notify("Ruolo, isola e accesso aggiornati. Le sessioni precedenti sono state revocate."); await refresh(); }} />}</section>;
 }
 
 function AuditPanel({ events, emails, refresh, notify }: { events: AuditEvent[]; emails: EmailOutboxItem[]; refresh: () => Promise<void>; notify: (text: string, tone?: "ok" | "error") => void }) {

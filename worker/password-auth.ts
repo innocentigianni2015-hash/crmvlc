@@ -1,7 +1,7 @@
 import { normalizeEmail } from "./authorization.js";
 
 type AuthEnv = Env & { AUTH_SECRET?: string; EMAIL_FROM?: string; SESSION_HOURS?: string };
-type Role = "super_admin" | "sales_manager" | "sales" | "distributor";
+type Role = "super_admin" | "admin" | "sales_manager" | "sales" | "distributor";
 type PasswordUser = {
   id: string;
   email: string;
@@ -70,7 +70,7 @@ export async function createPasswordHash(password: string, authSecret: string): 
   validatePassword(password);
   const saltBytes = crypto.getRandomValues(new Uint8Array(16));
   const material = await passwordKeyMaterial(password, requirePasswordPepper(authSecret));
-  const key = await crypto.subtle.importKey("raw", material, "PBKDF2", false, ["deriveBits"]);
+  const key = await crypto.subtle.importKey("raw", exactArrayBuffer(material), "PBKDF2", false, ["deriveBits"]);
   const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: saltBytes, iterations: PASSWORD_ITERATIONS }, key, 256);
   return {
     hash: bytesToBase64Url(new Uint8Array(bits)),
@@ -271,7 +271,7 @@ async function verifyPassword(password: string, expected: string, storedSalt: st
     const material = peppered
       ? await passwordKeyMaterial(password, requirePasswordPepper(authSecret))
       : encoder.encode(password);
-    const key = await crypto.subtle.importKey("raw", material, "PBKDF2", false, ["deriveBits"]);
+    const key = await crypto.subtle.importKey("raw", exactArrayBuffer(material), "PBKDF2", false, ["deriveBits"]);
     const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: base64UrlToBytes(salt), iterations }, key, 256);
     return timingSafeBytes(new Uint8Array(bits), base64UrlToBytes(expected));
   } catch {
@@ -283,6 +283,12 @@ async function passwordKeyMaterial(password: string, authSecret: string): Promis
   const key = await crypto.subtle.importKey("raw", encoder.encode(authSecret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(`CRMVLC-PASSWORD\n${password}`));
   return new Uint8Array(signature);
+}
+
+function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
 }
 
 function requirePasswordPepper(authSecret: string): string {

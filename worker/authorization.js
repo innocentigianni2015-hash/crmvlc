@@ -6,7 +6,7 @@ export const ISLANDS = Object.freeze([
   "La Palma",
 ]);
 
-export const ROLES = Object.freeze(["super_admin", "sales_manager", "sales", "distributor"]);
+export const ROLES = Object.freeze(["super_admin", "admin", "sales_manager", "sales", "distributor"]);
 
 export function normalizeEmail(value) {
   return String(value ?? "").trim().toLowerCase();
@@ -21,7 +21,7 @@ export function isRole(value) {
 }
 
 export function canReadRecord(user, record) {
-  if (user.role === "super_admin") return true;
+  if (user.role === "super_admin" || user.role === "admin") return true;
   if (user.role === "sales_manager") return Boolean(user.island) && user.island === record.island;
   if (user.role === "sales") return user.id === record.owner_user_id;
   return false;
@@ -36,18 +36,18 @@ export function canCancelSignedContract(user, contract) {
 }
 
 export function recordScope(user) {
-  if (user.role === "super_admin") return { sql: "", values: [] };
+  if (user.role === "super_admin" || user.role === "admin") return { sql: "", values: [] };
   if (user.role === "sales_manager") return { sql: " AND island = ?", values: [user.island] };
   if (user.role === "sales") return { sql: " AND owner_user_id = ?", values: [user.id] };
   return { sql: " AND 1 = 0", values: [] };
 }
 
 export function canManageDeliveries(user) {
-  return user.role === "super_admin" || user.role === "sales_manager";
+  return user.role === "super_admin" || user.role === "admin" || user.role === "sales_manager";
 }
 
 export function canReadDelivery(user, delivery) {
-  if (user.role === "super_admin") return true;
+  if (user.role === "super_admin" || user.role === "admin") return true;
   if (user.role === "sales_manager") return Boolean(user.island) && user.island === delivery.island;
   if (user.role === "distributor") return user.id === delivery.distributor_user_id;
   return false;
@@ -58,7 +58,7 @@ export function canWriteDelivery(user, delivery) {
 }
 
 export function deliveryScope(user) {
-  if (user.role === "super_admin") return { sql: "", values: [] };
+  if (user.role === "super_admin" || user.role === "admin") return { sql: "", values: [] };
   if (user.role === "sales_manager") return { sql: " AND d.island = ?", values: [user.island] };
   if (user.role === "distributor") return { sql: " AND d.distributor_user_id = ?", values: [user.id] };
   return { sql: " AND 1 = 0", values: [] };
@@ -78,4 +78,15 @@ export function canCreateQuote(user) {
 
 export function canApplyQuoteDiscount(user) {
   return user.role === "super_admin";
+}
+
+export function canCreateUserWithRole(user, role) {
+  if (user.role === "super_admin") return role !== "super_admin" && isRole(role);
+  return user.role === "admin" && ["sales_manager", "sales", "distributor"].includes(role);
+}
+
+export function canUpdateUserRole(user, targetRole, nextRole) {
+  if (targetRole === "super_admin" || nextRole === "super_admin" || !isRole(nextRole)) return false;
+  if (user.role === "super_admin") return true;
+  return user.role === "admin" && targetRole !== "admin" && ["sales_manager", "sales", "distributor"].includes(nextRole);
 }

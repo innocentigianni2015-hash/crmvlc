@@ -142,6 +142,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify }: {
       }
       if (queued) {
         await queuePhotoAudit({
+          userId: user.id,
           deliveryId,
           photo,
           filename: photo.name,
@@ -313,7 +314,7 @@ function GeoAuditPanel({ data, user, clients, deliveries, busy, run, submitPhoto
         <form onSubmit={submitPhotoAudit}>
           <select name="deliveryId" required><option value="">Seleziona consegna</option>{deliveries.map((delivery) => <option key={delivery.id} value={delivery.id}>{delivery.client_company ?? delivery.id} · {delivery.island}</option>)}</select>
           <input name="photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" required />
-          <p className="form-microcopy">Foto, coordinate e orario vengono acquisiti insieme. Senza rete restano cifrati dal sistema del telefono e sono inviati alla riapertura dell’app.</p>
+          <p className="form-microcopy">Foto, coordinate e orario vengono acquisiti insieme. Senza rete restano protetti nell’archivio locale del telefono e sono inviati alla riapertura dell’app.</p>
           <button className="primary" disabled={busy || !deliveries.length}>Scatta foto e registra consegna</button>
         </form>
       </ActionCard>

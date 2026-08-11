@@ -211,6 +211,23 @@ export const priceItems = sqliteTable("price_items", {
   index("price_items_list_idx").on(table.priceListId, table.active, table.sortOrder),
 ]);
 
+export const discountCampaigns = sqliteTable("discount_campaigns", {
+  id: text("id").primaryKey(),
+  title: text("title").notNull(),
+  message: text("message").notNull(),
+  discountBps: integer("discount_bps").notNull(),
+  startsOn: text("starts_on").notNull(),
+  endsOn: text("ends_on").notNull(),
+  active: integer("active", { mode: "boolean" }).notNull().default(true),
+  createdBy: text("created_by").notNull().references(() => users.id),
+  createdAt: text("created_at").notNull(),
+  deactivatedAt: text("deactivated_at"),
+  deactivatedBy: text("deactivated_by").references(() => users.id),
+}, (table) => [
+  index("discount_campaigns_validity_idx").on(table.active, table.startsOn, table.endsOn),
+  index("discount_campaigns_created_idx").on(table.createdAt),
+]);
+
 export const quoteCounters = sqliteTable("quote_counters", {
   year: integer("year").primaryKey(),
   nextNumber: integer("next_number").notNull(),
@@ -234,6 +251,7 @@ export const quotes = sqliteTable("quotes", {
   taxRateBps: integer("tax_rate_bps").notNull().default(700),
   months: integer("months").notNull(),
   subtotalCents: integer("subtotal_cents").notNull(),
+  discountCampaignId: text("discount_campaign_id").references(() => discountCampaigns.id),
   discountBps: integer("discount_bps").notNull().default(0),
   discountReason: text("discount_reason"),
   discountCents: integer("discount_cents").notNull().default(0),
@@ -253,6 +271,7 @@ export const quotes = sqliteTable("quotes", {
   index("quotes_owner_idx").on(table.ownerUserId),
   index("quotes_island_idx").on(table.island),
   index("quotes_client_idx").on(table.clientId),
+  index("quotes_discount_campaign_idx").on(table.discountCampaignId),
   index("quotes_status_idx").on(table.status),
   index("quotes_created_idx").on(table.createdAt),
 ]);
@@ -269,6 +288,24 @@ export const quoteItems = sqliteTable("quote_items", {
   months: integer("months").notNull(),
   lineSubtotalCents: integer("line_subtotal_cents").notNull(),
 }, (table) => [index("quote_items_quote_idx").on(table.quoteId)]);
+
+export const podcastAppointments = sqliteTable("podcast_appointments", {
+  id: text("id").primaryKey(),
+  guestName: text("guest_name").notNull(),
+  topic: text("topic").notNull(),
+  interviewerUserId: text("interviewer_user_id").notNull().references(() => users.id),
+  startsAt: text("starts_at").notNull(),
+  endsAt: text("ends_at").notNull(),
+  notes: text("notes"),
+  status: text("status", { enum: ["scheduled", "cancelled"] }).notNull().default("scheduled"),
+  version: integer("version").notNull().default(1),
+  createdBy: text("created_by").notNull().references(() => users.id),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  index("podcast_appointments_interviewer_idx").on(table.interviewerUserId, table.startsAt, table.endsAt),
+  index("podcast_appointments_calendar_idx").on(table.status, table.startsAt),
+]);
 
 export const sponsors = sqliteTable("sponsors", {
   id: text("id").primaryKey(),

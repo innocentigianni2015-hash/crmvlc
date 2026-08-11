@@ -803,7 +803,7 @@ async function createUser(request: Request, user: UserRow, env: RuntimeEnv): Pro
   }
   if (!isIsland(island)) throw new ApiError(400, "invalid_island", "Assegna una delle cinque isole.");
   if (temporaryPassword.length < 12 || temporaryPassword.length > 256) throw new ApiError(400, "weak_password", "La password temporanea deve contenere almeno 12 caratteri.");
-  const credentials = await createPasswordHash(temporaryPassword);
+  const credentials = await createPasswordHash(temporaryPassword, env.AUTH_SECRET ?? "");
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   try {

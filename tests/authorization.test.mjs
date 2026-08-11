@@ -6,10 +6,13 @@ import {
   canCreateQuote,
   canCreateUserWithRole,
   canManageDeliveries,
+  canManagePodcastCalendar,
   canManagePriceList,
   canReadDelivery,
+  canReadPodcastCalendar,
   canReadPriceList,
   canReadRecord,
+  canUseDiscountCampaign,
   canUpdateUserRole,
   deliveryScope,
   isIsland,
@@ -17,6 +20,7 @@ import {
   recordScope,
 } from "../worker/authorization.js";
 import { createImpersonationToken, verifyImpersonationToken } from "../worker/impersonation.ts";
+import { canaryDateKey, canaryLocalToIso, oneHourAfter } from "../worker/podcast-scheduling.ts";
 
 const client = { island: "Tenerife", owner_user_id: "agent-1" };
 
@@ -99,6 +103,31 @@ test("restricts quote creation and discounts by role", () => {
   assert.equal(canApplyQuoteDiscount({ role: "admin" }), false);
   assert.equal(canApplyQuoteDiscount({ role: "sales_manager" }), false);
   assert.equal(canApplyQuoteDiscount({ role: "sales" }), false);
+  assert.equal(canUseDiscountCampaign({ role: "super_admin" }), true);
+  assert.equal(canUseDiscountCampaign({ role: "sales_manager" }), true);
+  assert.equal(canUseDiscountCampaign({ role: "sales" }), true);
+  assert.equal(canUseDiscountCampaign({ role: "admin" }), false);
+  assert.equal(canUseDiscountCampaign({ role: "distributor" }), false);
+});
+
+test("separates podcast calendar visibility from management", () => {
+  assert.equal(canReadPodcastCalendar({ role: "super_admin" }), true);
+  assert.equal(canReadPodcastCalendar({ role: "admin" }), true);
+  assert.equal(canReadPodcastCalendar({ role: "sales_manager" }), true);
+  assert.equal(canReadPodcastCalendar({ role: "sales" }), true);
+  assert.equal(canReadPodcastCalendar({ role: "distributor" }), false);
+  assert.equal(canManagePodcastCalendar({ role: "super_admin" }), true);
+  assert.equal(canManagePodcastCalendar({ role: "admin" }), true);
+  assert.equal(canManagePodcastCalendar({ role: "sales_manager" }), false);
+  assert.equal(canManagePodcastCalendar({ role: "sales" }), false);
+});
+
+test("converts Canary podcast slots to UTC and keeps one-hour duration", () => {
+  assert.equal(canaryLocalToIso("2026-01-15", "10:00"), "2026-01-15T10:00:00.000Z");
+  assert.equal(canaryLocalToIso("2026-08-15", "10:00"), "2026-08-15T09:00:00.000Z");
+  assert.equal(canaryLocalToIso("2026-03-29", "01:30"), null);
+  assert.equal(oneHourAfter("2026-08-15T09:00:00.000Z"), "2026-08-15T10:00:00.000Z");
+  assert.equal(canaryDateKey(new Date("2026-08-15T23:30:00.000Z")), "2026-08-16");
 });
 
 test("keeps privileged user management under the super admin", () => {

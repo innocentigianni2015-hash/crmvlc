@@ -11,7 +11,7 @@ export type OperationsUser = {
   id: string;
   email: string;
   name: string;
-  role: "super_admin" | "sales_manager" | "sales" | "distributor";
+  role: "super_admin" | "admin" | "sales_manager" | "sales" | "distributor";
   island: string | null;
   active: number;
 };
@@ -106,7 +106,7 @@ export async function handleOperationsApi(
 async function operationsSnapshot(env: RuntimeEnv, user: OperationsUser): Promise<Response> {
   const sponsorScope = scopeFor(user, "s.island", "s.owner_user_id");
   const islandScope = scopeFor(user, "x.island", null);
-  const financeScope = user.role === "super_admin"
+  const financeScope = isGlobalOperator(user)
     ? { sql: "", values: [] as string[] }
     : user.role === "sales_manager"
       ? { sql: " AND u.island = ?", values: [String(user.island)] }
@@ -145,14 +145,14 @@ async function operationsSnapshot(env: RuntimeEnv, user: OperationsUser): Promis
     `SELECT x.id, x.client_id, c.company_name AS client_company, x.name, x.island, x.address, x.latitude_e6, x.longitude_e6, x.capacity, x.stock, x.public_visible, x.updated_at FROM distribution_points x LEFT JOIN clients c ON c.id = x.client_id WHERE 1 = 1${islandScope.sql} ORDER BY x.island, x.stock, x.name LIMIT 300`,
   ).bind(...islandScope.values).all()).results;
 
-  const auditScope = user.role === "super_admin" ? { sql: "", values: [] as string[] }
+  const auditScope = isGlobalOperator(user) ? { sql: "", values: [] as string[] }
     : user.role === "sales_manager" ? { sql: " AND p.island = ?", values: [String(user.island)] }
       : { sql: " AND p.distributor_user_id = ?", values: [user.id] };
   const photoAudits = user.role === "sales" ? [] : (await env.DB.prepare(
     `SELECT p.id, p.delivery_id, p.distributor_user_id, u.name AS distributor_name, p.island, p.sha256, p.latitude_e6, p.longitude_e6, p.geofence_distance_m, p.status, p.quality_score, p.watermark_text, p.created_at, p.reviewed_at FROM photo_audits p JOIN users u ON u.id = p.distributor_user_id WHERE 1 = 1${auditScope.sql} ORDER BY p.created_at DESC LIMIT 150`,
   ).bind(...auditScope.values).all()).results;
 
-  const salesScope = user.role === "super_admin" ? { sql: "", values: [] as string[] }
+  const salesScope = isGlobalOperator(user) ? { sql: "", values: [] as string[] }
     : user.role === "sales_manager" ? { sql: " AND x.island = ?", values: [String(user.island)] }
       : { sql: " AND x.user_id = ?", values: [user.id] };
   const salesCheckins = user.role === "distributor" ? [] : (await env.DB.prepare(
@@ -163,8 +163,8 @@ async function operationsSnapshot(env: RuntimeEnv, user: OperationsUser): Promis
   ).bind(...salesScope.values).all()).results;
 
   const leaderboard = user.role === "distributor" ? [] : (await env.DB.prepare(
-    `SELECT u.id AS user_id, u.name AS user_name, u.island, COUNT(CASE WHEN c.stage = 'won' THEN 1 END) AS won_count, COALESCE(SUM(CASE WHEN c.stage = 'won' THEN c.value_cents ELSE 0 END), 0) AS won_value_cents FROM users u LEFT JOIN clients c ON c.owner_user_id = u.id AND c.archived_at IS NULL WHERE u.active = 1 AND u.role IN ('sales_manager','sales')${user.role === "super_admin" ? "" : user.role === "sales_manager" ? " AND u.island = ?" : " AND u.id = ?"} GROUP BY u.id, u.name, u.island ORDER BY won_value_cents DESC, won_count DESC LIMIT 30`,
-  ).bind(...(user.role === "super_admin" ? [] : user.role === "sales_manager" ? [String(user.island)] : [user.id])).all()).results;
+    `SELECT u.id AS user_id, u.name AS user_name, u.island, COUNT(CASE WHEN c.stage = 'won' THEN 1 END) AS won_count, COALESCE(SUM(CASE WHEN c.stage = 'won' THEN c.value_cents ELSE 0 END), 0) AS won_value_cents FROM users u LEFT JOIN clients c ON c.owner_user_id = u.id AND c.archived_at IS NULL WHERE u.active = 1 AND u.role IN ('sales_manager','sales')${isGlobalOperator(user) ? "" : user.role === "sales_manager" ? " AND u.island = ?" : " AND u.id = ?"} GROUP BY u.id, u.name, u.island ORDER BY won_value_cents DESC, won_count DESC LIMIT 30`,
+  ).bind(...(isGlobalOperator(user) ? [] : user.role === "sales_manager" ? [String(user.island)] : [user.id])).all()).results;
 
   const bundles = user.role === "distributor" ? [] : (await env.DB.prepare(
     "SELECT id, code, name, description, monthly_price_cents, active FROM bundles WHERE active = 1 ORDER BY monthly_price_cents",
@@ -212,7 +212,7 @@ async function createSponsor(request: Request, env: RuntimeEnv, user: Operations
   const body = await readJson<Record<string, unknown>>(request);
   const name = clean(body.name, 120);
   const requestedIsland = clean(body.island, 40);
-  const island = user.role === "super_admin" ? requestedIsland : String(user.island ?? "");
+  const island = isGlobalOperator(user) ? requestedIsland : String(user.island ?? "");
   const category = clean(body.category, 80);
   const offerTitle = clean(body.offerTitle, 160);
   const discountText = clean(body.discountText, 160);
@@ -240,7 +240,7 @@ async function createVipMember(request: Request, env: RuntimeEnv, user: Operatio
   const name = clean(body.name, 120);
   const phone = normalizePhone(body.phone);
   const requestedIsland = clean(body.island, 40);
-  const island = user.role === "super_admin" ? requestedIsland : String(user.island ?? "");
+  const island = isGlobalOperator(user) ? requestedIsland : String(user.island ?? "");
   if (!name || phone.length < 8 || !isIsland(island) || body.consent !== true) {
     throw new OperationsError(400, "invalid_member", "Nome, WhatsApp, isola e consenso sono obbligatori.");
   }
@@ -358,7 +358,7 @@ async function createInventorySlot(request: Request, env: RuntimeEnv, user: Oper
   requireManager(user);
   const body = await readJson<Record<string, unknown>>(request);
   const requestedIsland = clean(body.island, 40);
-  const island = user.role === "super_admin" ? requestedIsland : String(user.island ?? "");
+  const island = isGlobalOperator(user) ? requestedIsland : String(user.island ?? "");
   const issueLabel = clean(body.issueLabel, 80);
   const slotCode = clean(body.slotCode, 40).toUpperCase();
   const slotName = clean(body.slotName, 120);
@@ -392,7 +392,7 @@ async function createDistributionPoint(request: Request, env: RuntimeEnv, user: 
   requireManager(user);
   const body = await readJson<Record<string, unknown>>(request);
   const requestedIsland = clean(body.island, 40);
-  const island = user.role === "super_admin" ? requestedIsland : String(user.island ?? "");
+  const island = isGlobalOperator(user) ? requestedIsland : String(user.island ?? "");
   const name = clean(body.name, 120);
   const address = clean(body.address, 260);
   const latitude = requiredCoordinate(body.latitude, -90, 90);
@@ -411,7 +411,7 @@ async function createDistributionPoint(request: Request, env: RuntimeEnv, user: 
 }
 
 async function updateDistributionStock(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
-  if (!["super_admin", "sales_manager", "distributor"].includes(user.role)) throw new OperationsError(403, "not_allowed", "Non puoi modificare le giacenze.");
+  if (!["super_admin", "admin", "sales_manager", "distributor"].includes(user.role)) throw new OperationsError(403, "not_allowed", "Non puoi modificare le giacenze.");
   const body = await readJson<Record<string, unknown>>(request);
   const id = clean(body.id, 80);
   const stock = nonNegativeInt(body.stock, 1_000_000);
@@ -425,7 +425,7 @@ async function updateDistributionStock(request: Request, env: RuntimeEnv, user: 
 
 async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
   if (!env.BUCKET) throw new OperationsError(503, "storage_missing", "Archivio fotografico non configurato.");
-  if (!["super_admin", "sales_manager", "distributor"].includes(user.role)) throw new OperationsError(403, "not_allowed", "Non puoi caricare verifiche fotografiche.");
+  if (!["super_admin", "admin", "sales_manager", "distributor"].includes(user.role)) throw new OperationsError(403, "not_allowed", "Non puoi caricare verifiche fotografiche.");
   const length = Number(request.headers.get("content-length") ?? 0);
   if (length > MAX_PHOTO_BYTES + 256_000) throw new OperationsError(413, "photo_too_large", "La foto supera 8 MB.");
   if (!(request.headers.get("content-type") ?? "").includes("multipart/form-data")) throw new OperationsError(415, "form_required", "Invia una foto con coordinate.");
@@ -511,7 +511,7 @@ async function completeSalesTask(request: Request, env: RuntimeEnv, user: Operat
   const body = await readJson<Record<string, unknown>>(request);
   const id = clean(body.id, 80);
   const task = await env.DB.prepare("SELECT id, user_id, island, status FROM sales_tasks WHERE id = ? LIMIT 1").bind(id).first<{ id: string; user_id: string; island: string; status: string }>();
-  if (!task || task.status !== "open" || (task.user_id !== user.id && !(["super_admin", "sales_manager"].includes(user.role) && canAccessIsland(user, task.island)))) {
+  if (!task || task.status !== "open" || (task.user_id !== user.id && !(["super_admin", "admin", "sales_manager"].includes(user.role) && canAccessIsland(user, task.island)))) {
     throw new OperationsError(404, "task_not_found", "Attività non disponibile.");
   }
   const now = new Date().toISOString();
@@ -521,7 +521,7 @@ async function completeSalesTask(request: Request, env: RuntimeEnv, user: Operat
 }
 
 function scopeFor(user: OperationsUser, islandColumn: string, ownerColumn: string | null): { sql: string; values: string[] } {
-  if (user.role === "super_admin") return { sql: "", values: [] };
+  if (isGlobalOperator(user)) return { sql: "", values: [] };
   if (user.role === "sales_manager" || user.role === "distributor" || !ownerColumn) return { sql: ` AND ${islandColumn} = ?`, values: [String(user.island)] };
   return { sql: ` AND ${ownerColumn} = ?`, values: [user.id] };
 }
@@ -531,11 +531,15 @@ function requireSuperAdmin(user: OperationsUser): void {
 }
 
 function requireManager(user: OperationsUser): void {
-  if (!["super_admin", "sales_manager"].includes(user.role)) throw new OperationsError(403, "manager_required", "Operazione riservata al Sales Manager o al Super Admin.");
+  if (!["super_admin", "admin", "sales_manager"].includes(user.role)) throw new OperationsError(403, "manager_required", "Operazione riservata alla gestione operativa.");
 }
 
 function canAccessIsland(user: OperationsUser, island: string): boolean {
-  return user.role === "super_admin" || Boolean(user.island && user.island === island);
+  return isGlobalOperator(user) || Boolean(user.island && user.island === island);
+}
+
+function isGlobalOperator(user: OperationsUser): boolean {
+  return user.role === "super_admin" || user.role === "admin";
 }
 
 async function assertClientScope(env: RuntimeEnv, user: OperationsUser, clientId: string, island: string): Promise<void> {

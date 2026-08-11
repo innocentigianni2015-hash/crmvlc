@@ -1,4 +1,4 @@
-import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { AnySQLiteColumn, index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export const users = sqliteTable("users", {
   id: text("id").primaryKey(),
@@ -7,6 +7,7 @@ export const users = sqliteTable("users", {
   phone: text("phone"),
   role: text("role", { enum: ["super_admin", "admin", "sales_manager", "sales", "distributor"] }).notNull(),
   island: text("island"),
+  salesManagerId: text("sales_manager_id").references((): AnySQLiteColumn => users.id),
   active: integer("active", { mode: "boolean" }).notNull().default(true),
   passwordHash: text("password_hash"),
   passwordSalt: text("password_salt"),
@@ -16,7 +17,11 @@ export const users = sqliteTable("users", {
   totpSecretEncrypted: text("totp_secret_encrypted"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
-}, (table) => [uniqueIndex("users_email_unique").on(table.email), index("users_role_idx").on(table.role)]);
+}, (table) => [
+  uniqueIndex("users_email_unique").on(table.email),
+  index("users_role_idx").on(table.role),
+  index("users_sales_manager_idx").on(table.salesManagerId),
+]);
 
 export const sessions = sqliteTable("sessions", {
   id: text("id").primaryKey(),

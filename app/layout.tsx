@@ -6,6 +6,7 @@ export const metadata: Metadata = {
   description: "Il sistema operativo commerciale di Vivi le Canarie.",
   applicationName: "CRMVLC",
   manifest: "/manifest.webmanifest",
+  icons: { icon: "/favicon.svg", apple: "/icons/apple-touch-icon.png" },
   appleWebApp: { capable: true, statusBarStyle: "black-translucent", title: "CRMVLC" },
   other: { "codex-preview": "development" },
 };

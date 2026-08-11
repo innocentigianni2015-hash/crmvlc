@@ -3,7 +3,7 @@
 import { FormEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect, useRef, useState } from "react";
 import QRCode from "qrcode";
 import { OperationsHub } from "./operations-hub";
-import { clearOfflineData, clearOfflineSnapshots, loadOfflineSnapshot, pendingOutboxCount, saveOfflineSnapshot, syncPhotoAuditOutbox } from "./offline";
+import { clearOfflineSnapshots, loadOfflineSnapshot, pendingOutboxCount, saveOfflineSnapshot, syncPhotoAuditOutbox } from "./offline";
 
 type Role = "super_admin" | "sales_manager" | "sales" | "distributor";
 type InstallPromptEvent = Event & { prompt(): Promise<void>; userChoice: Promise<{ outcome: "accepted" | "dismissed" }> };
@@ -195,8 +195,16 @@ export default function Home() {
     };
   }, []);
   useEffect(() => {
-    const refreshPending = () => { void pendingOutboxCount().then(setPendingCount).catch(() => setPendingCount(0)); };
+    const userId = data?.user.id;
+    const refreshPending = () => {
+      if (!userId) {
+        setPendingCount(0);
+        return;
+      }
+      void pendingOutboxCount(userId).then(setPendingCount).catch(() => setPendingCount(0));
+    };
     const syncPending = () => {
+      if (!userId) return;
       void (async () => {
         if ("serviceWorker" in navigator) {
           const registration = await navigator.serviceWorker.ready;
@@ -208,7 +216,7 @@ export default function Home() {
             return;
           }
         }
-        const result = await syncPhotoAuditOutbox();
+        const result = await syncPhotoAuditOutbox(userId);
         setPendingCount(result.pending);
         if (result.sent > 0) setNotice({ tone: "ok", text: `${result.sent} acquisizion${result.sent === 1 ? "e sincronizzata" : "i sincronizzate"}.` });
       })().catch(() => refreshPending());
@@ -228,7 +236,7 @@ export default function Home() {
       window.removeEventListener("crmvlc:outbox-changed", refreshPending);
       navigator.serviceWorker?.removeEventListener("message", workerMessage);
     };
-  }, []);
+  }, [data?.user.id]);
   useEffect(() => {
     if (!notice) return;
     const timer = window.setTimeout(() => setNotice(null), 4200);
@@ -247,10 +255,9 @@ export default function Home() {
   const openPipeline = data.clients.filter((client) => !["won", "lost"].includes(client.stage)).reduce((sum, client) => sum + client.value_cents, 0);
 
   async function logout() {
-    if (pendingCount > 0 && !window.confirm("Ci sono acquisizioni di consegna non ancora sincronizzate. Uscendo verranno eliminate. Continuare?")) return;
     if (!offlineMode) await api("/api/auth/logout", { method: "POST" });
     window.localStorage.removeItem(BACKGROUND_AT_KEY);
-    await clearOfflineData();
+    await clearOfflineSnapshots();
     setData(null);
     setAuthRequired(true);
     setOfflineMode(false);

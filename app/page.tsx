@@ -3,10 +3,12 @@
 import { FormEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect, useRef, useState } from "react";
 import QRCode from "qrcode";
 import { OperationsHub } from "./operations-hub";
-import { clearOfflineData, loadOfflineSnapshot, pendingOutboxCount, saveOfflineSnapshot, syncPhotoAuditOutbox } from "./offline";
+import { clearOfflineData, clearOfflineSnapshots, loadOfflineSnapshot, pendingOutboxCount, saveOfflineSnapshot, syncPhotoAuditOutbox } from "./offline";
 
 type Role = "super_admin" | "sales_manager" | "sales" | "distributor";
 type InstallPromptEvent = Event & { prompt(): Promise<void>; userChoice: Promise<{ outcome: "accepted" | "dismissed" }> };
+const BACKGROUND_LOCK_MS = 60 * 60 * 1000;
+const BACKGROUND_AT_KEY = "crmvlc:backgrounded-at";
 type User = { id: string; email: string; name: string; role: Role; island: string | null; active?: number };
 type Client = {
   id: string; company_name: string; contact_name: string; email: string; phone: string | null;
@@ -142,6 +144,35 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [refresh]);
   useEffect(() => {
+    const lockIfExpired = async () => {
+      const backgroundedAt = Number(window.localStorage.getItem(BACKGROUND_AT_KEY) ?? 0);
+      if (!backgroundedAt) return;
+      window.localStorage.removeItem(BACKGROUND_AT_KEY);
+      if (Date.now() - backgroundedAt < BACKGROUND_LOCK_MS) return;
+
+      await clearOfflineSnapshots().catch(() => undefined);
+      if (navigator.onLine) {
+        await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" }).catch(() => undefined);
+      }
+      setData(null);
+      setAuthRequired(true);
+      setOfflineMode(false);
+      setOfflineSavedAt(null);
+      setNotice({ tone: "error", text: "Accesso bloccato dopo 1 ora in background. Rientra con email e password." });
+    };
+    const visibilityChanged = () => {
+      if (document.visibilityState === "hidden") {
+        window.localStorage.setItem(BACKGROUND_AT_KEY, String(Date.now()));
+      } else {
+        void lockIfExpired();
+      }
+    };
+
+    void lockIfExpired();
+    document.addEventListener("visibilitychange", visibilityChanged);
+    return () => document.removeEventListener("visibilitychange", visibilityChanged);
+  }, []);
+  useEffect(() => {
     if ("serviceWorker" in navigator) void navigator.serviceWorker.register("/sw.js");
     const media = window.matchMedia("(display-mode: standalone)");
     const updateStandalone = () => setStandalone(media.matches || Boolean((navigator as Navigator & { standalone?: boolean }).standalone));
@@ -166,18 +197,36 @@ export default function Home() {
   useEffect(() => {
     const refreshPending = () => { void pendingOutboxCount().then(setPendingCount).catch(() => setPendingCount(0)); };
     const syncPending = () => {
-      void syncPhotoAuditOutbox().then((result) => {
+      void (async () => {
+        if ("serviceWorker" in navigator) {
+          const registration = await navigator.serviceWorker.ready;
+          const sync = (registration as ServiceWorkerRegistration & {
+            sync?: { register(tag: string): Promise<void> };
+          }).sync;
+          if (sync) {
+            await sync.register("crmvlc-photo-outbox");
+            return;
+          }
+        }
+        const result = await syncPhotoAuditOutbox();
         setPendingCount(result.pending);
         if (result.sent > 0) setNotice({ tone: "ok", text: `${result.sent} acquisizion${result.sent === 1 ? "e sincronizzata" : "i sincronizzate"}.` });
-      }).catch(() => refreshPending());
+      })().catch(() => refreshPending());
+    };
+    const workerMessage = (event: MessageEvent<{ type?: string; sent?: number }>) => {
+      if (event.data?.type !== "crmvlc:outbox-synced") return;
+      refreshPending();
+      if (event.data.sent) setNotice({ tone: "ok", text: `${event.data.sent} acquisizion${event.data.sent === 1 ? "e sincronizzata" : "i sincronizzate"}.` });
     };
     refreshPending();
     if (navigator.onLine) syncPending();
     window.addEventListener("online", syncPending);
     window.addEventListener("crmvlc:outbox-changed", refreshPending);
+    navigator.serviceWorker?.addEventListener("message", workerMessage);
     return () => {
       window.removeEventListener("online", syncPending);
       window.removeEventListener("crmvlc:outbox-changed", refreshPending);
+      navigator.serviceWorker?.removeEventListener("message", workerMessage);
     };
   }, []);
   useEffect(() => {
@@ -198,7 +247,9 @@ export default function Home() {
   const openPipeline = data.clients.filter((client) => !["won", "lost"].includes(client.stage)).reduce((sum, client) => sum + client.value_cents, 0);
 
   async function logout() {
+    if (pendingCount > 0 && !window.confirm("Ci sono acquisizioni di consegna non ancora sincronizzate. Uscendo verranno eliminate. Continuare?")) return;
     if (!offlineMode) await api("/api/auth/logout", { method: "POST" });
+    window.localStorage.removeItem(BACKGROUND_AT_KEY);
     await clearOfflineData();
     setData(null);
     setAuthRequired(true);

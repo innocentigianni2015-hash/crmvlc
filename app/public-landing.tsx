@@ -3,8 +3,8 @@
 /* eslint-disable @next/next/no-img-element */
 
 import { FormEvent, useMemo, useState } from "react";
+import { platformOwnership, usePlatformLanguage } from "./i18n";
 
-type Locale = "it" | "es";
 type Service = "magazine" | "podcast" | "both";
 
 const islands = [
@@ -31,8 +31,8 @@ const copy = {
     secondaryCta: "Scopri le opportunità",
     proofOne: "5 isole",
     proofOneText: "una rete commerciale locale",
-    proofTwo: "IT · ES",
-    proofTwoText: "comunicazione bilingue",
+    proofTwo: "IT · ES · EN",
+    proofTwoText: "comunicazione trilingue",
     proofThree: "Rivista + video",
     proofThreeText: "una storia, più canali",
     featureLabel: "Visibilità che parte dal territorio",
@@ -112,8 +112,8 @@ const copy = {
     secondaryCta: "Ver oportunidades",
     proofOne: "5 islas",
     proofOneText: "una red comercial local",
-    proofTwo: "IT · ES",
-    proofTwoText: "comunicación bilingüe",
+    proofTwo: "IT · ES · EN",
+    proofTwoText: "comunicación trilingüe",
     proofThree: "Revista + vídeo",
     proofThreeText: "una historia, más canales",
     featureLabel: "Visibilidad desde el territorio",
@@ -178,10 +178,73 @@ const copy = {
     footerText: "Medios, territorio y empresas en Canarias.",
     privacy: "Privacidad",
   },
+  en: {
+    navServices: "Opportunities",
+    navMethod: "How it works",
+    navContact: "Contact",
+    crm: "CRM access",
+    eyebrow: "Vivi Le Canarie · Media for local businesses",
+    titleTop: "Your brand,",
+    titleAccent: "in front of the people",
+    titleBottom: "who live in the Canary Islands.",
+    intro: "We tell the stories of businesses, professionals and places through Vivi Le Canarie magazine and memorable podcast formats.",
+    primaryCta: "Request a call",
+    secondaryCta: "View opportunities",
+    proofOne: "5 islands",
+    proofOneText: "one local sales network",
+    proofTwo: "IT · ES · EN",
+    proofTwoText: "trilingual communication",
+    proofThree: "Magazine + video",
+    proofThreeText: "one story, more channels",
+    featureLabel: "Visibility rooted in the territory",
+    featureTitle: "We do not sell space. We build attention.",
+    featureText: "We start with your audience, island and business goal. That is why there is no standard price: first we understand what the campaign needs to achieve.",
+    magazineTag: "01 · Magazine",
+    magazineTitle: "Magazine advertising",
+    magazineText: "Editorial and advertising presence for businesses that want to be recognised by residents, visitors and Italian communities in the Canary Islands.",
+    magazinePoints: ["A campaign tailored to the island and audience", "Support defining the message", "Option to integrate content and video"],
+    magazineCta: "Discuss the magazine",
+    podcastTag: "02 · Podcast",
+    podcastTitle: "Put your story in front of the cameras",
+    podcastText: "From quick content to a complete story, we choose the format that turns an interview into a genuine point of contact.",
+    podcastFormats: ["1 minute · 1 camera", "3–5 minutes · 3 cameras and editing", "Special format with MarcoLifestyle"],
+    podcastCta: "Discuss the podcast",
+    methodLabel: "The method",
+    methodTitle: "One request. The right contact. No runaround.",
+    steps: [["01", "Choose your goal", "Magazine, podcast or an integrated campaign."], ["02", "Tell us your island", "The request goes to the local sales team."], ["03", "Discuss the project", "An adviser calls you and builds the proposal with you."]],
+    formKicker: "Request a call",
+    formTitle: "Tell us where you want to go.",
+    formText: "No automatic quote and no imposed package. We contact you to understand your objective, audience and territory.",
+    company: "Company",
+    contact: "Full name",
+    phone: "Phone",
+    email: "Email",
+    city: "City",
+    island: "Island",
+    chooseIsland: "Select the island",
+    service: "What would you like to discuss?",
+    magazineOption: "Magazine advertising",
+    podcastOption: "Podcast package",
+    bothOption: "Both",
+    notes: "What would you like to achieve? (optional)",
+    notesPlaceholder: "Briefly describe your objective...",
+    privacyBefore: "I consent to the processing of my data so that I can be contacted. I have read the ",
+    privacyLink: "privacy policy",
+    submit: "Send request",
+    submitting: "Sending…",
+    successTitle: "Request received.",
+    successText: "The sales team for your island will manage your request and contact you.",
+    another: "Send another request",
+    error: "We could not register your request. Please try again shortly.",
+    contactDirect: "Would you rather message us now?",
+    whatsapp: "WhatsApp +34 602 576 044",
+    footerText: "Media, territory and businesses in the Canary Islands.",
+    privacy: "Privacy",
+  },
 } as const;
 
 export default function PublicLanding() {
-  const [locale, setLocale] = useState<Locale>("it");
+  const { locale, setLocale } = usePlatformLanguage();
   const [service, setService] = useState<Service>("magazine");
   const [status, setStatus] = useState<"idle" | "submitting" | "success" | "error">("idle");
   const t = copy[locale];
@@ -230,6 +293,8 @@ export default function PublicLanding() {
             <button className={locale === "it" ? "active" : ""} onClick={() => setLocale("it")} aria-pressed={locale === "it"}>IT</button>
             <span>/</span>
             <button className={locale === "es" ? "active" : ""} onClick={() => setLocale("es")} aria-pressed={locale === "es"}>ES</button>
+            <span>/</span>
+            <button className={locale === "en" ? "active" : ""} onClick={() => setLocale("en")} aria-pressed={locale === "en"}>EN</button>
           </div>
           <a className="crm-link" href="/login">{t.crm}</a>
         </div>
@@ -363,6 +428,7 @@ export default function PublicLanding() {
       <footer>
         <div className="footer-brand"><img src="/brand/viv-le-canarie-icon.svg" alt="Vivi Le Canarie" /><p>{t.footerText}</p></div>
         <div className="footer-links"><a href="/privacy">{t.privacy}</a><a href="/login">{t.crm}</a><span>© {year} VIV!</span></div>
+        <p className="footer-owner">{platformOwnership(locale)}</p>
       </footer>
     </main>
   );

@@ -1,13 +1,14 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { LanguageSelector, localeTag, UiLocale, usePlatformLanguage } from "./i18n";
 
 type Role = "super_admin" | "admin" | "sales_manager" | "sales" | "distributor";
-type User = { id: string; name: string; role: Role; island: string | null };
+type User = { id: string; name: string; role: Role; island: string | null; language?: UiLocale };
 type FaqEntry = {
   id: string;
   translation_group_id: string;
-  language: "it" | "es";
+  language: UiLocale;
   module_key: string;
   title: string;
   question: string;
@@ -24,7 +25,7 @@ type FaqTicket = {
   user_name?: string | null;
   role: Role;
   island: string | null;
-  language: "it" | "es";
+  language: UiLocale;
   module_key: string;
   question: string;
   reason: string;
@@ -95,7 +96,9 @@ export function HelpPage({
   notify(text: string, tone?: "ok" | "error"): void;
   onNavigate(moduleKey: string): void;
 }) {
-  const [language, setLanguage] = useState<"it" | "es">(() => typeof navigator !== "undefined" && navigator.language.toLowerCase().startsWith("es") ? "es" : "it");
+  const { locale, setLocale } = usePlatformLanguage();
+  const [language, setLanguage] = useState<UiLocale>(user.language ?? locale);
+  useEffect(() => setLanguage(user.language ?? locale), [locale, user.language]);
   const [search, setSearch] = useState("");
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [busyId, setBusyId] = useState("");
@@ -132,8 +135,8 @@ export function HelpPage({
 
     <div className="help-layout">
       <article className="data-card help-library">
-        <div className="card-head"><div><h2>Manuale operativo</h2><p>{entries.length} procedure disponibili</p></div><div className="help-language"><button className={language === "it" ? "active" : ""} onClick={() => setLanguage("it")}>IT</button><button className={language === "es" ? "active" : ""} onClick={() => setLanguage("es")}>ES</button></div></div>
-        <div className="help-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={language === "es" ? "Buscar una operación…" : "Cerca una procedura…"} /></div>
+        <div className="card-head"><div><h2>Manuale operativo</h2><p>{entries.length} procedure disponibili</p></div><LanguageSelector compact onSelect={(next) => { setLanguage(next); setLocale(next); }} /></div>
+        <div className="help-search"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={language === "es" ? "Buscar una operación…" : language === "en" ? "Search a procedure…" : "Cerca una procedura…"} /></div>
         <div className="faq-list">{entries.map((entry) => <details key={entry.id}><summary><span>{MODULE_LABELS[entry.module_key] ?? entry.module_key}</span><strong>{entry.question}</strong><i>＋</i></summary><div className="faq-answer"><p>{entry.answer}</p><footer><span>v{entry.version} · {entry.title}</span><button onClick={() => onNavigate(entry.module_key)}>Apri modulo</button></footer></div></details>)}{!entries.length && <div className="help-empty"><strong>Nessuna procedura trovata</strong><span>Prova con parole diverse o cambia lingua.</span></div>}</div>
       </article>
 
@@ -160,10 +163,11 @@ export function HelpAssistantDrawer({
   currentModule, offline, onNavigate,
 }: { currentModule: string; offline: boolean; onNavigate(moduleKey: string): void }) {
   const [open, setOpen] = useState(false);
-  const [language, setLanguage] = useState<"it" | "es">(() => typeof navigator !== "undefined" && navigator.language.toLowerCase().startsWith("es") ? "es" : "it");
+  const { locale, setLocale } = usePlatformLanguage();
+  const language = locale;
   return <>
     <button className={`help-fab ${open ? "open" : ""}`} onClick={() => setOpen((value) => !value)} aria-label="Apri Assistente AI"><span>AI</span><b>{open ? "×" : "Aiuto"}</b></button>
-    {open && <aside className="help-drawer" aria-label="Assistente AI CRMVLC"><header><div><span>CRMVLC · {MODULE_LABELS[currentModule] ?? currentModule}</span><strong>Assistente AI</strong></div><button onClick={() => setOpen(false)} aria-label="Chiudi">×</button></header><AssistantPanel currentModule={currentModule} offline={offline} language={language} onLanguage={setLanguage} onNavigate={(route) => { onNavigate(route); setOpen(false); }} compact /></aside>}
+    {open && <aside className="help-drawer" aria-label="Assistente AI CRMVLC"><header><div><span>CRMVLC · {MODULE_LABELS[currentModule] ?? currentModule}</span><strong>Assistente AI</strong></div><button onClick={() => setOpen(false)} aria-label="Chiudi">×</button></header><AssistantPanel currentModule={currentModule} offline={offline} language={language} onLanguage={setLocale} onNavigate={(route) => { onNavigate(route); setOpen(false); }} compact /></aside>}
   </>;
 }
 
@@ -172,8 +176,8 @@ function AssistantPanel({
 }: {
   currentModule: string;
   offline: boolean;
-  language: "it" | "es";
-  onLanguage(language: "it" | "es"): void;
+  language: UiLocale;
+  onLanguage(language: UiLocale): void;
   onNavigate(moduleKey: string): void;
   compact?: boolean;
 }) {
@@ -215,7 +219,7 @@ function AssistantPanel({
     const Recognition = speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition;
     if (!Recognition) return;
     const recognition = new Recognition();
-    recognition.lang = language === "es" ? "es-ES" : "it-IT";
+    recognition.lang = language === "es" ? "es-ES" : language === "en" ? "en-GB" : "it-IT";
     recognition.continuous = false;
     recognition.interimResults = false;
     recognition.onresult = (event) => {
@@ -233,19 +237,19 @@ function AssistantPanel({
     if (!("speechSynthesis" in window)) return;
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = language === "es" ? "es-ES" : "it-IT";
+    utterance.lang = language === "es" ? "es-ES" : language === "en" ? "en-GB" : "it-IT";
     window.speechSynthesis.speak(utterance);
   }
 
   return <div className={`assistant-panel ${compact ? "compact" : ""}`}>
-    {!compact && <div className="assistant-title"><div><span>FASE 1 · SOLO GUIDA</span><h2>Chiedi al CRMVLC</h2><p>Ti spiego la procedura e apro il modulo corretto.</p></div><div className="help-language"><button className={language === "it" ? "active" : ""} onClick={() => onLanguage("it")}>IT</button><button className={language === "es" ? "active" : ""} onClick={() => onLanguage("es")}>ES</button></div></div>}
+    {!compact && <div className="assistant-title"><div><span>FASE 1 · SOLO GUIDA</span><h2>Chiedi al CRMVLC</h2><p>Ti spiego la procedura e apro il modulo corretto.</p></div><div className="help-language"><button className={language === "es" ? "active" : ""} onClick={() => onLanguage("es")}>ES</button><button className={language === "it" ? "active" : ""} onClick={() => onLanguage("it")}>IT</button><button className={language === "en" ? "active" : ""} onClick={() => onLanguage("en")}>EN</button></div></div>}
     <div className="assistant-transcript" ref={transcriptRef}>
-      {!messages.length && <div className="assistant-welcome"><span>✦</span><strong>{language === "es" ? "¿Cómo puedo ayudarte?" : "Come posso aiutarti?"}</strong><p>{language === "es" ? "Pregunta cómo realizar una operación en el módulo actual." : "Chiedi come svolgere un’operazione nel modulo attuale."}</p><div><button onClick={() => setQuestion(language === "es" ? "¿Qué puedo hacer en este módulo?" : "Cosa posso fare in questo modulo?")}>{language === "es" ? "Funciones del módulo" : "Funzioni del modulo"}</button><button onClick={() => setQuestion(language === "es" ? "¿Qué permisos tengo?" : "Quali permessi ho?")}>{language === "es" ? "Mis permisos" : "I miei permessi"}</button></div></div>}
+      {!messages.length && <div className="assistant-welcome"><span>✦</span><strong>{language === "es" ? "¿Cómo puedo ayudarte?" : language === "en" ? "How can I help?" : "Come posso aiutarti?"}</strong><p>{language === "es" ? "Pregunta cómo realizar una operación en el módulo actual." : language === "en" ? "Ask how to perform an operation in the current module." : "Chiedi come svolgere un’operazione nel modulo attuale."}</p><div><button onClick={() => setQuestion(language === "es" ? "¿Qué puedo hacer en este módulo?" : language === "en" ? "What can I do in this module?" : "Cosa posso fare in questo modulo?")}>{language === "es" ? "Funciones del módulo" : language === "en" ? "Module features" : "Funzioni del modulo"}</button><button onClick={() => setQuestion(language === "es" ? "¿Qué permisos tengo?" : language === "en" ? "What permissions do I have?" : "Quali permessi ho?")}>{language === "es" ? "Mis permisos" : language === "en" ? "My permissions" : "I miei permessi"}</button></div></div>}
       {messages.map((message) => <div className={`assistant-message ${message.side}`} key={message.id}><div>{message.text}</div>{message.side === "assistant" && <footer><button onClick={() => speak(message.text)} aria-label="Leggi risposta">◖ Audio</button>{message.reply?.sources.map((source) => <button key={source.id} onClick={() => onNavigate(source.moduleKey)}>↗ {source.title} · v{source.version}</button>)}{message.reply?.escalated && <span>Inviata agli Admin</span>}</footer>}</div>)}
       {busy && <div className="assistant-message assistant typing"><i /><i /><i /></div>}
     </div>
     {offline && <div className="assistant-offline">L’Assistente AI richiede la rete. Le FAQ pubblicate restano consultabili nella Pagina 12.</div>}
-    <form className="assistant-composer" onSubmit={ask}><textarea value={question} onChange={(event) => setQuestion(event.target.value)} maxLength={1200} rows={2} disabled={offline} placeholder={language === "es" ? "Escribe tu pregunta…" : "Scrivi la tua domanda…"} /><div><span>{question.length}/1200</span>{speechAvailable && <button type="button" className={listening ? "listening" : ""} onClick={toggleVoice} disabled={offline} aria-label="Dettatura vocale">{listening ? "■ Stop" : "● Voce"}</button>}<button className="primary" disabled={!question.trim() || busy || offline}>{busy ? "…" : "Invia"}</button></div></form>
+    <form className="assistant-composer" onSubmit={ask}><textarea value={question} onChange={(event) => setQuestion(event.target.value)} maxLength={1200} rows={2} disabled={offline} placeholder={language === "es" ? "Escribe tu pregunta…" : language === "en" ? "Type your question…" : "Scrivi la tua domanda…"} /><div><span>{question.length}/1200</span>{speechAvailable && <button type="button" className={listening ? "listening" : ""} onClick={toggleVoice} disabled={offline} aria-label="Dettatura vocale">{listening ? "■ Stop" : "● Voce"}</button>}<button className="primary" disabled={!question.trim() || busy || offline}>{busy ? "…" : "Invia"}</button></div></form>
     <small className="assistant-privacy">CRMVLC registra domanda e risposta, ma non riceve né conserva l’audio. Il servizio vocale del browser può elaborarlo.</small>
   </div>;
 }
@@ -277,7 +281,7 @@ function FaqEditor({ state, onClose, onSaved }: { state: EditorState; onClose():
     });
   }
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><article className="ops-modal faq-editor"><header><div><h2>{state.mode === "edit" ? "Modifica bozza" : state.mode === "version" ? "Nuova versione FAQ" : "Nuova FAQ"}</h2><p>La pubblicazione resta riservata al Super Admin.</p></div><button onClick={onClose}>×</button></header><form className="form-grid" onSubmit={submit}>
-    <label>Lingua<select name="language" defaultValue={source?.language ?? "it"} disabled={state.mode !== "new"}><option value="it">Italiano</option><option value="es">Español</option></select></label>
+    <label>Lingua<select name="language" defaultValue={source?.language ?? "es"} disabled={state.mode !== "new"}><option value="es">Español</option><option value="it">Italiano</option><option value="en">English</option></select></label>
     <label>Modulo<select name="moduleKey" defaultValue={source?.module_key ?? "help"}>{Object.entries(MODULE_LABELS).map(([key, label]) => <option value={key} key={key}>{label}</option>)}</select></label>
     <label className="span-2">Titolo<input name="title" maxLength={140} required defaultValue={source?.title ?? ""} /></label>
     <label className="span-2">Domanda<input name="question" maxLength={500} required defaultValue={source?.question ?? ""} /></label>
@@ -298,13 +302,13 @@ function TicketItem({ ticket, refresh, notify }: { ticket: FaqTicket; refresh():
     } catch (error) { notify(error instanceof Error ? error.message : "Operazione non riuscita.", "error"); }
     finally { setBusy(false); }
   }
-  return <div className={`ticket-item ${ticket.status}`}><div className="ticket-meta"><span>{ticket.language.toUpperCase()} · {MODULE_LABELS[ticket.module_key] ?? ticket.module_key}</span><b>{ticket.status === "open" ? "Aperta" : "Risolta"}</b></div><strong>{ticket.question}</strong><p>{ticket.user_name ?? "Utente"} · {ROLE_LABELS[ticket.role]}{ticket.island ? ` · ${ticket.island}` : ""} · {new Date(ticket.created_at).toLocaleString("it-IT")}</p>{ticket.status === "open" ? <form onSubmit={resolve}><input value={note} onChange={(event) => setNote(event.target.value)} maxLength={1500} required placeholder="Risposta o decisione dell’Admin…" /><button className="primary" disabled={busy}>{busy ? "…" : "Chiudi"}</button></form> : <div className="ticket-resolution"><b>{ticket.resolved_by_name ?? "Admin"}</b><span>{ticket.resolution_note}</span></div>}</div>;
+  return <div className={`ticket-item ${ticket.status}`}><div className="ticket-meta"><span>{ticket.language.toUpperCase()} · {MODULE_LABELS[ticket.module_key] ?? ticket.module_key}</span><b>{ticket.status === "open" ? "Aperta" : "Risolta"}</b></div><strong>{ticket.question}</strong><p>{ticket.user_name ?? "Utente"} · {ROLE_LABELS[ticket.role]}{ticket.island ? ` · ${ticket.island}` : ""} · {new Date(ticket.created_at).toLocaleString(localeTag())}</p>{ticket.status === "open" ? <form onSubmit={resolve}><input value={note} onChange={(event) => setNote(event.target.value)} maxLength={1500} required placeholder="Risposta o decisione dell’Admin…" /><button className="primary" disabled={busy}>{busy ? "…" : "Chiudi"}</button></form> : <div className="ticket-resolution"><b>{ticket.resolved_by_name ?? "Admin"}</b><span>{ticket.resolution_note}</span></div>}</div>;
 }
 
 function BudgetMeter({ usage }: { usage: AiUsage }) {
   const committed = usage.spent_micro_usd + usage.reserved_micro_usd;
   const percent = usage.budget_micro_usd > 0 ? Math.min(100, committed / usage.budget_micro_usd * 100) : 0;
-  return <div className="budget-meter"><div><strong>${(usage.spent_micro_usd / 1_000_000).toFixed(3)}</strong><span>di ${(usage.budget_micro_usd / 1_000_000).toFixed(0)}</span></div><div className="budget-track"><i style={{ width: `${percent}%` }} /></div><small>{percent.toFixed(1)}% impegnato · aggiornato {new Date(usage.updated_at).toLocaleString("it-IT")}</small></div>;
+  return <div className="budget-meter"><div><strong>${(usage.spent_micro_usd / 1_000_000).toFixed(3)}</strong><span>di ${(usage.budget_micro_usd / 1_000_000).toFixed(0)}</span></div><div className="budget-track"><i style={{ width: `${percent}%` }} /></div><small>{percent.toFixed(1)}% impegnato · aggiornato {new Date(usage.updated_at).toLocaleString(localeTag())}</small></div>;
 }
 
 type SpeechRecognitionResultLike = { 0?: { transcript?: string } };

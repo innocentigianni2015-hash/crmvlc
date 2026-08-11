@@ -2,7 +2,9 @@ const DB_NAME = "crmvlc-field-v1";
 const DB_VERSION = 1;
 const SNAPSHOTS = "snapshots";
 const OUTBOX = "outbox";
-const SNAPSHOT_TTL_MS = 12 * 60 * 60 * 1000;
+const SNAPSHOT_TTL_MS = 60 * 60 * 1000;
+const PHOTO_TARGET_BYTES = 5_500_000;
+const PHOTO_MAX_BYTES = 7_500_000;
 
 type SnapshotRecord<T> = {
   key: string;
@@ -92,6 +94,11 @@ export async function loadOfflineSnapshot<T>(key: string): Promise<OfflineSnapsh
   return { value: record.value, userId: record.userId, savedAt: record.savedAt };
 }
 
+export async function clearOfflineSnapshots(): Promise<void> {
+  if (!canUseIndexedDb()) return;
+  await useStore(SNAPSHOTS, "readwrite", (store) => store.clear());
+}
+
 export async function clearOfflineData(): Promise<void> {
   if (!canUseIndexedDb()) return;
   const db = await openDatabase();
@@ -106,6 +113,44 @@ export async function clearOfflineData(): Promise<void> {
     db.close();
   }
   notifyOutboxChanged();
+}
+
+export async function prepareDeliveryPhoto(photo: File): Promise<File> {
+  const supported = ["image/jpeg", "image/png", "image/webp"].includes(photo.type);
+  if (supported && photo.size <= PHOTO_TARGET_BYTES) return photo;
+
+  let bitmap: ImageBitmap;
+  try {
+    bitmap = await createImageBitmap(photo, { imageOrientation: "from-image" });
+  } catch {
+    throw new Error("Formato fotografico non supportato. Usa la fotocamera o scegli un file JPG, PNG o WebP.");
+  }
+
+  try {
+    const longestEdge = Math.max(bitmap.width, bitmap.height);
+    const scale = Math.min(1, 2200 / Math.max(longestEdge, 1));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const context = canvas.getContext("2d", { alpha: false });
+    if (!context) throw new Error("Impossibile preparare la fotografia.");
+
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    let quality = 0.86;
+    let compressed: Blob | null = null;
+    do {
+      compressed = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
+      quality -= 0.08;
+    } while (compressed && compressed.size > PHOTO_TARGET_BYTES && quality >= 0.54);
+
+    if (!compressed || compressed.size > PHOTO_MAX_BYTES) {
+      throw new Error("La fotografia resta troppo pesante. Ripeti lo scatto con una risoluzione inferiore.");
+    }
+    const stem = photo.name.replace(/\.[^.]+$/, "") || "consegna";
+    return new File([compressed], `${stem}.jpg`, { type: "image/jpeg", lastModified: Date.now() });
+  } finally {
+    bitmap.close();
+  }
 }
 
 export async function queuePhotoAudit(input: {

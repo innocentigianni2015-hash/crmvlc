@@ -50,13 +50,13 @@ export async function handlePasswordAuth(request: Request, env: AuthEnv): Promis
 
   try {
     requireConfiguration(env);
-    if (path === "/api/auth/password/login") return passwordLogin(request, env);
-    if (path === "/api/auth/password/change-required") return changeRequiredPassword(request, env);
-    if (path === "/api/auth/password/forgot") return forgotPassword(request, env);
-    if (path === "/api/auth/password/reset") return resetPassword(request, env);
-    if (path === "/api/auth/totp/setup") return setupTotp(request, env);
-    if (path === "/api/auth/totp/confirm") return confirmTotp(request, env);
-    return verifyTotpLogin(request, env);
+    if (path === "/api/auth/password/login") return await passwordLogin(request, env);
+    if (path === "/api/auth/password/change-required") return await changeRequiredPassword(request, env);
+    if (path === "/api/auth/password/forgot") return await forgotPassword(request, env);
+    if (path === "/api/auth/password/reset") return await resetPassword(request, env);
+    if (path === "/api/auth/totp/setup") return await setupTotp(request, env);
+    if (path === "/api/auth/totp/confirm") return await confirmTotp(request, env);
+    return await verifyTotpLogin(request, env);
   } catch (error) {
     if (error instanceof AuthError) return authJson({ error: { code: error.code, message: error.message } }, error.status);
     const requestId = request.headers.get("cf-ray") ?? crypto.randomUUID();

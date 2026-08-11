@@ -45,6 +45,7 @@ type UserRow = {
   email: string;
   name: string;
   phone: string | null;
+  language?: "es" | "it" | "en";
   role: "super_admin" | "admin" | "sales_manager" | "sales" | "distributor";
   island: string | null;
   sales_manager_id?: string | null;
@@ -540,7 +541,7 @@ async function startImpersonation(request: Request, user: AuthenticatedUser, env
   const body = await readJson<{ userId?: string }>(request);
   const targetId = cleanText(body.userId, 128);
   const target = targetId ? await env.DB.prepare(
-    "SELECT id, email, name, phone, role, island, sales_manager_id, active FROM users WHERE id = ? AND active = 1 LIMIT 1",
+    "SELECT id, email, name, phone, language, role, island, sales_manager_id, active FROM users WHERE id = ? AND active = 1 LIMIT 1",
   ).bind(targetId).first<UserRow>() : null;
   if (!target || !["sales", "distributor"].includes(target.role)) {
     throw new ApiError(404, "impersonation_target_not_found", "Seleziona un Sales o Distributore attivo.");
@@ -591,6 +592,7 @@ async function updateProfile(request: Request, user: UserRow, env: RuntimeEnv): 
   const name = body.name === undefined ? user.name : cleanText(body.name, 120);
   const phone = body.phone === undefined ? user.phone : normalizePhone(body.phone);
   const requestedEmail = body.email === undefined ? user.email : normalizeEmail(body.email);
+  const language = body.language === undefined ? (user.language ?? "es") : normalizeUiLanguage(body.language);
   if (!name || !isEmail(requestedEmail)) throw new ApiError(400, "invalid_profile", "Nome ed email devono essere validi.");
 
   const emailChanged = requestedEmail !== user.email;
@@ -612,17 +614,18 @@ async function updateProfile(request: Request, user: UserRow, env: RuntimeEnv): 
       env.DB.prepare("UPDATE auth_flow_tokens SET consumed_at = ? WHERE user_id = ? AND purpose = 'email_change' AND consumed_at IS NULL")
         .bind(now.toISOString(), user.id),
       env.DB.prepare("INSERT INTO auth_flow_tokens (id, token_hash, user_id, purpose, data_json, expires_at, consumed_at, created_at) VALUES (?, ?, ?, 'email_change', ?, ?, NULL, ?)")
-        .bind(flowId, tokenHash, user.id, JSON.stringify({ newEmail: requestedEmail }), expiresAt, now.toISOString()),
+        .bind(flowId, tokenHash, user.id, JSON.stringify({ newEmail: requestedEmail, language }), expiresAt, now.toISOString()),
     ]);
     const verificationUrl = new URL("/", request.url);
     verificationUrl.searchParams.set("email-change", token);
+    const verificationMessage = profileVerificationEmail(language, verificationUrl.toString());
     try {
       await env.EMAIL.send({
         from: { name: "CRMVLC", email: env.EMAIL_FROM },
         to: requestedEmail,
-        subject: "Conferma il nuovo indirizzo email CRMVLC",
-        text: `Conferma il nuovo indirizzo email aprendo questo collegamento entro 30 minuti: ${verificationUrl.toString()} Se non hai richiesto la modifica, ignora il messaggio.`,
-        html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto"><h2>CRMVLC</h2><p>Conferma il nuovo indirizzo email del tuo profilo.</p><p><a href="${escapeHtml(verificationUrl.toString())}" style="display:inline-block;padding:12px 18px;border-radius:8px;color:#fff;background:#ef6a54;text-decoration:none;font-weight:700">Conferma email</a></p><p>Il collegamento scade tra 30 minuti.</p><p style="color:#667085">Se non hai richiesto la modifica, ignora il messaggio.</p></div>`,
+        subject: verificationMessage.subject,
+        text: verificationMessage.text,
+        html: verificationMessage.html,
       });
       verificationSent = true;
     } catch (error) {
@@ -633,22 +636,23 @@ async function updateProfile(request: Request, user: UserRow, env: RuntimeEnv): 
   }
 
   const now = new Date().toISOString();
-  await env.DB.prepare("UPDATE users SET name = ?, phone = ?, updated_at = ? WHERE id = ?")
-    .bind(name, phone, now, user.id).run();
+  await env.DB.prepare("UPDATE users SET name = ?, phone = ?, language = ?, updated_at = ? WHERE id = ?")
+    .bind(name, phone, language, now, user.id).run();
   await appendAudit(env, request, user, "user.profile_updated", "user", user.id, {
     nameChanged: name !== user.name,
     phoneChanged: phone !== user.phone,
+    languageChanged: language !== (user.language ?? "es"),
     emailChangeRequested: emailChanged,
   });
   if (emailChanged) {
     await appendAudit(env, request, user, "user.email_change_requested", "user", user.id, { newEmail: requestedEmail });
   }
   return json({
-    user: publicUser({ ...user, name, phone }),
+    user: publicUser({ ...user, name, phone, language }),
     verificationSent,
     message: verificationSent
-      ? "Profilo aggiornato. Apri il collegamento inviato al nuovo indirizzo per confermare l’email."
-      : "Profilo aggiornato.",
+      ? localizedUi(language, { es: "Perfil actualizado. Abre el enlace enviado a la nueva dirección para confirmar el email.", it: "Profilo aggiornato. Apri il collegamento inviato al nuovo indirizzo per confermare l’email.", en: "Profile updated. Open the link sent to the new address to confirm the email." })
+      : localizedUi(language, { es: "Perfil actualizado.", it: "Profilo aggiornato.", en: "Profile updated." }),
   });
 }
 
@@ -665,8 +669,11 @@ async function confirmProfileEmail(request: Request, env: RuntimeEnv): Promise<R
   }
 
   let newEmail = "";
+  let language: "es" | "it" | "en" = "es";
   try {
-    newEmail = normalizeEmail((JSON.parse(flow.data_json ?? "{}") as { newEmail?: string }).newEmail);
+    const data = JSON.parse(flow.data_json ?? "{}") as { newEmail?: string; language?: string };
+    newEmail = normalizeEmail(data.newEmail);
+    language = normalizeUiLanguage(data.language);
   } catch {
     throw new ApiError(400, "invalid_email_change", "Collegamento di verifica non valido o scaduto.");
   }
@@ -695,17 +702,18 @@ async function confirmProfileEmail(request: Request, env: RuntimeEnv): Promise<R
 
   if (env.EMAIL && env.EMAIL_FROM && flow.old_email !== newEmail) {
     try {
+      const notice = profileSecurityNotice(language, newEmail);
       await env.EMAIL.send({
         from: { name: "CRMVLC", email: env.EMAIL_FROM },
         to: flow.old_email,
-        subject: "Indirizzo email CRMVLC modificato",
-        text: `L’indirizzo email del tuo account CRMVLC è stato modificato in ${newEmail}. Se non riconosci questa operazione, contatta subito il Super Admin.`,
+        subject: notice.subject,
+        text: notice.text,
       });
     } catch (error) {
       console.error(JSON.stringify({ level: "error", event: "profile_email_security_notice_failed", userId: flow.user_id, error: error instanceof Error ? error.message : "unknown" }));
     }
   }
-  const response = json({ message: "Email confermata. Accedi nuovamente con il nuovo indirizzo." });
+  const response = json({ message: localizedUi(language, { es: "Email confirmado. Vuelve a acceder con la nueva dirección.", it: "Email confermata. Accedi nuovamente con il nuovo indirizzo.", en: "Email confirmed. Sign in again with the new address." }) });
   response.headers.append("Set-Cookie", clearSessionCookie(request));
   response.headers.append("Set-Cookie", clearImpersonationCookie(request));
   return response;
@@ -722,7 +730,7 @@ async function createPublicLandingLead(request: Request, env: RuntimeEnv): Promi
   const city = cleanText(body.city, 100);
   const island = cleanText(body.island, 40);
   const service = cleanText(body.service, 20);
-  const locale = cleanText(body.locale, 5) === "es" ? "es" : "it";
+  const locale = normalizeUiLanguage(body.locale);
   const notes = cleanText(body.notes, 1000);
 
   if (!company || !contact || !phone || !isEmail(email) || !city) {
@@ -880,7 +888,7 @@ async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Resp
       "SELECT p.*, u.name AS interviewer_name FROM podcast_appointments p JOIN users u ON u.id = p.interviewer_user_id ORDER BY p.starts_at DESC LIMIT 500",
     ).all<PodcastAppointmentRow>()).results;
     podcastInterviewers = (await env.DB.prepare(
-      "SELECT id, email, name, phone, role, island, active FROM users WHERE active = 1 AND role <> 'distributor' ORDER BY name",
+      "SELECT id, email, name, phone, language, role, island, active FROM users WHERE active = 1 AND role <> 'distributor' ORDER BY name",
     ).all()).results;
   }
 
@@ -888,19 +896,19 @@ async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Resp
   let audit: Record<string, unknown>[] = [];
   let emailOutbox: Record<string, unknown>[] = [];
   if (user.role === "super_admin" || user.role === "admin") {
-    users = (await env.DB.prepare("SELECT u.id, u.email, u.name, u.phone, u.role, u.island, u.sales_manager_id, u.active, u.created_at, m.name AS sales_manager_name FROM users u LEFT JOIN users m ON m.id = u.sales_manager_id ORDER BY u.role, u.name").all()).results;
+    users = (await env.DB.prepare("SELECT u.id, u.email, u.name, u.phone, u.language, u.role, u.island, u.sales_manager_id, u.active, u.created_at, m.name AS sales_manager_name FROM users u LEFT JOIN users m ON m.id = u.sales_manager_id ORDER BY u.role, u.name").all()).results;
   }
   if (user.role === "super_admin") {
     audit = (await env.DB.prepare("SELECT a.id, a.action, a.entity_type, a.entity_id, a.payload_json, a.created_at, u.name AS actor_name FROM audit_events a LEFT JOIN users u ON u.id = a.actor_user_id ORDER BY a.created_at DESC LIMIT 80").all()).results;
     emailOutbox = (await env.DB.prepare("SELECT id, recipient, subject, status, attempts, next_attempt_at, last_error, created_at, sent_at FROM email_outbox WHERE status <> 'sent' ORDER BY created_at DESC LIMIT 50").all()).results;
   } else if (user.role === "sales_manager") {
-    users = (await env.DB.prepare("SELECT u.id, u.email, u.name, u.phone, u.role, u.island, u.sales_manager_id, u.active, u.created_at, m.name AS sales_manager_name FROM users u LEFT JOIN users m ON m.id = u.sales_manager_id WHERE u.active = 1 AND ((u.role = 'sales' AND u.sales_manager_id = ?) OR (u.role = 'distributor' AND u.island = ?) OR u.id = ?) ORDER BY u.role, u.name")
+    users = (await env.DB.prepare("SELECT u.id, u.email, u.name, u.phone, u.language, u.role, u.island, u.sales_manager_id, u.active, u.created_at, m.name AS sales_manager_name FROM users u LEFT JOIN users m ON m.id = u.sales_manager_id WHERE u.active = 1 AND ((u.role = 'sales' AND u.sales_manager_id = ?) OR (u.role = 'distributor' AND u.island = ?) OR u.id = ?) ORDER BY u.role, u.name")
       .bind(user.id, user.island, user.id).all()).results;
   }
 
   const impersonationUsers = user.sessionActor.role === "super_admin"
     ? (await env.DB.prepare(
-      "SELECT id, email, name, phone, role, island, sales_manager_id, active, created_at FROM users WHERE active = 1 AND role IN ('sales', 'distributor') ORDER BY role, island, name",
+      "SELECT id, email, name, phone, language, role, island, sales_manager_id, active, created_at FROM users WHERE active = 1 AND role IN ('sales', 'distributor') ORDER BY role, island, name",
     ).all()).results
     : [];
   const help = await loadHelpBootstrap(env, user);
@@ -1287,7 +1295,7 @@ async function convertQuoteToContract(request: Request, quoteId: string, user: U
       env.DB.prepare("UPDATE quotes SET status = 'converted', converted_contract_id = ?, converted_at = ? WHERE id = ? AND status = 'issued'")
         .bind(contractId, now, quote.id),
       env.DB.prepare("INSERT INTO contracts (id, client_id, quote_id, template_id, title, status, owner_user_id, island, draft_r2_key, document_sha256, version, created_by, created_at, updated_at) VALUES (?, ?, ?, NULL, ?, 'draft', ?, ?, ?, ?, 1, ?, ?, ?)")
-        .bind(contractId, quote.client_id, quote.id, `Contratto da preventivo ${quote.quote_number}`, quote.owner_user_id, quote.island, contractKey, quote.pdf_sha256, user.id, now, now),
+        .bind(contractId, quote.client_id, quote.id, `Contrato del presupuesto ${quote.quote_number}`, quote.owner_user_id, quote.island, contractKey, quote.pdf_sha256, user.id, now, now),
     ]);
     if (Number(results[0].meta.changes ?? 0) !== 1 || Number(results[1].meta.changes ?? 0) !== 1) {
       throw new ApiError(409, "quote_already_converted", "Il preventivo è già stato convertito in contratto.");
@@ -1445,6 +1453,7 @@ async function createUser(request: Request, user: UserRow, env: RuntimeEnv): Pro
   const role = String(body.role ?? "");
   const requestedIsland = String(body.island ?? "");
   const temporaryPassword = String(body.temporaryPassword ?? "");
+  const language = normalizeUiLanguage(body.language);
   if (!isEmail(email) || !name || !canCreateUserWithRole(user, role)) {
     throw new ApiError(400, "invalid_user", "Nome, email e ruolo operativo sono obbligatori.");
   }
@@ -1458,12 +1467,12 @@ async function createUser(request: Request, user: UserRow, env: RuntimeEnv): Pro
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   try {
-    await env.DB.prepare("INSERT INTO users (id, email, name, role, island, sales_manager_id, active, password_hash, password_salt, password_iterations, must_change_password, password_changed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 1, NULL, ?, ?)")
-      .bind(id, email, name, role, island, salesManagerId, credentials.hash, credentials.salt, credentials.iterations, now, now).run();
+    await env.DB.prepare("INSERT INTO users (id, email, name, language, role, island, sales_manager_id, active, password_hash, password_salt, password_iterations, must_change_password, password_changed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 1, NULL, ?, ?)")
+      .bind(id, email, name, language, role, island, salesManagerId, credentials.hash, credentials.salt, credentials.iterations, now, now).run();
   } catch {
     throw new ApiError(409, "email_exists", "Esiste già un utente con questa email.");
   }
-  await appendAudit(env, request, user, "user.created", "user", id, { email, role, island, salesManagerId });
+  await appendAudit(env, request, user, "user.created", "user", id, { email, language, role, island, salesManagerId });
   return json({ id }, 201);
 }
 
@@ -1533,6 +1542,7 @@ async function uploadTemplate(request: Request, user: UserRow, env: RuntimeEnv, 
   const file = requiredFile(form, "file", ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"]);
   const name = cleanText(form.get("name"), 120);
   const version = cleanText(form.get("version"), 30) || "1";
+  requireSpanishDocumentConfirmation(form);
   if (!name) throw new ApiError(400, "invalid_template", "Il nome del modello è obbligatorio.");
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
@@ -1563,6 +1573,7 @@ async function createContract(request: Request, user: UserRow, env: RuntimeEnv, 
   const clientId = String(form.get("clientId") ?? "");
   const templateId = cleanOptionalText(form.get("templateId"), 80);
   const title = cleanText(form.get("title"), 160);
+  requireSpanishDocumentConfirmation(form);
   const client = await getClient(env, clientId);
   if (!client || !canWriteRecord(user, client)) throw new ApiError(404, "client_not_found", "Cliente non trovato.");
   if (!title) throw new ApiError(400, "invalid_contract", "Il titolo del contratto è obbligatorio.");
@@ -1593,14 +1604,14 @@ async function downloadContract(contractId: string, user: UserRow, env: RuntimeE
   const contract = await getContract(env, contractId);
   if (!contract || !canReadRecord(user, contract)) throw new ApiError(404, "contract_not_found", "Contratto non trovato.");
   const key = contract.signed_r2_key ?? contract.draft_r2_key;
-  const suffix = contract.signed_r2_key ? "-firmato" : "";
+  const suffix = contract.signed_r2_key ? "-firmado" : "";
   return r2Download(env, key, "application/pdf", `${safeFilename(contract.title)}-v${contract.version}${suffix}.pdf`);
 }
 
 async function downloadEvidence(contractId: string, user: UserRow, env: RuntimeEnv): Promise<Response> {
   const contract = await getContract(env, contractId);
   if (!contract || !canReadRecord(user, contract) || !contract.evidence_r2_key) throw new ApiError(404, "evidence_not_found", "Evidenza di firma non trovata.");
-  return r2Download(env, contract.evidence_r2_key, "application/json", `${safeFilename(contract.title)}-evidenza-firma.json`);
+  return r2Download(env, contract.evidence_r2_key, "application/json", `${safeFilename(contract.title)}-evidencia-firma.json`);
 }
 
 async function requestContractSignature(request: Request, contractId: string, user: UserRow, env: RuntimeEnv): Promise<Response> {
@@ -1615,7 +1626,7 @@ async function requestContractSignature(request: Request, contractId: string, us
 
   const challenge = await createChallenge(env, signerEmail, "contract_sign", contract.id, user.id);
   try {
-    if (challenge.code) await sendOtp(env, signerEmail, challenge.code, "Firma del contratto CRMVLC", `Codice di conferma per il contratto “${contract.title}”`);
+    if (challenge.code) await sendOtp(env, signerEmail, challenge.code, "Firma del contrato CRMVLC", `Código de confirmación para el contrato «${contract.title}»`);
     await env.DB.prepare("UPDATE contracts SET status = 'awaiting_signature', signer_name = ?, signer_email = ?, updated_at = ? WHERE id = ?")
       .bind(signerName, signerEmail, new Date().toISOString(), contract.id).run();
   } catch (error) {
@@ -1649,6 +1660,7 @@ async function completeContractSignature(request: Request, contractId: string, u
   const evidenceKey = `contracts/${contract.id}/v${contract.version}/${challengeId}/evidence.json`;
   const evidenceBase = {
     schema: "vlc-os.contract-signature.v1",
+    documentLanguage: "es",
     contractId: contract.id,
     contractVersion: contract.version,
     documentSha256: contract.document_sha256,
@@ -1666,8 +1678,8 @@ async function completeContractSignature(request: Request, contractId: string, u
   const signedDocumentSha256 = await sha256(signedPdf);
   const evidence = { ...evidenceBase, signedDocumentSha256 };
   const outboxId = crypto.randomUUID();
-  const receiptSubject = "Copia del contratto firmato";
-  const receiptBody = `La firma del contratto “${contract.title}” è stata registrata il ${signedAt}. In allegato trovi la copia firmata con il certificato di firma CRMVLC.`;
+  const receiptSubject = "Copia del contrato firmado";
+  const receiptBody = `La firma del contrato «${contract.title}» se registró el ${signedAt}. Se adjunta la copia firmada con el certificado de firma CRMVLC.`;
 
   await Promise.all([
     env.BUCKET.put(signatureKey, signature, { httpMetadata: { contentType: "image/png" }, customMetadata: { sha256: signatureSha256 } }),
@@ -1680,7 +1692,7 @@ async function completeContractSignature(request: Request, contractId: string, u
       env.DB.prepare("UPDATE contracts SET status = 'signed', signed_r2_key = ?, signature_r2_key = ?, evidence_r2_key = ?, signed_document_sha256 = ?, signature_sha256 = ?, signed_at = ?, updated_at = ? WHERE id = ? AND status = 'awaiting_signature'")
         .bind(signedDocumentKey, signatureKey, evidenceKey, signedDocumentSha256, signatureSha256, signedAt, signedAt, contract.id),
       env.DB.prepare("INSERT INTO email_outbox (id, kind, recipient, subject, body_text, attachment_r2_key, attachment_filename, status, attempts, next_attempt_at, created_at) VALUES (?, 'contract_receipt', ?, ?, ?, ?, ?, 'pending', 0, ?, ?)")
-        .bind(outboxId, contract.signer_email, receiptSubject, receiptBody, signedDocumentKey, `${safeFilename(contract.title)}-firmato.pdf`, signedAt, signedAt),
+        .bind(outboxId, contract.signer_email, receiptSubject, receiptBody, signedDocumentKey, `${safeFilename(contract.title)}-firmado.pdf`, signedAt, signedAt),
     ]);
     if (Number(results[0].meta.changes ?? 0) !== 1 || Number(results[1].meta.changes ?? 0) !== 1) {
       throw new ApiError(409, "signature_already_completed", "La firma è già stata registrata.");
@@ -1701,6 +1713,7 @@ async function supersedeSignedContract(request: Request, contractId: string, use
   const file = requiredFile(form, "file", ["application/pdf"], MAX_CONTRACT_BYTES);
   const reason = cleanText(form.get("reason"), 500);
   const title = cleanText(form.get("title"), 160) || contract.title;
+  requireSpanishDocumentConfirmation(form);
   if (!reason) throw new ApiError(400, "reason_required", "La motivazione dell'annullamento è obbligatoria.");
 
   const newId = crypto.randomUUID();
@@ -1738,7 +1751,7 @@ async function ensureBootstrapAdmin(env: RuntimeEnv): Promise<void> {
 
 async function ensureDemoAccount(env: RuntimeEnv): Promise<UserRow> {
   const email = normalizeEmail(env.DEMO_EMAIL);
-  let user = await env.DB.prepare("SELECT id, email, name, phone, role, island, sales_manager_id, active FROM users WHERE email = ? LIMIT 1")
+  let user = await env.DB.prepare("SELECT id, email, name, phone, language, role, island, sales_manager_id, active FROM users WHERE email = ? LIMIT 1")
     .bind(email).first<UserRow>();
   const now = new Date().toISOString();
 
@@ -1762,7 +1775,7 @@ async function requireUser(request: Request, env: RuntimeEnv, ctx: ExecutionCont
   const sessionId = await sha256(token);
   const now = new Date().toISOString();
   const sessionActor = await env.DB.prepare(
-    "SELECT u.id, u.email, u.name, u.phone, u.role, u.island, u.sales_manager_id, u.active FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id = ? AND s.expires_at > ? AND u.active = 1 LIMIT 1",
+    "SELECT u.id, u.email, u.name, u.phone, u.language, u.role, u.island, u.sales_manager_id, u.active FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id = ? AND s.expires_at > ? AND u.active = 1 LIMIT 1",
   ).bind(sessionId, now).first<UserRow>();
   if (!sessionActor) throw new ApiError(401, "session_expired", "Sessione scaduta. Accedi nuovamente.");
   ctx.waitUntil(env.DB.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?").bind(now, sessionId).run().then(() => undefined));
@@ -1782,7 +1795,7 @@ async function requireUser(request: Request, env: RuntimeEnv, ctx: ExecutionCont
     throw new ApiError(409, "impersonation_expired", "La modalità operativa è scaduta. Torna alla dashboard Super Admin e riaprila.");
   }
   const target = await env.DB.prepare(
-    "SELECT id, email, name, phone, role, island, sales_manager_id, active FROM users WHERE id = ? AND active = 1 LIMIT 1",
+    "SELECT id, email, name, phone, language, role, island, sales_manager_id, active FROM users WHERE id = ? AND active = 1 LIMIT 1",
   ).bind(claims.targetId).first<UserRow>();
   if (!target || !["sales", "distributor"].includes(target.role)) {
     if (stoppingImpersonation) return authenticatedActor;
@@ -1876,8 +1889,8 @@ async function sendOtp(env: RuntimeEnv, to: string, code: string, subject: strin
     from: { name: "CRMVLC", email: env.EMAIL_FROM },
     to,
     subject,
-    text: `${intro}. Codice: ${code}. Scade tra ${OTP_TTL_MINUTES} minuti. Se non hai richiesto questa operazione, ignora il messaggio.`,
-    html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto"><h2>CRMVLC</h2><p>${escapeHtml(intro)}.</p><p style="font-size:32px;font-weight:700;letter-spacing:8px">${code}</p><p>Il codice scade tra ${OTP_TTL_MINUTES} minuti.</p><p style="color:#667085">Se non hai richiesto questa operazione, ignora il messaggio.</p></div>`,
+    text: `${intro}. Código: ${code}. Caduca en ${OTP_TTL_MINUTES} minutos. Si no has solicitado esta operación, ignora el mensaje.`,
+    html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto"><h2>CRMVLC</h2><p>${escapeHtml(intro)}.</p><p style="font-size:32px;font-weight:700;letter-spacing:8px">${code}</p><p>El código caduca en ${OTP_TTL_MINUTES} minutos.</p><p style="color:#667085">Si no has solicitado esta operación, ignora el mensaje.</p></div>`,
   });
 }
 
@@ -2015,15 +2028,15 @@ async function buildSignedPdf(original: ArrayBuffer, signature: Uint8Array, evid
   const dark = rgb(0.06, 0.16, 0.26);
   const muted = rgb(0.36, 0.43, 0.49);
   page.drawText("CRMVLC", { x: 48, y: 785, size: 11, font: bold, color: rgb(0.9, 0.3, 0.23) });
-  page.drawText("CERTIFICATO DI FIRMA", { x: 48, y: 748, size: 22, font: bold, color: dark });
-  page.drawText("Allegato integrante del documento contrattuale", { x: 48, y: 726, size: 10, font, color: muted });
+  page.drawText("CERTIFICADO DE FIRMA", { x: 48, y: 748, size: 22, font: bold, color: dark });
+  page.drawText("Anexo integrante del documento contractual", { x: 48, y: 726, size: 10, font, color: muted });
   page.drawLine({ start: { x: 48, y: 704 }, end: { x: 547, y: 704 }, thickness: 1, color: rgb(0.85, 0.88, 0.9) });
   const rows = [
-    ["Contratto", `${evidence.contractId} · versione ${evidence.contractVersion}`],
-    ["Firmatario", `${evidence.signer.name} · ${evidence.signer.email}`],
-    ["Verifica identita", "Codice OTP email verificato"],
-    ["Conferma agente", `${evidence.agent.name} · ${evidence.agent.email}`],
-    ["Data UTC", evidence.signedAt],
+    ["Contrato", `${evidence.contractId} · version ${evidence.contractVersion}`],
+    ["Firmante", `${evidence.signer.name} · ${evidence.signer.email}`],
+    ["Verificacion de identidad", "Codigo OTP por email verificado"],
+    ["Confirmacion del agente", `${evidence.agent.name} · ${evidence.agent.email}`],
+    ["Fecha UTC", evidence.signedAt],
   ];
   let y = 666;
   for (const [label, value] of rows) {
@@ -2031,17 +2044,17 @@ async function buildSignedPdf(original: ArrayBuffer, signature: Uint8Array, evid
     page.drawText(pdfSafeText(value), { x: 170, y, size: 10, font, color: dark, maxWidth: 365 });
     y -= 28;
   }
-  page.drawText("Firma acquisita sul dispositivo", { x: 48, y: 500, size: 9, font: bold, color: muted });
+  page.drawText("Firma capturada en el dispositivo", { x: 48, y: 500, size: 9, font: bold, color: muted });
   const scale = Math.min(300 / signatureImage.width, 105 / signatureImage.height);
   page.drawRectangle({ x: 48, y: 360, width: 499, height: 125, borderWidth: 1, borderColor: rgb(0.78, 0.82, 0.85) });
   page.drawImage(signatureImage, { x: 68, y: 370, width: signatureImage.width * scale, height: signatureImage.height * scale });
-  page.drawText("Impronte crittografiche SHA-256", { x: 48, y: 326, size: 9, font: bold, color: muted });
-  page.drawText(`Documento originale: ${evidence.documentSha256}`, { x: 48, y: 304, size: 7.5, font, color: dark, maxWidth: 499 });
+  page.drawText("Huellas criptograficas SHA-256", { x: 48, y: 326, size: 9, font: bold, color: muted });
+  page.drawText(`Documento original: ${evidence.documentSha256}`, { x: 48, y: 304, size: 7.5, font, color: dark, maxWidth: 499 });
   page.drawText(`Firma: ${evidence.signatureSha256}`, { x: 48, y: 286, size: 7.5, font, color: dark, maxWidth: 499 });
-  page.drawText("Il documento originale, la firma e il registro di audit sono conservati separatamente e non modificabili tramite l'applicazione.", { x: 48, y: 240, size: 8.5, font, color: muted, maxWidth: 499, lineHeight: 13 });
-  page.drawText(`Generato da CRMVLC · ${evidence.contractId}`, { x: 48, y: 48, size: 7.5, font, color: muted });
-  pdf.setTitle(`CRMVLC - contratto ${evidence.contractId}`);
-  pdf.setSubject("Contratto con certificato di firma OTP e conferma agente");
+  page.drawText("El documento original, la firma y el registro de auditoria se conservan por separado y no pueden modificarse mediante la aplicacion.", { x: 48, y: 240, size: 8.5, font, color: muted, maxWidth: 499, lineHeight: 13 });
+  page.drawText(`Generado por CRMVLC · ${evidence.contractId}`, { x: 48, y: 48, size: 7.5, font, color: muted });
+  pdf.setTitle(`CRMVLC - contrato ${evidence.contractId}`);
+  pdf.setSubject("Contrato con certificado de firma OTP y confirmacion del agente");
   pdf.setProducer("CRMVLC");
   return pdf.save({ useObjectStreams: true });
 }
@@ -2110,6 +2123,12 @@ function requiredFile(form: FormData, key: string, allowedTypes: string[], maxBy
   return value;
 }
 
+function requireSpanishDocumentConfirmation(form: FormData): void {
+  if (form.get("documentLanguage") !== "es") {
+    throw new ApiError(400, "spanish_document_required", "Confirma que el documento está redactado exclusivamente en español.");
+  }
+}
+
 function parseSignature(value: unknown): Uint8Array {
   const dataUrl = String(value ?? "");
   const prefix = "data:image/png;base64,";
@@ -2143,6 +2162,7 @@ function publicUser(user: UserRow) {
     email: user.email,
     name: user.name,
     phone: user.phone,
+    language: user.language ?? "es",
     role: user.role,
     island: user.island,
     sales_manager_id: user.sales_manager_id ?? null,
@@ -2234,6 +2254,35 @@ function stableJson(value: unknown): string {
 
 function cleanText(value: unknown, maxLength: number): string {
   return String(value ?? "").trim().replace(/\s+/g, " ").slice(0, maxLength);
+}
+
+function normalizeUiLanguage(value: unknown): "es" | "it" | "en" {
+  const language = cleanText(value, 5).toLowerCase();
+  return language === "it" || language === "en" ? language : "es";
+}
+
+function localizedUi(language: "es" | "it" | "en", values: Record<"es" | "it" | "en", string>): string {
+  return values[language];
+}
+
+function profileVerificationEmail(language: "es" | "it" | "en", url: string) {
+  const link = escapeHtml(url);
+  const values = {
+    es: { subject: "Confirma la nueva dirección de email CRMVLC", intro: "Confirma la nueva dirección de email de tu perfil.", action: "Confirmar email", expiry: "El enlace caduca en 30 minutos.", ignore: "Si no has solicitado el cambio, ignora este mensaje." },
+    it: { subject: "Conferma il nuovo indirizzo email CRMVLC", intro: "Conferma il nuovo indirizzo email del tuo profilo.", action: "Conferma email", expiry: "Il collegamento scade tra 30 minuti.", ignore: "Se non hai richiesto la modifica, ignora il messaggio." },
+    en: { subject: "Confirm your new CRMVLC email address", intro: "Confirm the new email address for your profile.", action: "Confirm email", expiry: "The link expires in 30 minutes.", ignore: "If you did not request this change, ignore this message." },
+  }[language];
+  return {
+    subject: values.subject,
+    text: `${values.intro} ${url} ${values.expiry} ${values.ignore}`,
+    html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto"><h2>CRMVLC</h2><p>${values.intro}</p><p><a href="${link}" style="display:inline-block;padding:12px 18px;border-radius:8px;color:#fff;background:#ef6a54;text-decoration:none;font-weight:700">${values.action}</a></p><p>${values.expiry}</p><p style="color:#667085">${values.ignore}</p></div>`,
+  };
+}
+
+function profileSecurityNotice(language: "es" | "it" | "en", newEmail: string) {
+  if (language === "it") return { subject: "Indirizzo email CRMVLC modificato", text: `L’indirizzo email del tuo account CRMVLC è stato modificato in ${newEmail}. Se non riconosci questa operazione, contatta subito il Super Admin.` };
+  if (language === "en") return { subject: "CRMVLC email address changed", text: `Your CRMVLC account email address was changed to ${newEmail}. If you do not recognise this action, contact the Super Admin immediately.` };
+  return { subject: "Dirección de email CRMVLC modificada", text: `La dirección de email de tu cuenta CRMVLC se ha cambiado a ${newEmail}. Si no reconoces esta operación, contacta inmediatamente con el Super Admin.` };
 }
 
 function cleanOptionalText(value: unknown, maxLength: number): string | null {

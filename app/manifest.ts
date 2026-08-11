@@ -2,11 +2,11 @@ import type { MetadataRoute } from "next";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    id: "/",
+    id: "/login",
     name: "CRMVLC — Vivi le Canarie",
     short_name: "CRMVLC",
     description: "CRM, contratti, sponsor, distribuzione e rete commerciale per le cinque isole.",
-    start_url: "/",
+    start_url: "/login",
     scope: "/",
     display: "standalone",
     orientation: "portrait-primary",

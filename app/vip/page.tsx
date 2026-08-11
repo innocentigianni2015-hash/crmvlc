@@ -3,8 +3,8 @@
 import QRCode from "qrcode";
 import Image from "next/image";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { localeTag, platformOwnership, usePlatformLanguage } from "../i18n";
 
-type Language = "it" | "es";
 type Sponsor = {
   id: string;
   name: string;
@@ -98,6 +98,39 @@ const copy = {
     follow: "Ir a Instagram",
     loading: "Estamos preparando tu VIP Pass…",
   },
+  en: {
+    kicker: "THE OFFICIAL VIVI LE CANARIE PASS",
+    hero: "The more you experience the islands, the more benefits you unlock.",
+    intro: "Selected offers, local experiences and prizes for the Vivi le Canarie community.",
+    activate: "Activate the VIP Pass free",
+    active: "Pass active",
+    sponsors: "VIP sponsors",
+    offers: "offers available",
+    allIslands: "All islands",
+    allCategories: "All categories",
+    unlock: "Unlock coupon",
+    map: "Open map",
+    empty: "The first VIP offers in this selection are on their way.",
+    emptyNote: "Change the filter or return soon: we publish verified sponsors only.",
+    registerTitle: "Unlock all coupons",
+    registerText: "We only need three details. Your number is used for the VIP Pass and the coupons you request.",
+    name: "Full name",
+    phone: "WhatsApp number",
+    island: "Your island",
+    consent: "I accept the VIP Pass terms and authorise delivery of requested coupons via WhatsApp.",
+    confirm: "Activate my VIP Pass",
+    cancel: "Not now",
+    couponReady: "Coupon unlocked",
+    showCode: "Show this code at checkout",
+    whatsappSent: "We are also sending it via WhatsApp.",
+    whatsappPending: "WhatsApp is not connected yet: keep this code.",
+    expires: "Valid until",
+    close: "Close",
+    streak: "monthly streak",
+    instagram: "Follow @vivi_le_canarie and comment VIVI to double your chances of winning.",
+    follow: "Open Instagram",
+    loading: "Preparing your VIP Pass…",
+  },
 } as const;
 
 class ApiError extends Error {}
@@ -110,7 +143,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export default function VipPage() {
-  const [language, setLanguage] = useState<Language>("it");
+  const { locale: language, setLocale: setLanguage } = usePlatformLanguage();
   const [data, setData] = useState<DirectoryData | null>(null);
   const [island, setIsland] = useState("");
   const [category, setCategory] = useState("");
@@ -207,7 +240,7 @@ export default function VipPage() {
       <a className="vip-brand" href="/vip" aria-label="Vivi le Canarie VIP Pass"><img src={BRAND_LOGO} alt="" /><div><strong>VIVI LE CANARIE</strong><small>VIP PASS</small></div></a>
       <div className="vip-top-actions">
         {data.member && <div className="vip-member-chip"><span>{initials(data.member.name)}</span><div><strong>{data.member.name}</strong><small>{data.member.tier === "platinum" ? "Platinum" : "VIP"} · {data.member.island}</small></div></div>}
-        <div className="vip-language" aria-label="Lingua"><button className={language === "it" ? "active" : ""} onClick={() => setLanguage("it")}>IT</button><button className={language === "es" ? "active" : ""} onClick={() => setLanguage("es")}>ES</button></div>
+        <div className="vip-language" aria-label="Lingua"><button className={language === "es" ? "active" : ""} onClick={() => setLanguage("es")}>ES</button><button className={language === "it" ? "active" : ""} onClick={() => setLanguage("it")}>IT</button><button className={language === "en" ? "active" : ""} onClick={() => setLanguage("en")}>EN</button></div>
       </div>
     </header>
 
@@ -230,11 +263,11 @@ export default function VipPage() {
     </section>
 
     <section className="vip-instagram"><div><span>02×</span><div><small>EXTRA CHANCE</small><h2>{t.instagram}</h2></div></div><a href={data.instagram.url} target="_blank" rel="noreferrer" onClick={() => void track("instagram_click")}>{t.follow} ↗</a></section>
-    <footer className="vip-footer"><div className="vip-brand light"><img src={BRAND_LOGO} alt="" /><div><strong>VIVI LE CANARIE</strong><small>VIP PASS</small></div></div><p>© 2026 Vivi le Canarie · Tenerife · Gran Canaria · Lanzarote · Fuerteventura · La Palma</p></footer>
+    <footer className="vip-footer"><div className="vip-brand light"><img src={BRAND_LOGO} alt="" /><div><strong>VIVI LE CANARIE</strong><small>VIP PASS</small></div></div><p>© 2026 Vivi le Canarie · Tenerife · Gran Canaria · Lanzarote · Fuerteventura · La Palma</p><small className="vip-owner">{platformOwnership(language)}</small></footer>
 
     {registrationOpen && <div className="vip-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) setRegistrationOpen(false); }}><section className="vip-modal" role="dialog" aria-modal="true" aria-labelledby="vip-register-title"><header><div><small>VIP PASS</small><h2 id="vip-register-title">{t.registerTitle}</h2><p>{t.registerText}</p></div><button aria-label={t.close} disabled={busy} onClick={() => setRegistrationOpen(false)}>×</button></header><form onSubmit={register}><label>{t.name}<input name="name" autoComplete="name" required maxLength={120} /></label><label>{t.phone}<input name="phone" type="tel" inputMode="tel" autoComplete="tel" placeholder="+34 600 000 000" required /></label><label>{t.island}<select name="island" defaultValue={pendingSponsor?.island ?? island} required><option value="">—</option>{data.islands.map((item) => <option key={item}>{item}</option>)}</select></label><label className="vip-consent"><input name="consent" type="checkbox" required /><span>{t.consent}</span></label>{error && <div className="vip-form-error">{error}</div>}<button className="vip-submit" disabled={busy}>{busy ? "…" : t.confirm}</button><button type="button" className="vip-cancel" disabled={busy} onClick={() => setRegistrationOpen(false)}>{t.cancel}</button></form></section></div>}
 
-    {coupon && <div className="vip-modal-backdrop"><section className="vip-modal coupon-modal" role="dialog" aria-modal="true" aria-labelledby="coupon-title"><header><div><small>{coupon.sponsor.name}</small><h2 id="coupon-title">{t.couponReady}</h2><p>{coupon.sponsor.offerTitle}</p></div><button aria-label={t.close} onClick={() => setCoupon(null)}>×</button></header><div className="vip-coupon-body"><div className="vip-coupon-value">{coupon.sponsor.discountText}</div>{qrDataUrl ? <Image unoptimized src={qrDataUrl} alt={`QR coupon ${coupon.code}`} width={220} height={220} /> : <div className="vip-qr-placeholder" />}<p>{t.showCode}</p><strong className="vip-code">{coupon.code}</strong><small>{t.expires} {new Intl.DateTimeFormat(language === "it" ? "it-IT" : "es-ES", { dateStyle: "long" }).format(new Date(coupon.expiresAt))}</small><div className={`vip-whatsapp-note ${whatsappQueued ? "sent" : "pending"}`}>{whatsappQueued ? t.whatsappSent : t.whatsappPending}</div><button className="vip-submit" onClick={() => setCoupon(null)}>{t.close}</button></div></section></div>}
+    {coupon && <div className="vip-modal-backdrop"><section className="vip-modal coupon-modal" role="dialog" aria-modal="true" aria-labelledby="coupon-title"><header><div><small>{coupon.sponsor.name}</small><h2 id="coupon-title">{t.couponReady}</h2><p>{coupon.sponsor.offerTitle}</p></div><button aria-label={t.close} onClick={() => setCoupon(null)}>×</button></header><div className="vip-coupon-body"><div className="vip-coupon-value">{coupon.sponsor.discountText}</div>{qrDataUrl ? <Image unoptimized src={qrDataUrl} alt={`QR coupon ${coupon.code}`} width={220} height={220} /> : <div className="vip-qr-placeholder" />}<p>{t.showCode}</p><strong className="vip-code">{coupon.code}</strong><small>{t.expires} {new Intl.DateTimeFormat(localeTag(language), { dateStyle: "long" }).format(new Date(coupon.expiresAt))}</small><div className={`vip-whatsapp-note ${whatsappQueued ? "sent" : "pending"}`}>{whatsappQueued ? t.whatsappSent : t.whatsappPending}</div><button className="vip-submit" onClick={() => setCoupon(null)}>{t.close}</button></div></section></div>}
   </main>;
 }
 

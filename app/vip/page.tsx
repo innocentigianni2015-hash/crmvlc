@@ -158,11 +158,12 @@ export default function VipPage() {
 
   const loadDirectory = useCallback(async () => {
     const params = new URLSearchParams();
+    params.set("locale", language);
     if (island) params.set("island", island);
     if (category) params.set("category", category);
     const result = await api<DirectoryData>(`/api/vip/directory?${params}`);
     setData(result);
-  }, [category, island]);
+  }, [category, island, language]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void loadDirectory().catch((cause) => setError(cause instanceof Error ? cause.message : "Errore temporaneo.")); }, 0);

@@ -1,4 +1,4 @@
-const CACHE_NAME = "crmvlc-shell-v15";
+const CACHE_NAME = "crmvlc-shell-v16";
 const FIELD_DB = "crmvlc-field-v1";
 const FIELD_DB_VERSION = 1;
 const SNAPSHOTS = "snapshots";
@@ -8,6 +8,7 @@ const SHELL = [
   "/",
   "/vip",
   "/favicon.svg",
+  "/brand/viv-le-canarie-icon.svg",
   "/manifest.webmanifest",
   "/vip.webmanifest",
   "/icons/crmvlc-192.png",
@@ -39,7 +40,7 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  if (url.pathname.startsWith("/assets/") || url.pathname.startsWith("/icons/") || url.pathname === "/favicon.svg" || url.pathname.endsWith(".webmanifest")) {
+  if (url.pathname.startsWith("/assets/") || url.pathname.startsWith("/icons/") || url.pathname === "/favicon.svg" || url.pathname.startsWith("/brand/") || url.pathname.endsWith(".webmanifest")) {
     event.respondWith(cacheFirstAsset(request));
   }
 });

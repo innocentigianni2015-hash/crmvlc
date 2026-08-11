@@ -17,6 +17,7 @@ type SnapshotRecord<T> = {
 type PhotoAuditOutbox = {
   id: string;
   kind: "photo-audit";
+  userId: string;
   deliveryId: string;
   photo: Blob;
   filename: string;
@@ -121,7 +122,7 @@ export async function prepareDeliveryPhoto(photo: File): Promise<File> {
 
   let bitmap: ImageBitmap;
   try {
-    bitmap = await createImageBitmap(photo, { imageOrientation: "from-image" });
+    bitmap = await createImageBitmap(photo);
   } catch {
     throw new Error("Formato fotografico non supportato. Usa la fotocamera o scegli un file JPG, PNG o WebP.");
   }
@@ -154,6 +155,7 @@ export async function prepareDeliveryPhoto(photo: File): Promise<File> {
 }
 
 export async function queuePhotoAudit(input: {
+  userId: string;
   deliveryId: string;
   photo: Blob;
   filename: string;
@@ -164,6 +166,7 @@ export async function queuePhotoAudit(input: {
   await useStore(OUTBOX, "readwrite", (store) => store.put({
     id,
     kind: "photo-audit",
+    userId: input.userId,
     deliveryId: input.deliveryId,
     photo: input.photo,
     filename: input.filename,
@@ -179,14 +182,17 @@ export async function queuePhotoAudit(input: {
   return id;
 }
 
-export async function pendingOutboxCount(): Promise<number> {
+export async function pendingOutboxCount(userId?: string): Promise<number> {
   if (!canUseIndexedDb()) return 0;
-  return useStore<number>(OUTBOX, "readonly", (store) => store.count());
+  if (!userId) return useStore<number>(OUTBOX, "readonly", (store) => store.count());
+  const records = await useStore<PhotoAuditOutbox[]>(OUTBOX, "readonly", (store) => store.getAll());
+  return records.filter((record) => record.userId === userId).length;
 }
 
-export async function syncPhotoAuditOutbox(): Promise<{ sent: number; pending: number }> {
-  if (!canUseIndexedDb() || !navigator.onLine) return { sent: 0, pending: await pendingOutboxCount() };
-  const records = await useStore<PhotoAuditOutbox[]>(OUTBOX, "readonly", (store) => store.getAll());
+export async function syncPhotoAuditOutbox(userId: string): Promise<{ sent: number; pending: number }> {
+  if (!canUseIndexedDb() || !navigator.onLine) return { sent: 0, pending: await pendingOutboxCount(userId) };
+  const allRecords = await useStore<PhotoAuditOutbox[]>(OUTBOX, "readonly", (store) => store.getAll());
+  const records = allRecords.filter((record) => record.userId === userId);
   let sent = 0;
 
   for (const record of records.sort((a, b) => a.createdAt - b.createdAt)) {
@@ -216,7 +222,7 @@ export async function syncPhotoAuditOutbox(): Promise<{ sent: number; pending: n
     }
   }
 
-  const pending = await pendingOutboxCount();
+  const pending = await pendingOutboxCount(userId);
   notifyOutboxChanged();
   return { sent, pending };
 }

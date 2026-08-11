@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useState } from "react";
+import { loadOfflineSnapshot, prepareDeliveryPhoto, queuePhotoAudit, saveOfflineSnapshot } from "./offline";
 
 type Role = "super_admin" | "sales_manager" | "sales" | "distributor";
 type User = { id: string; name: string; role: Role; island: string | null };
@@ -36,13 +37,16 @@ const TABS = [
   ["sales", "Sales Ops"],
 ] as const;
 
-class RequestError extends Error {}
+class RequestError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
-  const payload = await response.json() as { error?: { message?: string } } & T;
-  if (!response.ok) throw new RequestError(payload.error?.message ?? "Operazione non riuscita.");
-  return payload;
+  const isJson = (response.headers.get("content-type") ?? "").includes("application/json");
+  const payload = isJson ? await response.json() as { error?: { message?: string } } & T : null;
+  if (!response.ok) throw new RequestError(payload?.error?.message ?? "Operazione non riuscita.", response.status);
+  return payload as T;
 }
 
 async function post(path: string, value: Record<string, unknown>) {
@@ -70,13 +74,31 @@ export function OperationsHub({ user, clients, users, deliveries, notify }: {
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
-    try { setData(await request<Snapshot>("/api/operations")); }
-    catch (error) { notify(error instanceof Error ? error.message : "Moduli non disponibili.", "error"); }
-  }, [notify]);
+    try {
+      const result = await request<Snapshot>("/api/operations");
+      setData(result);
+      await saveOfflineSnapshot(`operations:${user.id}`, user.id, result);
+    } catch (error) {
+      if (!(error instanceof RequestError)) {
+        const cached = await loadOfflineSnapshot<Snapshot>(`operations:${user.id}`).catch(() => null);
+        if (cached?.userId === user.id) {
+          setData(cached.value);
+          notify("Moduli operativi disponibili in sola lettura offline.");
+          return;
+        }
+      }
+      notify(error instanceof Error ? error.message : "Moduli non disponibili.", "error");
+    }
+  }, [notify, user.id]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void refresh(); }, 0);
-    return () => window.clearTimeout(timer);
+    const online = () => { void refresh(); };
+    window.addEventListener("online", online);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("online", online);
+    };
   }, [refresh]);
 
   async function run(action: () => Promise<unknown>, success: string, form?: HTMLFormElement) {
@@ -88,6 +110,56 @@ export function OperationsHub({ user, clients, users, deliveries, notify }: {
       await refresh();
     } catch (error) { notify(error instanceof Error ? error.message : "Operazione non riuscita.", "error"); }
     finally { setBusy(false); }
+  }
+
+  async function submitPhotoAudit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    setBusy(true);
+    try {
+      const location = await currentLocation();
+      const formData = new FormData(form);
+      const deliveryId = String(formData.get("deliveryId") ?? "");
+      const selected = formData.get("photo");
+      if (!deliveryId || !(selected instanceof File) || selected.size === 0) {
+        throw new Error("Seleziona una consegna e scatta la fotografia.");
+      }
+
+      const photo = await prepareDeliveryPhoto(selected);
+      let queued = !navigator.onLine;
+      if (!queued) {
+        const upload = new FormData();
+        upload.set("deliveryId", deliveryId);
+        upload.set("latitude", String(location.latitude));
+        upload.set("longitude", String(location.longitude));
+        upload.set("photo", photo, photo.name);
+        try {
+          await request("/api/operations/photo-audits", { method: "POST", body: upload });
+        } catch (error) {
+          if (error instanceof RequestError) throw error;
+          queued = true;
+        }
+      }
+      if (queued) {
+        await queuePhotoAudit({
+          deliveryId,
+          photo,
+          filename: photo.name,
+          latitude: location.latitude,
+          longitude: location.longitude,
+        });
+      }
+
+      form.reset();
+      notify(queued
+        ? "Foto di consegna salvata sul dispositivo. Verrà inviata appena torna la rete."
+        : "Verifica fotografica inviata.");
+      if (!queued) await refresh();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Acquisizione non riuscita.", "error");
+    } finally {
+      setBusy(false);
+    }
   }
 
   if (!data) return <section className="ops-page"><div className="module-loading"><span /><p>Caricamento moduli operativi…</p></div></section>;
@@ -105,7 +177,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify }: {
     {tab === "vip" && user.role !== "distributor" && <VipPanel data={data} user={user} clients={clients} busy={busy} run={run} />}
     {tab === "finance" && user.role !== "distributor" && <FinancePanel data={data} user={user} busy={busy} run={run} />}
     {tab === "inventory" && user.role !== "distributor" && <InventoryPanel data={data} user={user} busy={busy} run={run} />}
-    {tab === "distribution" && <GeoAuditPanel data={data} user={user} clients={clients} deliveries={deliveries} busy={busy} run={run} />}
+    {tab === "distribution" && <GeoAuditPanel data={data} user={user} clients={clients} deliveries={deliveries} busy={busy} run={run} submitPhotoAudit={submitPhotoAudit} />}
     {tab === "sales" && user.role !== "distributor" && <SalesPanel data={data} user={user} users={users} clients={clients} busy={busy} run={run} />}
   </section>;
 }
@@ -228,7 +300,7 @@ function InventoryPanel({ data, user, busy, run }: PanelProps) {
   </div>;
 }
 
-function GeoAuditPanel({ data, user, clients, deliveries, busy, run }: PanelProps & { clients: Client[]; deliveries: Delivery[] }) {
+function GeoAuditPanel({ data, user, clients, deliveries, busy, run, submitPhotoAudit }: PanelProps & { clients: Client[]; deliveries: Delivery[]; submitPhotoAudit: (event: FormEvent<HTMLFormElement>) => void }) {
   const canManage = ["super_admin", "sales_manager"].includes(user.role);
   return <div className="hub-stack">
     <div className="hub-two">
@@ -238,11 +310,11 @@ function GeoAuditPanel({ data, user, clients, deliveries, busy, run }: PanelProp
         </form>
       </ActionCard>}
       <ActionCard index="02" title="Foto di consegna" text="Foto, posizione, hash e controllo geofence.">
-        <form onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; void run(async () => { const location = await currentLocation(); const fd = new FormData(form); fd.set("latitude", String(location.latitude)); fd.set("longitude", String(location.longitude)); await request("/api/operations/photo-audits", { method: "POST", body: fd }); }, "Verifica fotografica inviata.", form); }}>
+        <form onSubmit={submitPhotoAudit}>
           <select name="deliveryId" required><option value="">Seleziona consegna</option>{deliveries.map((delivery) => <option key={delivery.id} value={delivery.id}>{delivery.client_company ?? delivery.id} · {delivery.island}</option>)}</select>
           <input name="photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" required />
-          <p className="form-microcopy">La posizione viene acquisita al momento dell’invio. La foto originale resta conservata con hash e watermark probatorio.</p>
-          <button className="primary" disabled={busy || !deliveries.length}>Acquisisci posizione e invia</button>
+          <p className="form-microcopy">Foto, coordinate e orario vengono acquisiti insieme. Senza rete restano cifrati dal sistema del telefono e sono inviati alla riapertura dell’app.</p>
+          <button className="primary" disabled={busy || !deliveries.length}>Scatta foto e registra consegna</button>
         </form>
       </ActionCard>
     </div>

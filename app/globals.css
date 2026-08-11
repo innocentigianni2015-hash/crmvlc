@@ -940,3 +940,59 @@ code { padding: 4px 7px; border-radius: 6px; color: #22516d; background: #eaf3f7
   .ops-sidebar nav button { min-width: 74px; flex-basis: 74px; }
   .row-actions { grid-template-columns: 1fr; }
 }
+
+
+/* PWA, connectivity and offline delivery capture */
+.install-button {
+  color: white !important;
+  border-color: var(--coral) !important;
+  background: var(--coral) !important;
+  font-weight: 800;
+}
+.install-button:hover { background: var(--coral-dark) !important; }
+.connectivity-strip {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 9px 34px;
+  border-bottom: 1px solid;
+  font-size: 11px;
+}
+.connectivity-strip strong {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  border-radius: 18px;
+  color: white;
+  font-size: 9px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.connectivity-strip.offline { color: #74510b; border-color: #ead395; background: #fff4d7; }
+.connectivity-strip.offline strong { background: #9c6c0c; }
+.connectivity-strip.pending { color: #285d4f; border-color: #cce4dc; background: #edf8f4; }
+.connectivity-strip.pending strong { background: var(--green); }
+input[type="file"] { min-height: 48px; padding: 10px; background: #f8fafb; }
+input[type="file"]::file-selector-button {
+  min-height: 32px;
+  margin-right: 10px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  color: white;
+  background: var(--navy-2);
+  font-weight: 800;
+}
+
+@media (max-width: 780px) {
+  .connectivity-strip {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  .ops-user .install-button { min-width: 64px; color: white; }
+  input[type="file"] { width: 100%; font-size: 13px; }
+}

@@ -132,6 +132,18 @@ html:has(.public-landing) {
   color: var(--public-ink);
 }
 
+.public-landing .footer-owner {
+  border-top: 1px solid rgba(255, 255, 255, 0.2);
+  color: rgba(255, 255, 255, 0.74);
+  flex-basis: 100%;
+  font-size: 11px;
+  line-height: 1.55;
+  margin: 22px 0 0;
+  padding-top: 18px;
+  text-align: center;
+  width: 100%;
+}
+
 .public-landing .crm-link {
   font-size: 12px;
   font-weight: 800;
@@ -797,6 +809,7 @@ html:has(.public-landing) {
   background: var(--public-red);
   color: var(--public-white);
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   padding: 36px clamp(24px, 6vw, 96px);
 }
@@ -1095,4 +1108,3 @@ html:has(.public-landing) {
     transition-duration: 0.01ms !important;
   }
 }
-

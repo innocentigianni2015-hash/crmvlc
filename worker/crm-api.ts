@@ -28,8 +28,12 @@ import { handleVipPublicApi } from "./vip-public-api.js";
 import { createPasswordHash, handlePasswordAuth } from "./password-auth.js";
 import { createImpersonationToken, verifyImpersonationToken } from "./impersonation.js";
 import { canaryDateKey, canaryLocalToIso, oneHourAfter } from "./podcast-scheduling.js";
+import { handleHelpApi, loadHelpBootstrap } from "./help-assistant.js";
 
 type RuntimeEnv = Env & {
+  AI?: Ai;
+  AI_MODEL?: string;
+  AI_MONTHLY_BUDGET_MICRO_USD?: string;
   AUTH_SECRET?: string;
   DEMO_MODE?: string;
   DEMO_EMAIL?: string;
@@ -308,6 +312,7 @@ export async function handleCrmApi(
           email: Boolean(env.EMAIL && env.EMAIL_FROM),
           admin: Boolean(env.ADMIN_EMAIL),
           authSecret: Boolean(env.AUTH_SECRET),
+          ai: Boolean(env.AI),
           demo: isDemoEnabled(env),
         },
       });
@@ -355,6 +360,11 @@ export async function handleCrmApi(
     if (vipResponse) return vipResponse;
 
     const user = await requireUser(request, env, ctx);
+
+    const helpResponse = await handleHelpApi(request, env, user, (auditRequest, _actor, action, entityType, entityId, payload) => (
+      appendAudit(env, auditRequest, user, action, entityType, entityId, payload)
+    ));
+    if (helpResponse) return helpResponse;
 
     if (url.pathname === "/api/admin/impersonation/start" && request.method === "POST") {
       return startImpersonation(request, user, env);
@@ -781,6 +791,7 @@ async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Resp
       "SELECT id, email, name, phone, role, island, sales_manager_id, active, created_at FROM users WHERE active = 1 AND role IN ('sales', 'distributor') ORDER BY role, island, name",
     ).all()).results
     : [];
+  const help = await loadHelpBootstrap(env, user);
 
   return json({
     user: publicUser(user),
@@ -800,6 +811,7 @@ async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Resp
     discountCampaigns,
     podcastAppointments,
     podcastInterviewers,
+    help,
     demoMode: isDemoEnabled(env) && user.email === normalizeEmail(env.DEMO_EMAIL),
   });
 }

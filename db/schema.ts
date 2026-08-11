@@ -502,3 +502,69 @@ export const bundles = sqliteTable("bundles", {
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 }, (table) => [uniqueIndex("bundles_code_unique").on(table.code)]);
+
+export const faqEntries = sqliteTable("faq_entries", {
+  id: text("id").primaryKey(),
+  translationGroupId: text("translation_group_id").notNull(),
+  language: text("language", { enum: ["it", "es"] }).notNull(),
+  moduleKey: text("module_key").notNull(),
+  title: text("title").notNull(),
+  question: text("question").notNull(),
+  answer: text("answer").notNull(),
+  allowedRolesJson: text("allowed_roles_json").notNull(),
+  status: text("status", { enum: ["draft", "published", "retired"] }).notNull().default("draft"),
+  version: integer("version").notNull().default(1),
+  createdBy: text("created_by").references(() => users.id),
+  updatedBy: text("updated_by").references(() => users.id),
+  approvedBy: text("approved_by").references(() => users.id),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  publishedAt: text("published_at"),
+}, (table) => [
+  uniqueIndex("faq_entries_version_unique").on(table.translationGroupId, table.language, table.version),
+  index("faq_entries_published_idx").on(table.status, table.language, table.moduleKey),
+]);
+
+export const aiInteractions = sqliteTable("ai_interactions", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id),
+  role: text("role").notNull(),
+  island: text("island"),
+  language: text("language", { enum: ["it", "es"] }).notNull(),
+  moduleKey: text("module_key").notNull(),
+  question: text("question").notNull(),
+  answer: text("answer").notNull(),
+  status: text("status", { enum: ["answered", "escalated", "budget_blocked", "error"] }).notNull(),
+  sourcesJson: text("sources_json").notNull().default("[]"),
+  model: text("model"),
+  promptTokens: integer("prompt_tokens").notNull().default(0),
+  completionTokens: integer("completion_tokens").notNull().default(0),
+  estimatedCostMicroUsd: integer("estimated_cost_micro_usd").notNull().default(0),
+  createdAt: text("created_at").notNull(),
+}, (table) => [index("ai_interactions_user_idx").on(table.userId, table.createdAt), index("ai_interactions_status_idx").on(table.status, table.createdAt)]);
+
+export const faqTickets = sqliteTable("faq_tickets", {
+  id: text("id").primaryKey(),
+  interactionId: text("interaction_id").notNull().references(() => aiInteractions.id),
+  userId: text("user_id").notNull().references(() => users.id),
+  role: text("role").notNull(),
+  island: text("island"),
+  language: text("language", { enum: ["it", "es"] }).notNull(),
+  moduleKey: text("module_key").notNull(),
+  question: text("question").notNull(),
+  reason: text("reason").notNull(),
+  status: text("status", { enum: ["open", "resolved"] }).notNull().default("open"),
+  resolutionNote: text("resolution_note"),
+  resolvedBy: text("resolved_by").references(() => users.id),
+  createdAt: text("created_at").notNull(),
+  resolvedAt: text("resolved_at"),
+}, (table) => [index("faq_tickets_queue_idx").on(table.status, table.createdAt), index("faq_tickets_user_idx").on(table.userId, table.createdAt)]);
+
+export const aiMonthlyUsage = sqliteTable("ai_monthly_usage", {
+  monthKey: text("month_key").primaryKey(),
+  spentMicroUsd: integer("spent_micro_usd").notNull().default(0),
+  reservedMicroUsd: integer("reserved_micro_usd").notNull().default(0),
+  requestCount: integer("request_count").notNull().default(0),
+  budgetMicroUsd: integer("budget_micro_usd").notNull().default(25000000),
+  updatedAt: text("updated_at").notNull(),
+});

@@ -17,6 +17,7 @@
     "binding": "ASSETS"
   },
   "images": { "binding": "IMAGES" },
+  "ai": { "binding": "AI" },
   "d1_databases": [
     {
       "binding": "DB",
@@ -39,7 +40,9 @@
     "ADMIN_EMAIL": "innocentigianni@proton.me",
     "ADMIN_NAME": "CRMVLC Super Admin",
     "EMAIL_FROM": "welcome@crmvlc.com",
-    "SESSION_HOURS": "12"
+    "SESSION_HOURS": "12",
+    "AI_MODEL": "@cf/openai/gpt-oss-20b",
+    "AI_MONTHLY_BUDGET_MICRO_USD": "25000000"
   },
   "observability": {
     "enabled": true,

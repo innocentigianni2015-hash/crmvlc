@@ -14,6 +14,24 @@
   --shadow: 0 18px 50px rgba(16, 42, 67, .12);
 }
 
+/* Platform language and legal ownership */
+.platform-i18n-root { display: contents; }
+.platform-language { display: inline-flex; align-items: center; gap: 3px; padding: 3px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.platform-language button { min-width: 34px; min-height: 32px; padding: 0 7px; border: 0; border-radius: 7px; color: var(--muted); background: transparent; font-size: 10px; font-weight: 900; letter-spacing: .05em; }
+.platform-language button.active { color: #fff; background: var(--navy-2); }
+.platform-language.compact button { min-width: 30px; min-height: 28px; }
+.platform-owner { margin: 20px 34px 92px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 9px; line-height: 1.55; text-align: center; }
+.platform-owner strong { color: var(--ink); }
+.auth-owner { color: rgba(255, 255, 255, 0.72); font-size: 10px; line-height: 1.5; max-width: 680px; }
+.document-language-notice { padding: 11px 13px; border: 1px solid #f0c9a5; border-radius: 9px; color: #754014; background: #fff7ec; font-size: 11px; line-height: 1.5; }
+.document-language-confirmation { display: flex; align-items: flex-start; gap: 9px; }
+.document-language-confirmation input { width: auto; margin-top: 2px; }
+@media (max-width: 760px) {
+  .ops-user .platform-language { order: -1; }
+  .platform-language button { min-width: 30px; min-height: 38px; }
+  .platform-owner { margin: 18px 12px 92px; font-size: 9px; }
+}
+
 * { box-sizing: border-box; }
 html { background: var(--cream); }
 body { margin: 0; color: var(--ink); background: var(--cream); font-family: Arial, Helvetica, sans-serif; }
@@ -744,6 +762,7 @@ code { padding: 4px 7px; border-radius: 6px; color: #22516d; background: #eaf3f7
 .vip-instagram > a { flex: 0 0 auto; padding: 14px 17px; border-radius: 24px; color: #d95e49; background: white; font-size: 9px; font-weight: 900; text-decoration: none; }
 .vip-footer { display: flex; align-items: center; justify-content: space-between; gap: 25px; padding: 36px clamp(24px, 7vw, 110px); color: #a8c4bb; background: #071e19; }
 .vip-footer p { margin: 0; font-size: 8px; text-align: right; }
+.vip-footer .vip-owner { color: #8eaaa1; flex-basis: 100%; font-size: 8px; line-height: 1.55; text-align: center; }
 .vip-loading { min-height: 100vh; display: grid; place-items: center; align-content: center; gap: 14px; color: #6b827a; background: #f3efe4; }
 .vip-loading .vip-mark { width: 62px; height: 62px; display: grid; place-items: center; border-radius: 50% 50% 50% 18px; color: #10382f; background: #c9f264; font: 700 30px Georgia, serif; animation: vip-pulse 1.4s ease-in-out infinite; }
 .vip-loading .vip-logo-mark { width: 78px; height: 78px; border-radius: 20px; object-fit: cover; box-shadow: 0 12px 30px rgba(25,54,45,.18); animation: vip-pulse 1.4s ease-in-out infinite; }

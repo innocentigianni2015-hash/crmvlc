@@ -1,4 +1,4 @@
-const CACHE_NAME = "crmvlc-shell-v16";
+const CACHE_NAME = "crmvlc-shell-v17";
 const FIELD_DB = "crmvlc-field-v1";
 const FIELD_DB_VERSION = 1;
 const SNAPSHOTS = "snapshots";
@@ -6,6 +6,7 @@ const OUTBOX = "outbox";
 const SYNC_TAG = "crmvlc-photo-outbox";
 const SHELL = [
   "/",
+  "/login",
   "/vip",
   "/favicon.svg",
   "/brand/viv-le-canarie-icon.svg",
@@ -59,7 +60,7 @@ async function networkFirstPage(request, url) {
     return response;
   } catch {
     return (await caches.match(request))
-      ?? (await caches.match(url.pathname.startsWith("/vip") ? "/vip" : "/"))
+      ?? (await caches.match(url.pathname.startsWith("/vip") ? "/vip" : url.pathname.startsWith("/login") ? "/login" : "/"))
       ?? Response.error();
   }
 }

@@ -1324,17 +1324,25 @@ async function requireUser(request: Request, env: RuntimeEnv, ctx: ExecutionCont
 
   const authenticatedActor: AuthenticatedUser = { ...sessionActor, sessionActor, impersonation: null };
   const impersonationToken = cookieValue(request, IMPERSONATION_COOKIE);
-  if (!impersonationToken || sessionActor.role !== "super_admin" || !env.AUTH_SECRET) return authenticatedActor;
+  if (!impersonationToken || sessionActor.role !== "super_admin") return authenticatedActor;
+  const stoppingImpersonation = new URL(request.url).pathname === "/api/admin/impersonation/stop";
+  if (!env.AUTH_SECRET) {
+    if (stoppingImpersonation) return authenticatedActor;
+    throw new ApiError(503, "auth_not_configured", "La chiave di autenticazione non è configurata.");
+  }
 
   const claims = await verifyImpersonationToken(env.AUTH_SECRET, impersonationToken);
   if (!claims || claims.actorId !== sessionActor.id) {
-    if (new URL(request.url).pathname === "/api/admin/impersonation/stop") return authenticatedActor;
+    if (stoppingImpersonation) return authenticatedActor;
     throw new ApiError(409, "impersonation_expired", "La modalità operativa è scaduta. Torna alla dashboard Super Admin e riaprila.");
   }
   const target = await env.DB.prepare(
     "SELECT id, email, name, phone, role, island, active FROM users WHERE id = ? AND active = 1 LIMIT 1",
   ).bind(claims.targetId).first<UserRow>();
-  if (!target || !["sales", "distributor"].includes(target.role)) return authenticatedActor;
+  if (!target || !["sales", "distributor"].includes(target.role)) {
+    if (stoppingImpersonation) return authenticatedActor;
+    throw new ApiError(409, "impersonation_target_unavailable", "L’utente operativo non è più disponibile. Torna alla dashboard Super Admin.");
+  }
 
   return {
     ...target,

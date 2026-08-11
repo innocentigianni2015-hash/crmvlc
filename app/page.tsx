@@ -44,14 +44,24 @@ type PriceItem = {
 type Quote = {
   id: string; quote_number: string; client_id: string; client_company?: string; status: "issued" | "converted";
   owner_user_id: string; island: string; customer_company: string; customer_contact: string; customer_email: string;
-  months: number; subtotal_cents: number; discount_bps: number; discount_reason: string | null; discount_cents: number;
+  months: number; subtotal_cents: number; discount_campaign_id: string | null; discount_bps: number; discount_reason: string | null; discount_cents: number;
   net_cents: number; tax_name: string; tax_rate_bps: number; tax_cents: number; total_cents: number;
   customer_note: string | null; valid_until: string; pdf_sha256: string; converted_contract_id: string | null;
   converted_at: string | null; created_at: string;
 };
+type DiscountCampaign = {
+  id: string; title: string; message: string; discount_bps: number; starts_on: string; ends_on: string;
+  active: number; created_by: string; created_at: string; deactivated_at: string | null; usage_count: number;
+};
+type PodcastAppointment = {
+  id: string; guest_name: string; topic: string; interviewer_user_id: string; interviewer_name?: string;
+  starts_at: string; ends_at: string; notes: string | null; status: "scheduled" | "cancelled";
+  version: number; created_by: string; created_at: string; updated_at: string;
+};
 type Bootstrap = {
   user: User; clients: Client[]; contracts: Contract[]; quotes: Quote[]; deliveries: Delivery[]; templates: Template[]; users: User[];
   audit: AuditEvent[]; emailOutbox: EmailOutboxItem[]; priceList: PriceList | null; priceItems: PriceItem[]; demoMode?: boolean;
+  discountCampaigns: DiscountCampaign[]; podcastAppointments: PodcastAppointment[]; podcastInterviewers: User[];
   sessionActor?: User;
   impersonation?: { startedAt: string; expiresAt: string } | null;
   impersonationUsers?: User[];
@@ -91,6 +101,22 @@ function dateOnly(value: string) {
   return new Intl.DateTimeFormat("it-IT", { dateStyle: "short", timeZone: "UTC" }).format(new Date(`${value}T00:00:00Z`));
 }
 
+function canaryParts(value: string) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Atlantic/Canary", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(new Date(value));
+  const get = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
+  return { date: `${get("year")}-${get("month")}-${get("day")}`, time: `${get("hour")}:${get("minute")}` };
+}
+
+function canaryToday() {
+  return canaryParts(new Date().toISOString()).date;
+}
+
+function canaryDateTime(value: string) {
+  return new Intl.DateTimeFormat("it-IT", { dateStyle: "short", timeStyle: "short", timeZone: "Atlantic/Canary" }).format(new Date(value));
+}
+
 export default function Home() {
   const [data, setData] = useState<Bootstrap | null>(null);
   const [loading, setLoading] = useState(true);
@@ -101,7 +127,7 @@ export default function Home() {
   const [pendingCount, setPendingCount] = useState(0);
   const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(null);
   const [standalone, setStandalone] = useState(false);
-  const [active, setActive] = useState<"crm" | "operations" | "pricing" | "quotes" | "contracts" | "distribution" | "admin" | "audit">("crm");
+  const [active, setActive] = useState<"crm" | "operations" | "pricing" | "quotes" | "contracts" | "distribution" | "admin" | "audit" | "podcast">("crm");
   const [notice, setNotice] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   const [search, setSearch] = useState("");
   const [clientModal, setClientModal] = useState(false);
@@ -111,6 +137,8 @@ export default function Home() {
   const [deliveryModal, setDeliveryModal] = useState<Delivery | "new" | null>(null);
   const [profileModal, setProfileModal] = useState(false);
   const [impersonationModal, setImpersonationModal] = useState<"sales" | "distributor" | null>(null);
+  const [promotionPopup, setPromotionPopup] = useState<DiscountCampaign | null>(null);
+  const [preferredDiscountCampaignId, setPreferredDiscountCampaignId] = useState("");
 
   const refresh = useCallback(async () => {
     const emailChangeToken = new URLSearchParams(window.location.search).get("email-change");
@@ -286,6 +314,15 @@ export default function Home() {
     }, Math.min(delay + 250, 2_147_000_000));
     return () => window.clearTimeout(timer);
   }, [data?.impersonation?.expiresAt, refresh]);
+  useEffect(() => {
+    if (!data || !["sales", "sales_manager"].includes(data.user.role)) {
+      setPromotionPopup(null);
+      return;
+    }
+    const campaign = (data.discountCampaigns ?? []).find((item) => item.active === 1 && item.starts_on <= canaryToday() && item.ends_on >= canaryToday()
+      && window.sessionStorage.getItem(`crmvlc:promotion-seen:${item.id}`) !== "1");
+    setPromotionPopup(campaign ?? null);
+  }, [data]);
 
   const notify = (text: string, tone: "ok" | "error" = "ok") => setNotice({ text, tone });
 
@@ -372,6 +409,7 @@ export default function Home() {
           {data.user.role === "super_admin" && <button className={active === "audit" ? "active" : ""} onClick={() => setActive("audit")}><i>08</i> Audit</button>}
           {canImpersonate && <button className={data.impersonation && data.user.role === "sales" ? "active impersonation-nav" : "impersonation-nav"} onClick={() => setImpersonationModal("sales")}><i>09</i> Vista Sales</button>}
           {canImpersonate && <button className={data.impersonation && data.user.role === "distributor" ? "active impersonation-nav" : "impersonation-nav"} onClick={() => setImpersonationModal("distributor")}><i>10</i> Vista Distributore</button>}
+          {data.user.role !== "distributor" && <button className={active === "podcast" ? "active" : ""} onClick={() => setActive("podcast")}><i>11</i> Podcast</button>}
         </nav>
         <div className="ops-scope"><span className="live-dot" /><div><strong>{data.demoMode ? "Dati dimostrativi" : "Dati reali"}</strong><small>{data.impersonation ? `Come ${data.user.name}` : data.user.island ?? "Tutte le isole"}</small></div></div>
       </aside>
@@ -413,7 +451,7 @@ export default function Home() {
           </div>
         </section>}
 
-        {active === "pricing" && data.user.role !== "distributor" && <PriceListPanel data={data} search={search} refresh={refresh} notify={notify} onQuoteCreated={() => setActive("quotes")} />}
+        {active === "pricing" && data.user.role !== "distributor" && <PriceListPanel data={data} search={search} refresh={refresh} notify={notify} preferredCampaignId={preferredDiscountCampaignId} onQuoteCreated={() => setActive("quotes")} />}
 
         {active === "quotes" && data.user.role !== "distributor" && <QuotesPanel quotes={filteredQuotes} onConverted={async () => { notify("Bozza contratto creata dal preventivo."); setActive("contracts"); await refresh(); }} notify={notify} />}
 
@@ -421,6 +459,7 @@ export default function Home() {
 
         {active === "admin" && ["super_admin", "admin"].includes(data.user.role) && <AdminPanel data={data} refresh={refresh} notify={notify} />}
         {active === "audit" && data.user.role === "super_admin" && <AuditPanel events={data.audit} emails={data.emailOutbox} refresh={refresh} notify={notify} />}
+        {active === "podcast" && data.user.role !== "distributor" && <PodcastCalendar data={data} refresh={refresh} notify={notify} />}
       </main>
 
       {clientModal && <ClientModal data={data} onClose={() => setClientModal(false)} onSaved={async () => { setClientModal(false); notify("Cliente creato."); await refresh(); }} />}
@@ -430,6 +469,14 @@ export default function Home() {
       {deliveryModal && <DeliveryModal data={data} delivery={deliveryModal === "new" ? null : deliveryModal} onClose={() => setDeliveryModal(null)} onSaved={async () => { setDeliveryModal(null); notify(deliveryModal === "new" ? "Consegna assegnata." : "Consegna aggiornata."); await refresh(); }} />}
       {profileModal && <ProfileModal user={data.user} onClose={() => setProfileModal(false)} onSaved={async (message) => { setProfileModal(false); notify(message); await refresh(); }} />}
       {impersonationModal && <ImpersonationModal role={impersonationModal} users={data.impersonationUsers ?? []} currentUserId={data.impersonation ? data.user.id : null} onClose={() => setImpersonationModal(null)} onStarted={impersonationStarted} />}
+      {promotionPopup && <PromotionModal campaign={promotionPopup} onDismiss={(useCampaign) => {
+        window.sessionStorage.setItem(`crmvlc:promotion-seen:${promotionPopup.id}`, "1");
+        if (useCampaign) {
+          setPreferredDiscountCampaignId(promotionPopup.id);
+          setActive("pricing");
+        }
+        setPromotionPopup(null);
+      }} />}
       {notice && <div className={`ops-toast ${notice.tone}`}>{notice.tone === "ok" ? "✓" : "!"} {notice.text}</div>}
     </div>
   );
@@ -587,18 +634,25 @@ function CrmKanban({ clients, onStageChange }: { clients: Client[]; onStageChang
   </div>;
 }
 
-function PriceListPanel({ data, search, refresh, notify, onQuoteCreated }: { data: Bootstrap; search: string; refresh: () => Promise<void>; notify: (text: string, tone?: "ok" | "error") => void; onQuoteCreated: () => void }) {
+function PriceListPanel({ data, search, refresh, notify, preferredCampaignId, onQuoteCreated }: { data: Bootstrap; search: string; refresh: () => Promise<void>; notify: (text: string, tone?: "ok" | "error") => void; preferredCampaignId: string; onQuoteCreated: () => void }) {
   const [months, setMonths] = useState(1);
   const [clientId, setClientId] = useState(data.clients[0]?.id ?? "");
   const [validDays, setValidDays] = useState(30);
   const [discountPercent, setDiscountPercent] = useState(0);
   const [discountReason, setDiscountReason] = useState("");
+  const [discountCampaignId, setDiscountCampaignId] = useState(preferredCampaignId);
   const [customerNote, setCustomerNote] = useState("");
   const [quantities, setQuantities] = useState<Record<string, number>>({});
   const [editing, setEditing] = useState<PriceItem | null>(null);
   const [creating, setCreating] = useState(false);
   const [quoteError, setQuoteError] = useState("");
   const priceList = data.priceList;
+  const validCampaigns = (data.discountCampaigns ?? []).filter((campaign) => campaign.active === 1 && campaign.starts_on <= canaryToday() && campaign.ends_on >= canaryToday());
+  const selectedCampaign = validCampaigns.find((campaign) => campaign.id === discountCampaignId) ?? null;
+
+  useEffect(() => {
+    if (preferredCampaignId && validCampaigns.some((campaign) => campaign.id === preferredCampaignId)) setDiscountCampaignId(preferredCampaignId);
+  }, [preferredCampaignId, data.discountCampaigns]);
 
   if (!priceList) return <section className="ops-page"><PageHeading eyebrow="Vendita pubblicitaria" title="Listino" subtitle="Nessun listino attivo disponibile." action={<span className="admin-badge">Da configurare</span>} /><div className="data-card"><Empty title="Listino non disponibile" text="Il Super Admin deve attivare una versione del listino." /></div></section>;
 
@@ -606,7 +660,7 @@ function PriceListPanel({ data, search, refresh, notify, onQuoteCreated }: { dat
   const visibleItems = data.priceItems.filter((item) => `${item.name} ${item.dimensions} ${priceCategoryLabels[item.category]} ${item.included_services ?? ""}`.toLowerCase().includes(query));
   const selectedItems = data.priceItems.filter((item) => (quantities[item.id] ?? 0) > 0);
   const selectedCents = selectedItems.reduce((sum, item) => sum + item.monthly_price_cents * (quantities[item.id] ?? 0) * months, 0);
-  const discountBps = Math.round(discountPercent * 100);
+  const discountBps = selectedCampaign?.discount_bps ?? Math.round(discountPercent * 100);
   const discountCents = Math.round(selectedCents * discountBps / 10_000);
   const taxRate = priceList.tax_rate_bps / 10_000;
   const netCents = selectedCents - discountCents;
@@ -631,8 +685,9 @@ function PriceListPanel({ data, search, refresh, notify, onQuoteCreated }: { dat
           clientId: selectedClient.id,
           months,
           validDays,
-          discountPercent: data.user.role === "super_admin" ? discountPercent : 0,
-          discountReason: data.user.role === "super_admin" ? discountReason : "",
+          discountCampaignId: selectedCampaign?.id ?? null,
+          discountPercent: data.user.role === "super_admin" && !selectedCampaign ? discountPercent : 0,
+          discountReason: data.user.role === "super_admin" && !selectedCampaign ? discountReason : "",
           customerNote,
           items: selectedItems.map((item) => ({ priceItemId: item.id, quantity: quantities[item.id] })),
         }),
@@ -641,6 +696,7 @@ function PriceListPanel({ data, search, refresh, notify, onQuoteCreated }: { dat
       setQuantities({});
       setDiscountPercent(0);
       setDiscountReason("");
+      setDiscountCampaignId("");
       setCustomerNote("");
       await refresh();
       onQuoteCreated();
@@ -657,6 +713,7 @@ function PriceListPanel({ data, search, refresh, notify, onQuoteCreated }: { dat
 
   return <section className="ops-page pricing-page">
     <PageHeading eyebrow="Vendita pubblicitaria" title="Listino" subtitle="Dodici formati mensili, prezzi netti e IGIC calcolato separatamente per tutte le isole." action={<span className="admin-badge">v{priceList.version} · {priceList.tax_name} {(priceList.tax_rate_bps / 100).toLocaleString("it-IT")}%</span>} />
+    {data.user.role === "super_admin" && <DiscountCampaignAdmin campaigns={data.discountCampaigns ?? []} refresh={refresh} notify={notify} />}
     <div className="pricing-layout">
       <div className="pricing-catalog">
         <div className="pricing-notice"><strong>Prezzi base mensili</strong><span>{priceList.prices_include_tax ? `${priceList.tax_name} incluso` : `${priceList.tax_name} escluso`} · validi per Tenerife, Gran Canaria, Lanzarote, Fuerteventura e La Palma.</span></div>
@@ -666,10 +723,156 @@ function PriceListPanel({ data, search, refresh, notify, onQuoteCreated }: { dat
         })}</div></section>)}
         {!categories.length && <div className="data-card"><Empty title="Nessun formato trovato" text="Modifica la ricerca per visualizzare il listino." /></div>}
       </div>
-      <aside className="quote-panel"><span className="quote-eyebrow">Preventivo numerato</span><h2>Riepilogo</h2><label>Cliente<select value={selectedClient?.id ?? ""} onChange={(event) => setClientId(event.target.value)} disabled={!data.clients.length}>{data.clients.map((client) => <option key={client.id} value={client.id}>{client.company_name} · {client.island}</option>)}</select></label><div className="quote-fields"><label>Durata mesi<input type="number" min="1" max="36" value={months} onChange={(event) => setMonths(Math.min(36, Math.max(1, Number(event.target.value) || 1)))} /></label><label>Validità giorni<input type="number" min="1" max="90" value={validDays} onChange={(event) => setValidDays(Math.min(90, Math.max(1, Number(event.target.value) || 1)))} /></label></div>{data.user.role === "super_admin" ? <><label>Sconto %<input type="number" min="0" max="100" step="0.01" value={discountPercent} onChange={(event) => setDiscountPercent(Math.min(100, Math.max(0, Number(event.target.value) || 0)))} /></label>{discountPercent > 0 && <label>Motivo sconto<input maxLength={300} value={discountReason} onChange={(event) => setDiscountReason(event.target.value)} required placeholder="Motivazione commerciale" /></label>}</> : <div className="discount-lock"><strong>Sconti bloccati</strong><span>Solo il Super Admin può applicarli.</span></div>}<label>Nota al cliente<textarea rows={2} maxLength={700} value={customerNote} onChange={(event) => setCustomerNote(event.target.value)} placeholder="Facoltativa" /></label><div className="quote-lines">{selectedItems.map((item) => <div key={item.id}><span>{quantities[item.id]} × {item.name}<small>{months} {months === 1 ? "mese" : "mesi"}</small></span><strong>{money(item.monthly_price_cents * (quantities[item.id] ?? 0) * months)}</strong></div>)}{!selectedItems.length && <p>Seleziona almeno un formato dal listino.</p>}</div><dl><div><dt>Subtotale netto</dt><dd>{money(selectedCents)}</dd></div>{discountCents > 0 && <div className="discount-total"><dt>Sconto {(discountBps / 100).toLocaleString("it-IT")}%</dt><dd>−{money(discountCents)}</dd></div>}<div><dt>Imponibile</dt><dd>{money(netCents)}</dd></div><div><dt>{priceList.tax_name} {(priceList.tax_rate_bps / 100).toLocaleString("it-IT")}%</dt><dd>{money(taxCents)}</dd></div><div className="quote-total"><dt>Totale</dt><dd>{money(totalCents)}</dd></div></dl><small className="quote-scope">{selectedClient?.island ?? "Seleziona un cliente"} · prezzi netti · {priceList.tax_name} escluso</small>{quoteError && <div className="quote-error">{quoteError}</div>}<button className="primary quote-submit" disabled={creating || !selectedClient || !selectedItems.length || (discountPercent > 0 && !discountReason.trim())} onClick={() => void createQuote()}>{creating ? "Generazione PDF…" : "Genera preventivo PDF"}</button>{selectedItems.length > 0 && <button className="clear-quote" onClick={() => setQuantities({})}>Azzera calcolo</button>}</aside>
+      <aside className="quote-panel">
+        <span className="quote-eyebrow">Preventivo numerato</span><h2>Riepilogo</h2>
+        <label>Cliente<select value={selectedClient?.id ?? ""} onChange={(event) => setClientId(event.target.value)} disabled={!data.clients.length}>{data.clients.map((client) => <option key={client.id} value={client.id}>{client.company_name} · {client.island}</option>)}</select></label>
+        <div className="quote-fields"><label>Durata mesi<input type="number" min="1" max="36" value={months} onChange={(event) => setMonths(Math.min(36, Math.max(1, Number(event.target.value) || 1)))} /></label><label>Validità giorni<input type="number" min="1" max="90" value={validDays} onChange={(event) => setValidDays(Math.min(90, Math.max(1, Number(event.target.value) || 1)))} /></label></div>
+        {validCampaigns.length > 0 && <label>Promozione disponibile<select value={discountCampaignId} onChange={(event) => { setDiscountCampaignId(event.target.value); if (event.target.value) { setDiscountPercent(0); setDiscountReason(""); } }}><option value="">Nessuna promozione</option>{validCampaigns.map((campaign) => <option key={campaign.id} value={campaign.id}>{campaign.title} · {(campaign.discount_bps / 100).toLocaleString("it-IT")}%</option>)}</select></label>}
+        {selectedCampaign && <div className="campaign-selected"><strong>−{(selectedCampaign.discount_bps / 100).toLocaleString("it-IT")}% · {selectedCampaign.title}</strong><span>{selectedCampaign.message}</span><small>Valida fino al {dateOnly(selectedCampaign.ends_on)}. Lo sconto sarà congelato nel PDF.</small></div>}
+        {data.user.role === "super_admin" && !selectedCampaign ? <><label>Sconto manuale %<input type="number" min="0" max="100" step="0.01" value={discountPercent} onChange={(event) => setDiscountPercent(Math.min(100, Math.max(0, Number(event.target.value) || 0)))} /></label>{discountPercent > 0 && <label>Motivo sconto<input maxLength={300} value={discountReason} onChange={(event) => setDiscountReason(event.target.value)} required placeholder="Motivazione commerciale" /></label>}</> : !selectedCampaign && <div className="discount-lock"><strong>Nessuna promozione applicata</strong><span>Seleziona una promozione autorizzata quando disponibile.</span></div>}
+        <label>Nota al cliente<textarea rows={2} maxLength={700} value={customerNote} onChange={(event) => setCustomerNote(event.target.value)} placeholder="Facoltativa" /></label>
+        <div className="quote-lines">{selectedItems.map((item) => <div key={item.id}><span>{quantities[item.id]} × {item.name}<small>{months} {months === 1 ? "mese" : "mesi"}</small></span><strong>{money(item.monthly_price_cents * (quantities[item.id] ?? 0) * months)}</strong></div>)}{!selectedItems.length && <p>Seleziona almeno un formato dal listino.</p>}</div>
+        <dl><div><dt>Subtotale netto</dt><dd>{money(selectedCents)}</dd></div>{discountCents > 0 && <div className="discount-total"><dt>Sconto {(discountBps / 100).toLocaleString("it-IT")}%</dt><dd>−{money(discountCents)}</dd></div>}<div><dt>Imponibile</dt><dd>{money(netCents)}</dd></div><div><dt>{priceList.tax_name} {(priceList.tax_rate_bps / 100).toLocaleString("it-IT")}%</dt><dd>{money(taxCents)}</dd></div><div className="quote-total"><dt>Totale</dt><dd>{money(totalCents)}</dd></div></dl>
+        <small className="quote-scope">{selectedClient?.island ?? "Seleziona un cliente"} · prezzi netti · {priceList.tax_name} escluso</small>
+        {quoteError && <div className="quote-error">{quoteError}</div>}
+        <button className="primary quote-submit" disabled={creating || !selectedClient || !selectedItems.length || (!selectedCampaign && discountPercent > 0 && !discountReason.trim())} onClick={() => void createQuote()}>{creating ? "Generazione PDF…" : "Genera preventivo PDF"}</button>
+        {selectedItems.length > 0 && <button className="clear-quote" onClick={() => setQuantities({})}>Azzera calcolo</button>}
+      </aside>
     </div>
     {editing && <PriceEditModal item={editing} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); notify("Prezzo aggiornato e registrato nell’audit."); await refresh(); }} />}
   </section>;
+}
+
+function DiscountCampaignAdmin({ campaigns, refresh, notify }: { campaigns: DiscountCampaign[]; refresh: () => Promise<void>; notify: (text: string, tone?: "ok" | "error") => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const today = canaryToday();
+  const defaultEnd = new Date(`${today}T12:00:00Z`);
+  defaultEnd.setUTCDate(defaultEnd.getUTCDate() + 30);
+
+  async function create(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setBusy(true); setError("");
+    const form = new FormData(event.currentTarget);
+    try {
+      await api("/api/discount-campaigns", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(Object.fromEntries(form.entries())) });
+      event.currentTarget.reset();
+      notify("Promozione creata. Il popup è ora disponibile ai Sales autorizzati.");
+      await refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Creazione della promozione non riuscita.");
+    } finally { setBusy(false); }
+  }
+
+  async function deactivate(campaign: DiscountCampaign) {
+    if (!window.confirm(`Disattivare “${campaign.title}”? Le applicazioni già effettuate resteranno immutabili nello storico.`)) return;
+    try {
+      await api(`/api/discount-campaigns/${campaign.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ active: false }) });
+      notify("Promozione disattivata. Lo storico dei preventivi non è cambiato.");
+      await refresh();
+    } catch (cause) { notify(cause instanceof Error ? cause.message : "Disattivazione non riuscita.", "error"); }
+  }
+
+  return <article className="data-card campaign-admin">
+    <div className="card-head"><div><h2>Promozioni Sales</h2><p>Le condizioni non sono modificabili: per cambiarle, disattiva la promozione e creane una nuova.</p></div><span className="admin-badge">{campaigns.filter((item) => item.active === 1).length} attive</span></div>
+    <div className="campaign-admin-grid">
+      <form className="stack-form campaign-form" onSubmit={create}>
+        <label>Titolo popup<input name="title" required maxLength={120} placeholder="Promo lancio settembre" /></label>
+        <label>Messaggio al Sales<textarea name="message" required rows={3} maxLength={300} placeholder="Presenta questa opportunità durante il preventivo." /></label>
+        <div className="three-cols"><label>Sconto %<input name="discountPercent" type="number" required min="0.01" max="100" step="0.01" /></label><label>Dal<input name="startsOn" type="date" required defaultValue={today} /></label><label>Al<input name="endsOn" type="date" required defaultValue={defaultEnd.toISOString().slice(0, 10)} /></label></div>
+        {error && <div className="form-error">{error}</div>}
+        <button className="primary" disabled={busy}>{busy ? "Creazione…" : "Crea promozione"}</button>
+      </form>
+      <div className="campaign-history">
+        {campaigns.map((campaign) => {
+          const status = campaign.active === 0 ? "Disattivata" : campaign.ends_on < today ? "Scaduta" : campaign.starts_on > today ? "Programmata" : "Attiva";
+          return <div className="campaign-history-row" key={campaign.id}><div><strong>{campaign.title}</strong><span>{campaign.message}</span><small>{dateOnly(campaign.starts_on)}–{dateOnly(campaign.ends_on)} · {campaign.usage_count ?? 0} utilizzi · {dateTime(campaign.created_at)}</small></div><div><b>−{(campaign.discount_bps / 100).toLocaleString("it-IT")}%</b><span className={`campaign-status ${status.toLowerCase()}`}>{status}</span>{campaign.active === 1 && <button onClick={() => void deactivate(campaign)}>Disattiva</button>}</div></div>;
+        })}
+        {!campaigns.length && <Empty title="Nessuna promozione" text="Crea la prima campagna percentuale per i Sales." />}
+      </div>
+    </div>
+  </article>;
+}
+
+function PromotionModal({ campaign, onDismiss }: { campaign: DiscountCampaign; onDismiss: (useCampaign: boolean) => void }) {
+  return <Modal title="Nuova promozione disponibile" subtitle={`Valida fino al ${dateOnly(campaign.ends_on)}`} onClose={() => onDismiss(false)}>
+    <div className="promotion-popup"><span>OFFERTA SALES</span><strong>−{(campaign.discount_bps / 100).toLocaleString("it-IT")}%</strong><h3>{campaign.title}</h3><p>{campaign.message}</p><small>La percentuale è autorizzata dal Super Admin e viene congelata nel preventivo quando la applichi.</small></div>
+    <div className="modal-actions"><button onClick={() => onDismiss(false)}>Più tardi</button><button className="primary" onClick={() => onDismiss(true)}>Usa nel preventivo</button></div>
+  </Modal>;
+}
+
+function PodcastCalendar({ data, refresh, notify }: { data: Bootstrap; refresh: () => Promise<void>; notify: (text: string, tone?: "ok" | "error") => void }) {
+  const [month, setMonth] = useState(canaryToday().slice(0, 7));
+  const [editing, setEditing] = useState<PodcastAppointment | "new" | null>(null);
+  const canManage = ["super_admin", "admin"].includes(data.user.role);
+  const appointments = data.podcastAppointments ?? [];
+  const [year, monthNumber] = month.split("-").map(Number);
+  const daysInMonth = new Date(Date.UTC(year, monthNumber, 0)).getUTCDate();
+  const leadingDays = (new Date(Date.UTC(year, monthNumber - 1, 1)).getUTCDay() + 6) % 7;
+  const monthLabel = new Intl.DateTimeFormat("it-IT", { month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${month}-01T12:00:00Z`));
+  const monthAppointments = appointments.filter((item) => canaryParts(item.starts_at).date.startsWith(month));
+  const upcoming = appointments.filter((item) => item.status === "scheduled" && Date.parse(item.ends_at) >= Date.now()).sort((a, b) => a.starts_at.localeCompare(b.starts_at));
+
+  function moveMonth(delta: number) {
+    const value = new Date(Date.UTC(year, monthNumber - 1 + delta, 1));
+    setMonth(`${value.getUTCFullYear()}-${String(value.getUTCMonth() + 1).padStart(2, "0")}`);
+  }
+
+  return <section className="ops-page podcast-page">
+    <PageHeading eyebrow="Programmazione editoriale" title="Calendario podcast" subtitle="Appuntamenti di un’ora nel fuso delle Canarie, senza sovrapposizioni per intervistatore." action={canManage ? <button className="primary" onClick={() => setEditing("new")}>＋ Nuovo appuntamento</button> : <span className="admin-badge">Sola lettura</span>} />
+    <div className="metric-grid podcast-metrics"><Metric label="Nel mese" value={String(monthAppointments.filter((item) => item.status === "scheduled").length)} note="appuntamenti programmati" /><Metric label="Prossimi" value={String(upcoming.length)} note="da oggi in avanti" /><Metric label="Intervistatori" value={String((data.podcastInterviewers ?? []).length)} note="utenti attivi disponibili" /></div>
+    <article className="data-card podcast-calendar-card">
+      <div className="calendar-toolbar"><button onClick={() => moveMonth(-1)} aria-label="Mese precedente">←</button><h2>{monthLabel}</h2><button onClick={() => moveMonth(1)} aria-label="Mese successivo">→</button></div>
+      <div className="calendar-weekdays">{["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"].map((day) => <span key={day}>{day}</span>)}</div>
+      <div className="podcast-calendar-grid">
+        {Array.from({ length: leadingDays }, (_, index) => <div className="calendar-day empty-day" key={`empty-${index}`} />)}
+        {Array.from({ length: daysInMonth }, (_, index) => {
+          const day = index + 1;
+          const key = `${month}-${String(day).padStart(2, "0")}`;
+          const dayAppointments = monthAppointments.filter((item) => canaryParts(item.starts_at).date === key).sort((a, b) => a.starts_at.localeCompare(b.starts_at));
+          return <div className={`calendar-day ${key === canaryToday() ? "today" : ""}`} key={key}><strong>{day}</strong><div>{dayAppointments.map((item) => {
+            const ended = Date.parse(item.ends_at) < Date.now();
+            return <button key={item.id} className={`podcast-slot ${item.status} ${ended && item.status === "scheduled" ? "completed" : ""}`} disabled={!canManage || item.status === "cancelled"} onClick={() => setEditing(item)}><b>{canaryParts(item.starts_at).time}</b><span>{item.guest_name}</span><small>{item.interviewer_name}</small></button>;
+          })}</div></div>;
+        })}
+      </div>
+    </article>
+    <article className="data-card podcast-agenda"><div className="card-head"><div><h2>Prossimi appuntamenti</h2><p>Agenda ottimizzata per la consultazione dal cellulare.</p></div></div><div className="podcast-agenda-list">{upcoming.slice(0, 20).map((item) => <button key={item.id} disabled={!canManage} onClick={() => setEditing(item)}><time>{canaryDateTime(item.starts_at)}</time><div><strong>{item.guest_name}</strong><span>{item.topic}</span><small>Intervistatore: {item.interviewer_name} · 1 ora</small></div></button>)}{!upcoming.length && <Empty title="Agenda libera" text="Non ci sono appuntamenti podcast futuri." />}</div></article>
+    {editing && <PodcastAppointmentModal appointment={editing === "new" ? null : editing} interviewers={data.podcastInterviewers ?? []} onClose={() => setEditing(null)} onSaved={async (message) => { setEditing(null); notify(message); await refresh(); }} />}
+  </section>;
+}
+
+function PodcastAppointmentModal({ appointment, interviewers, onClose, onSaved }: { appointment: PodcastAppointment | null; interviewers: User[]; onClose: () => void; onSaved: (message: string) => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const initial = appointment ? canaryParts(appointment.starts_at) : { date: (() => { const value = new Date(`${canaryToday()}T12:00:00Z`); value.setUTCDate(value.getUTCDate() + 1); return value.toISOString().slice(0, 10); })(), time: "10:00" };
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setBusy(true); setError("");
+    const form = new FormData(event.currentTarget);
+    try {
+      await api(appointment ? `/api/podcast-appointments/${appointment.id}` : "/api/podcast-appointments", {
+        method: appointment ? "PATCH" : "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...Object.fromEntries(form.entries()), version: appointment?.version }),
+      });
+      await onSaved(appointment ? "Appuntamento podcast aggiornato." : "Appuntamento podcast creato.");
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Salvataggio non riuscito."); setBusy(false); }
+  }
+
+  async function cancelAppointment() {
+    if (!appointment || !window.confirm("Annullare l’appuntamento? Resterà visibile nello storico.")) return;
+    setBusy(true); setError("");
+    try {
+      await api(`/api/podcast-appointments/${appointment.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ status: "cancelled", version: appointment.version }) });
+      await onSaved("Appuntamento annullato e conservato nello storico.");
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Annullamento non riuscito."); setBusy(false); }
+  }
+
+  return <Modal title={appointment ? "Modifica appuntamento" : "Nuovo appuntamento podcast"} subtitle="Durata fissa: 1 ora · fuso Atlantic/Canary" onClose={onClose}><form className="form-grid" onSubmit={submit}>
+    <label>Ospite<input name="guestName" required maxLength={120} defaultValue={appointment?.guest_name ?? ""} /></label><label>Intervistatore<select name="interviewerUserId" required defaultValue={appointment?.interviewer_user_id ?? interviewers[0]?.id}>{interviewers.map((user) => <option key={user.id} value={user.id}>{user.name} · {roleLabels[user.role]}</option>)}</select></label>
+    <label className="span-2">Argomento<input name="topic" required maxLength={180} defaultValue={appointment?.topic ?? ""} /></label><label>Giorno<input name="date" type="date" required defaultValue={initial.date} /></label><label>Orario<input name="time" type="time" required step="300" defaultValue={initial.time} /></label>
+    <label className="span-2">Note<textarea name="notes" rows={3} maxLength={1000} defaultValue={appointment?.notes ?? ""} /></label><p className="form-hint span-2">Il sistema riserva automaticamente l’ora successiva e impedisce altri appuntamenti allo stesso intervistatore.</p>
+    {error && <div className="form-error span-2">{error}</div>}<div className="modal-actions span-2">{appointment && <button className="danger" type="button" disabled={busy} onClick={() => void cancelAppointment()}>Annulla appuntamento</button>}<button type="button" onClick={onClose}>Chiudi</button><button className="primary" disabled={busy || !interviewers.length}>{busy ? "Salvataggio…" : "Salva"}</button></div>
+  </form></Modal>;
 }
 
 function QuotesPanel({ quotes, onConverted, notify }: { quotes: Quote[]; onConverted: () => Promise<void>; notify: (text: string, tone?: "ok" | "error") => void }) {

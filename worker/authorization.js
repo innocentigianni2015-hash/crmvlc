@@ -80,6 +80,18 @@ export function canApplyQuoteDiscount(user) {
   return user.role === "super_admin";
 }
 
+export function canUseDiscountCampaign(user) {
+  return user.role === "super_admin" || user.role === "sales_manager" || user.role === "sales";
+}
+
+export function canReadPodcastCalendar(user) {
+  return user.role !== "distributor";
+}
+
+export function canManagePodcastCalendar(user) {
+  return user.role === "super_admin" || user.role === "admin";
+}
+
 export function canCreateUserWithRole(user, role) {
   if (user.role === "super_admin") return role !== "super_admin" && isRole(role);
   return user.role === "admin" && ["sales_manager", "sales", "distributor"].includes(role);

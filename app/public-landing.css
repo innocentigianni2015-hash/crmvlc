@@ -287,60 +287,49 @@ html:has(.public-landing) {
 }
 
 .public-landing .editorial-card {
+  background: var(--public-white);
   box-shadow: 0 30px 60px rgba(78, 17, 13, 0.28);
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   position: absolute;
+  transition: box-shadow 180ms ease, transform 180ms ease;
 }
 
 .public-landing .card-back {
-  background: var(--public-ink);
-  color: var(--public-white);
   height: 59%;
   left: 9%;
-  padding: clamp(22px, 3vw, 42px);
   top: 19%;
   transform: rotate(-8deg);
   width: 48%;
 }
 
-.public-landing .card-back span {
-  color: var(--public-red);
-  font-size: clamp(38px, 5vw, 72px);
-  font-style: italic;
-  font-weight: 1000;
-  letter-spacing: -0.08em;
-}
-
-.public-landing .card-back strong {
-  font-family: Georgia, "Times New Roman", serif;
-  font-size: clamp(37px, 5vw, 74px);
-  font-weight: 400;
-  line-height: 0.84;
-  margin-top: auto;
-}
-
-.public-landing .card-back small {
-  border-top: 1px solid rgba(255, 255, 255, 0.25);
-  font-size: 8px;
-  font-weight: 800;
-  letter-spacing: 0.12em;
-  margin-top: 20px;
-  padding-top: 12px;
-}
-
 .public-landing .card-front {
-  background: var(--public-white);
   bottom: 11%;
-  color: var(--public-ink);
   height: 60%;
-  overflow: hidden;
   right: 8%;
   transform: rotate(6deg);
   width: 49%;
 }
 
-.public-landing .card-front img {
+.public-landing .magazine-page-link:hover {
+  box-shadow: 0 38px 72px rgba(78, 17, 13, 0.38);
+}
+
+.public-landing .card-back:hover {
+  transform: rotate(-8deg) translateY(-7px);
+}
+
+.public-landing .card-front:hover {
+  transform: rotate(6deg) translateY(-7px);
+}
+
+.public-landing .magazine-page-link:focus-visible {
+  outline: 4px solid var(--public-ink);
+  outline-offset: 4px;
+}
+
+.public-landing .magazine-page-link img {
   display: block;
   height: 100%;
   object-fit: contain;
@@ -350,13 +339,21 @@ html:has(.public-landing) {
 .public-landing .location-chip {
   background: var(--public-paper);
   bottom: 6%;
+  color: var(--public-ink);
   font-size: 10px;
   font-weight: 900;
   left: 7%;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.1em;
   padding: 12px 16px;
   position: absolute;
   transform: rotate(-4deg);
+  transition: background 160ms ease, color 160ms ease;
+  z-index: 3;
+}
+
+.public-landing .location-chip:hover {
+  background: var(--public-ink);
+  color: var(--public-white);
 }
 
 .public-landing .proof-strip {
@@ -521,6 +518,111 @@ html:has(.public-landing) {
   border-radius: 50%;
   height: 18px;
   width: 18px;
+}
+
+.public-landing .about-section {
+  background: var(--public-paper);
+  padding: 120px clamp(24px, 6vw, 96px);
+}
+
+.public-landing .about-heading {
+  display: grid;
+  gap: 24px;
+  grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
+  margin: 0 auto 64px;
+  max-width: 1440px;
+}
+
+.public-landing .about-heading .eyebrow {
+  grid-column: 1 / -1;
+  margin-bottom: 0;
+}
+
+.public-landing .about-heading h2 {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(44px, 5vw, 78px);
+  font-weight: 400;
+  letter-spacing: -0.055em;
+  line-height: 0.98;
+  margin: 0;
+}
+
+.public-landing .about-heading > p:last-child {
+  align-self: end;
+  color: var(--public-muted);
+  font-size: 17px;
+  line-height: 1.7;
+  margin: 0;
+}
+
+.public-landing .about-grid {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0 auto;
+  max-width: 1440px;
+}
+
+.public-landing .about-card {
+  color: var(--public-white);
+  display: flex;
+  flex-direction: column;
+  min-height: 500px;
+  padding: clamp(30px, 4vw, 60px);
+}
+
+.public-landing .about-gianni {
+  background: var(--public-ink);
+}
+
+.public-landing .about-marco {
+  background: var(--public-red);
+}
+
+.public-landing .profile-number {
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.14em;
+  opacity: 0.58;
+}
+
+.public-landing .profile-role {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.3);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  margin: 56px 0 0;
+  padding-bottom: 18px;
+  text-transform: uppercase;
+}
+
+.public-landing .about-card h3 {
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: clamp(46px, 5vw, 76px);
+  font-weight: 400;
+  letter-spacing: -0.05em;
+  line-height: 0.92;
+  margin: auto 0 24px;
+}
+
+.public-landing .about-card > p:last-child {
+  font-size: 16px;
+  line-height: 1.72;
+  margin: 0;
+  max-width: 610px;
+  opacity: 0.8;
+}
+
+.public-landing .about-source {
+  align-items: center;
+  border-bottom: 1px solid currentColor;
+  display: flex;
+  font-size: 13px;
+  font-weight: 900;
+  gap: 24px;
+  margin: 34px auto 0;
+  padding: 12px 0 8px;
+  width: fit-content;
 }
 
 .public-landing .method-section {
@@ -900,12 +1002,14 @@ html:has(.public-landing) {
   }
 
   .public-landing .section-heading,
+  .public-landing .about-heading,
   .public-landing .method-section,
   .public-landing .contact-section {
     grid-template-columns: 1fr;
   }
 
-  .public-landing .section-heading > p:last-child {
+  .public-landing .section-heading > p:last-child,
+  .public-landing .about-heading > p:last-child {
     max-width: 680px;
   }
 
@@ -1009,6 +1113,7 @@ html:has(.public-landing) {
   }
 
   .public-landing .services-section,
+  .public-landing .about-section,
   .public-landing .method-section,
   .public-landing .contact-section {
     padding: 82px 20px;
@@ -1019,13 +1124,20 @@ html:has(.public-landing) {
   }
 
   .public-landing .section-heading h2,
+  .public-landing .about-heading h2,
   .public-landing .method-intro h2,
   .public-landing .contact-copy h2 {
     font-size: 46px;
   }
 
-  .public-landing .service-grid {
+  .public-landing .service-grid,
+  .public-landing .about-grid {
     grid-template-columns: 1fr;
+  }
+
+  .public-landing .about-card {
+    min-height: 460px;
+    padding: 30px 24px;
   }
 
   .public-landing .service-card {

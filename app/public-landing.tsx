@@ -18,6 +18,7 @@ const islands = [
 const copy = {
   it: {
     navServices: "Opportunità",
+    navAbout: "Chi siamo",
     navMethod: "Come funziona",
     navContact: "Contatti",
     crm: "Accesso CRM",
@@ -29,6 +30,8 @@ const copy = {
       "Raccontiamo aziende, professionisti e luoghi attraverso la rivista Vivi Le Canarie e format podcast costruiti per farsi ricordare.",
     primaryCta: "Richiedi una chiamata",
     secondaryCta: "Scopri le opportunità",
+    coverAlt: "Copertina di Vivi Le Canarie, edizione agosto 2026",
+    insideAlt: "Pagina due di Vivi Le Canarie, edizione agosto 2026",
     proofOne: "5 isole",
     proofOneText: "una rete commerciale locale",
     proofTwo: "IT · ES · EN",
@@ -59,6 +62,14 @@ const copy = {
       "Format speciale con MarcoLifestyle",
     ],
     podcastCta: "Parliamo del podcast",
+    aboutLabel: "Direzione e gestione",
+    aboutTitle: "Persone, territorio e una visione editoriale concreta.",
+    aboutText: "Vivi Le Canarie unisce esperienza gestionale, produzione, comunicazione e sviluppo commerciale per raccontare le imprese e le comunità dell’arcipelago.",
+    gianniRole: "Direzione gestionale e commerciale",
+    gianniBio: "Managing Director e cofondatore di LAVISIONARIA. In Vivi Le Canarie coordina organizzazione, sviluppo, partnership e rete commerciale.",
+    marcoRole: "Direzione editoriale e immagine",
+    marcoBio: "Presidente e cofondatore di LAVISIONARIA, Executive Producer. In Vivi Le Canarie guida identità, contenuti, relazioni e sviluppo dei format.",
+    aboutSource: "Conosci anche il progetto LAVISIONARIA",
     methodLabel: "Il metodo",
     methodTitle: "Una richiesta. Il referente giusto. Nessun giro a vuoto.",
     steps: [
@@ -100,6 +111,7 @@ const copy = {
   },
   es: {
     navServices: "Oportunidades",
+    navAbout: "Quiénes somos",
     navMethod: "Cómo funciona",
     navContact: "Contacto",
     crm: "Acceso CRM",
@@ -111,6 +123,8 @@ const copy = {
       "Contamos empresas, profesionales y lugares a través de la revista Vivi Le Canarie y formatos de pódcast creados para dejar huella.",
     primaryCta: "Solicitar una llamada",
     secondaryCta: "Ver oportunidades",
+    coverAlt: "Portada de Vivi Le Canarie, edición de agosto de 2026",
+    insideAlt: "Página dos de Vivi Le Canarie, edición de agosto de 2026",
     proofOne: "5 islas",
     proofOneText: "una red comercial local",
     proofTwo: "IT · ES · EN",
@@ -141,6 +155,14 @@ const copy = {
       "Formato especial con MarcoLifestyle",
     ],
     podcastCta: "Hablemos del pódcast",
+    aboutLabel: "Dirección y gestión",
+    aboutTitle: "Personas, territorio y una visión editorial concreta.",
+    aboutText: "Vivi Le Canarie une experiencia de gestión, producción, comunicación y desarrollo comercial para contar las empresas y comunidades del archipiélago.",
+    gianniRole: "Dirección de gestión y comercial",
+    gianniBio: "Managing Director y cofundador de LAVISIONARIA. En Vivi Le Canarie coordina organización, desarrollo, alianzas y red comercial.",
+    marcoRole: "Dirección editorial e imagen",
+    marcoBio: "Presidente y cofundador de LAVISIONARIA, Executive Producer. En Vivi Le Canarie dirige identidad, contenidos, relaciones y desarrollo de formatos.",
+    aboutSource: "Conoce también el proyecto LAVISIONARIA",
     methodLabel: "El método",
     methodTitle: "Una solicitud. La persona adecuada. Sin vueltas.",
     steps: [
@@ -182,6 +204,7 @@ const copy = {
   },
   en: {
     navServices: "Opportunities",
+    navAbout: "About us",
     navMethod: "How it works",
     navContact: "Contact",
     crm: "CRM access",
@@ -192,6 +215,8 @@ const copy = {
     intro: "We tell the stories of businesses, professionals and places through Vivi Le Canarie magazine and memorable podcast formats.",
     primaryCta: "Request a call",
     secondaryCta: "View opportunities",
+    coverAlt: "Vivi Le Canarie magazine cover, August 2026 edition",
+    insideAlt: "Page two of Vivi Le Canarie, August 2026 edition",
     proofOne: "5 islands",
     proofOneText: "one local sales network",
     proofTwo: "IT · ES · EN",
@@ -211,6 +236,14 @@ const copy = {
     podcastText: "From quick content to a complete story, we choose the format that turns an interview into a genuine point of contact.",
     podcastFormats: ["1 minute · 1 camera", "3–5 minutes · 3 cameras and editing", "Special format with MarcoLifestyle"],
     podcastCta: "Discuss the podcast",
+    aboutLabel: "Direction and management",
+    aboutTitle: "People, territory and a clear editorial vision.",
+    aboutText: "Vivi Le Canarie combines management, production, communication and business development expertise to tell the stories of the archipelago’s companies and communities.",
+    gianniRole: "Management and commercial direction",
+    gianniBio: "Managing Director and co-founder of LAVISIONARIA. At Vivi Le Canarie he coordinates operations, development, partnerships and the sales network.",
+    marcoRole: "Editorial and image direction",
+    marcoBio: "President and co-founder of LAVISIONARIA, Executive Producer. At Vivi Le Canarie he leads identity, content, relationships and format development.",
+    aboutSource: "Discover the LAVISIONARIA project",
     methodLabel: "The method",
     methodTitle: "One request. The right contact. No runaround.",
     steps: [["01", "Choose your goal", "Magazine, podcast or an integrated campaign."], ["02", "Tell us your island", "The request goes to the local sales team."], ["03", "Discuss the project", "An adviser calls you and builds the proposal with you."]],
@@ -288,6 +321,7 @@ export default function PublicLanding() {
         </a>
         <nav className="desktop-nav" aria-label="Navigazione principale">
           <a href="#opportunita">{t.navServices}</a>
+          <a href="#chi-siamo">{t.navAbout}</a>
           <a href="#metodo">{t.navMethod}</a>
           <a href="#contatti">{t.navContact}</a>
         </nav>
@@ -315,23 +349,28 @@ export default function PublicLanding() {
         </div>
         <div className="hero-visual">
           <div className="sun-disc" aria-hidden="true" />
-          <div className="editorial-card card-back" aria-hidden="true">
-            <span>VIV!</span>
-            <strong>LE<br />CANARIE</strong>
-            <small>STORIE · IMPRESE · TERRITORIO</small>
-          </div>
-          <div className="editorial-card card-front">
+          <a className="editorial-card card-back magazine-page-link" href="https://www.vivilecanarie.com/" target="_blank" rel="noreferrer">
+            <img
+              src="/brand/vlc-08-2026-page-02.jpg"
+              alt={t.insideAlt}
+              width="1124"
+              height="1400"
+              loading="eager"
+              decoding="async"
+            />
+          </a>
+          <a className="editorial-card card-front magazine-page-link" href="https://www.vivilecanarie.com/" target="_blank" rel="noreferrer">
             <img
               src="/brand/vlc-08-2026-cover.jpg"
-              alt="Copertina di Vivi Le Canarie, edizione agosto 2026"
+              alt={t.coverAlt}
               width="1124"
               height="1400"
               loading="eager"
               fetchPriority="high"
               decoding="async"
             />
-          </div>
-          <div className="location-chip" aria-hidden="true">28°N · CANARIAS</div>
+          </a>
+          <a className="location-chip" href="https://www.vivilecanarie.com/" target="_blank" rel="noreferrer">VIVILECANARIE.COM ↗</a>
         </div>
       </section>
 
@@ -370,6 +409,29 @@ export default function PublicLanding() {
             <button onClick={() => selectService("podcast")}>{t.podcastCta}<span aria-hidden="true">→</span></button>
           </article>
         </div>
+      </section>
+
+      <section className="about-section" id="chi-siamo">
+        <div className="about-heading">
+          <p className="eyebrow">{t.aboutLabel}</p>
+          <h2>{t.aboutTitle}</h2>
+          <p>{t.aboutText}</p>
+        </div>
+        <div className="about-grid">
+          <article className="about-card about-gianni">
+            <span className="profile-number">01</span>
+            <p className="profile-role">{t.gianniRole}</p>
+            <h3>Gianni Innocenti</h3>
+            <p>{t.gianniBio}</p>
+          </article>
+          <article className="about-card about-marco">
+            <span className="profile-number">02</span>
+            <p className="profile-role">{t.marcoRole}</p>
+            <h3>MarcoLifestyle</h3>
+            <p>{t.marcoBio}</p>
+          </article>
+        </div>
+        <a className="about-source" href="https://lavisionaria.com/tenerife" target="_blank" rel="noreferrer">{t.aboutSource}<span aria-hidden="true">↗</span></a>
       </section>
 
       <section className="method-section" id="metodo">
@@ -437,7 +499,7 @@ export default function PublicLanding() {
 
       <footer>
         <div className="footer-brand"><img src="/brand/viv-le-canarie-icon.svg" alt="Vivi Le Canarie" /><p>{t.footerText}</p></div>
-        <div className="footer-links"><a href="/mappe">{t.maps}</a><a href="/privacy">{t.privacy}</a><a href="/login">{t.crm}</a><span>© {year} VIV!</span></div>
+        <div className="footer-links"><a href="https://www.vivilecanarie.com/" target="_blank" rel="noreferrer">Vivi Le Canarie ↗</a><a href="#chi-siamo">{t.navAbout}</a><a href="/mappe">{t.maps}</a><a href="/privacy">{t.privacy}</a><a href="/login">{t.crm}</a><span>© {year} VIV!</span></div>
         <p className="footer-owner">{platformOwnership(locale)}</p>
       </footer>
     </main>

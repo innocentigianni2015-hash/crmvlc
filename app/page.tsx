@@ -8,7 +8,7 @@ import { HelpAssistantDrawer, HelpBootstrap, HelpPage } from "./help-assistant";
 import { LanguageSelector, localeTag, platformOwnership, UiLocale, usePlatformLanguage } from "./i18n";
 
 type Role = "super_admin" | "admin" | "sales_manager" | "sales" | "distributor";
-type ActiveModule = "crm" | "operations" | "pricing" | "quotes" | "contracts" | "distribution" | "admin" | "audit" | "podcast" | "help";
+type ActiveModule = "crm" | "operations" | "pricing" | "quotes" | "contracts" | "distribution" | "admin" | "audit" | "podcast" | "help" | "applications";
 type InstallPromptEvent = Event & { prompt(): Promise<void>; userChoice: Promise<{ outcome: "accepted" | "dismissed" }> };
 const BACKGROUND_LOCK_MS = 60 * 60 * 1000;
 const BACKGROUND_AT_KEY = "crmvlc:backgrounded-at";
@@ -69,10 +69,17 @@ type PodcastAppointment = {
   tax_name: string; tax_rate_bps: number; tax_cents: number; total_cents: number;
   version: number; created_by: string; created_at: string; updated_at: string;
 };
+type SalesApplication = {
+  id: string; name: string; email: string; phone: string; city: string; island: string; languages: string;
+  availability: "immediate" | "two_weeks" | "one_month"; presentation: string; collaboration_type: "commission";
+  locale: UiLocale; status: "new" | "contacted" | "interview" | "approved" | "rejected"; admin_notes: string;
+  consent_at: string; created_at: string; updated_at: string; reviewed_by: string | null; reviewed_at: string | null; reviewed_by_name?: string | null;
+};
 type Bootstrap = {
   user: User; clients: Client[]; contracts: Contract[]; quotes: Quote[]; deliveries: Delivery[]; distributionPoints: DistributionPoint[]; templates: Template[]; users: User[];
   audit: AuditEvent[]; emailOutbox: EmailOutboxItem[]; priceList: PriceList | null; priceItems: PriceItem[]; demoMode?: boolean;
   discountCampaigns: DiscountCampaign[]; podcastAppointments: PodcastAppointment[]; podcastInterviewers: User[];
+  salesApplications: SalesApplication[];
   sessionActor?: User;
   impersonation?: { startedAt: string; expiresAt: string } | null;
   impersonationUsers?: User[];
@@ -95,6 +102,11 @@ const PODCAST_PACKAGES = {
 } as const;
 type PodcastPackageCode = keyof typeof PODCAST_PACKAGES;
 const MARCOLIFESTYLE_PRICE_CENTS = 50_000;
+const recruitmentLoginCopy = {
+  it: { title: "Lavora con noi", text: "Cerchiamo commerciali nelle cinque isole per Vivi Le Canarie.", cta: "Candidati nella tua isola" },
+  es: { title: "Trabaja con nosotros", text: "Buscamos comerciales en las cinco islas para Vivi Le Canarie.", cta: "Presenta tu candidatura" },
+  en: { title: "Work with us", text: "We are looking for sales representatives across the five islands.", cta: "Apply for your island" },
+} as const;
 
 class RequestError extends Error {
   constructor(message: string, readonly status: number) { super(message); }
@@ -455,6 +467,7 @@ export default function Home() {
     if (effectiveRole !== "distributor") ["crm", "pricing", "quotes", "contracts", "podcast"].forEach((key) => allowed.add(key as ActiveModule));
     if (["super_admin", "admin", "sales_manager", "distributor"].includes(effectiveRole)) allowed.add("distribution");
     if (["super_admin", "admin"].includes(effectiveRole)) allowed.add("admin");
+    if (["super_admin", "admin"].includes(effectiveRole)) allowed.add("applications");
     if (effectiveRole === "super_admin") allowed.add("audit");
     setActive(allowed.has(moduleKey as ActiveModule) ? moduleKey as ActiveModule : "help");
   }
@@ -476,6 +489,7 @@ export default function Home() {
           {canImpersonate && <button className={data.impersonation && data.user.role === "distributor" ? "active impersonation-nav" : "impersonation-nav"} onClick={() => setImpersonationModal("distributor")}><i>10</i> Vista Distributore</button>}
           {data.user.role !== "distributor" && <button className={active === "podcast" ? "active" : ""} onClick={() => setActive("podcast")}><i>11</i> Podcast</button>}
           <button className={active === "help" ? "active" : ""} onClick={() => setActive("help")}><i>12</i> Guida & AI</button>
+          {["super_admin", "admin"].includes(data.user.role) && <button className={active === "applications" ? "active" : ""} onClick={() => setActive("applications")}><i>13</i> Candidature</button>}
         </nav>
         <div className="ops-scope"><span className="live-dot" /><div><strong>{data.demoMode ? "Dati dimostrativi" : "Dati reali"}</strong><small>{data.impersonation ? `Come ${data.user.name}` : data.user.island ?? "Tutte le isole"}</small></div></div>
       </aside>
@@ -524,6 +538,7 @@ export default function Home() {
         {active === "distribution" && <DistributionPanel data={data} deliveries={filteredDeliveries} onCreate={() => setDeliveryModal("new")} onEdit={setDeliveryModal} />}
 
         {active === "admin" && ["super_admin", "admin"].includes(data.user.role) && <AdminPanel data={data} refresh={refresh} notify={notify} />}
+        {active === "applications" && ["super_admin", "admin"].includes(data.user.role) && <ApplicationsPanel applications={data.salesApplications ?? []} refresh={refresh} notify={notify} />}
         {active === "audit" && data.user.role === "super_admin" && <AuditPanel events={data.audit} emails={data.emailOutbox} refresh={refresh} notify={notify} />}
         {active === "podcast" && data.user.role !== "distributor" && <PodcastCalendar data={data} refresh={refresh} notify={notify} />}
         {active === "help" && <HelpPage user={data.user} help={helpData} offline={offlineMode} refresh={refresh} notify={notify} onNavigate={navigateFromHelp} />}
@@ -553,6 +568,7 @@ export default function Home() {
 
 function Login({ onAuthenticated, initialNotice }: { onAuthenticated: () => Promise<void>; initialNotice?: { tone: "ok" | "error"; text: string } | null }) {
   const { locale } = usePlatformLanguage();
+  const recruitment = recruitmentLoginCopy[locale];
   type NextStep = { authenticated?: boolean; next?: "change_password" | "totp_setup" | "totp"; token?: string };
   const [mode, setMode] = useState<"login" | "change" | "totp_setup" | "totp" | "forgot" | "reset">("login");
   const [email, setEmail] = useState("");
@@ -662,13 +678,13 @@ function Login({ onAuthenticated, initialNotice }: { onAuthenticated: () => Prom
 
   const passwordFields = <><label>Nuova password<input type="password" required minLength={12} maxLength={256} autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} /></label><label>Conferma password<input type="password" required minLength={12} maxLength={256} autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} /></label></>;
 
-  return <main className="auth-screen"><section className="auth-visual"><div className="auth-brand"><img src={BRAND_LOGO} alt="ViV! Le Canarie" /><div><strong>CRMVLC</strong><span>CRM & contratti</span></div></div><div className="auth-promise"><small>CRM OPERATIVO · CINQUE ISOLE</small><h1>Il lavoro commerciale, in un unico posto.</h1><p>Clienti, pipeline, preventivi, contratti, consegne e podcast: dati reali, permessi per ruolo e operatività pensata per il cellulare.</p><div className="auth-trust"><span><b>01</b> Dati per ruolo</span><span><b>02</b> Contratti con audit</span><span><b>03</b> PWA installabile</span></div></div><div className="auth-islands">{ISLANDS.map((island) => <span key={island}>{island}</span>)}</div><small className="auth-owner">{platformOwnership(locale)}</small></section><section className="auth-panel"><div className="auth-box"><LanguageSelector /><div className="auth-mobile-brand"><img src={BRAND_LOGO} alt="ViV! Le Canarie" /><div><strong>CRMVLC</strong><small>Area operativa</small></div></div><span className="secure-label">● Accesso protetto</span><h2>{mode === "login" ? "Bentornato" : mode === "forgot" ? "Recupera password" : mode === "reset" ? "Imposta password" : mode === "change" ? "Cambia la password temporanea" : mode === "totp_setup" ? "Configura l’autenticatore" : "Codice autenticatore"}</h2><p>{mode === "totp_setup" ? "Scansiona il QR con Google Authenticator, Microsoft Authenticator o un’app compatibile." : mode === "totp" ? "Inserisci il codice a 6 cifre generato dall’app autenticatore." : "Accedi alla tua area di lavoro CRMVLC."}</p>
+  return <main className="auth-screen"><section className="auth-visual"><div className="auth-brand"><img src={BRAND_LOGO} alt="ViV! Le Canarie" /><div><strong>CRMVLC</strong><span>CRM & contratti</span></div></div><div className="auth-promise"><small>CRM OPERATIVO · CINQUE ISOLE</small><h1>Il lavoro commerciale, in un unico posto.</h1><p>Clienti, pipeline, preventivi, contratti, consegne e podcast: dati reali, permessi per ruolo e operatività pensata per il cellulare.</p><div className="auth-trust"><span><b>01</b> Dati per ruolo</span><span><b>02</b> Contratti con audit</span><span><b>03</b> PWA installabile</span></div><a className="auth-careers-cta" href="/lavora-con-noi"><span><strong>{recruitment.title}</strong><small>{recruitment.text}</small></span><b>{recruitment.cta} →</b></a></div><div className="auth-islands">{ISLANDS.map((island) => <span key={island}>{island}</span>)}</div><small className="auth-owner">{platformOwnership(locale)}</small></section><section className="auth-panel"><div className="auth-box"><LanguageSelector /><div className="auth-mobile-brand"><img src={BRAND_LOGO} alt="ViV! Le Canarie" /><div><strong>CRMVLC</strong><small>Area operativa</small></div></div><span className="secure-label">● Accesso protetto</span><h2>{mode === "login" ? "Bentornato" : mode === "forgot" ? "Recupera password" : mode === "reset" ? "Imposta password" : mode === "change" ? "Cambia la password temporanea" : mode === "totp_setup" ? "Configura l’autenticatore" : "Codice autenticatore"}</h2><p>{mode === "totp_setup" ? "Scansiona il QR con Google Authenticator, Microsoft Authenticator o un’app compatibile." : mode === "totp" ? "Inserisci il codice a 6 cifre generato dall’app autenticatore." : "Accedi alla tua area di lavoro CRMVLC."}</p>
     {mode === "login" && <form onSubmit={login}><label>Email aziendale<input type="email" required autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} /></label><label>Password<input type="password" required maxLength={256} autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label><button className="primary wide" disabled={busy}>{busy ? "Accesso…" : "Accedi"}</button><button type="button" className="link-button" onClick={() => { setMode("forgot"); setError(""); setMessage(""); }}>Imposta o recupera password</button></form>}
     {mode === "forgot" && <form onSubmit={forgotPassword}><label>Email aziendale<input type="email" required autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label><button className="primary wide" disabled={busy}>{busy ? "Invio…" : "Invia collegamento"}</button><button type="button" className="link-button" onClick={() => setMode("login")}>Torna all’accesso</button></form>}
     {mode === "reset" && <form onSubmit={resetPassword}>{passwordFields}<button className="primary wide" disabled={busy}>{busy ? "Salvataggio…" : "Imposta password"}</button></form>}
     {mode === "change" && <form onSubmit={changePassword}>{passwordFields}<button className="primary wide" disabled={busy}>{busy ? "Salvataggio…" : "Cambia e continua"}</button></form>}
     {(mode === "totp" || mode === "totp_setup") && <form onSubmit={confirmTotp}>{mode === "totp_setup" && <div style={{ textAlign: "center" }}>{qrCode && <img src={qrCode} width={240} height={240} alt="QR autenticatore CRMVLC" />}<small style={{ display: "block", overflowWrap: "anywhere" }}>Chiave manuale: {totpSecret}</small></div>}<label>Codice a 6 cifre<input className="otp-input" inputMode="numeric" autoComplete="one-time-code" maxLength={6} required value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, ""))} placeholder="000000" /></label><button className="primary wide" disabled={busy || code.length !== 6}>{busy ? "Verifica…" : mode === "totp_setup" ? "Conferma e accedi" : "Accedi"}</button></form>}
-    {initialNotice && <div className={initialNotice.tone === "ok" ? "form-success" : "form-error"}>{initialNotice.text}</div>}{message && <div className="form-success">{message}</div>}{error && <div className="form-error">{error}</div>}<small className="privacy-note">Password cifrate con derivazione PBKDF2. Il Super Admin usa anche l’autenticatore TOTP.</small></div></section></main>;
+    {initialNotice && <div className={initialNotice.tone === "ok" ? "form-success" : "form-error"}>{initialNotice.text}</div>}{message && <div className="form-success">{message}</div>}{error && <div className="form-error">{error}</div>}<small className="privacy-note">Password cifrate con derivazione PBKDF2. Il Super Admin usa anche l’autenticatore TOTP.</small><a className="auth-careers-mobile" href="/lavora-con-noi"><strong>{recruitment.title}</strong><span>{recruitment.text}</span><b>{recruitment.cta} →</b></a></div></section></main>;
 }
 
 function PageHeading({ eyebrow, title, subtitle, action }: { eyebrow: string; title: string; subtitle: string; action: React.ReactNode }) {
@@ -1266,6 +1282,53 @@ function AdminPanel({ data, refresh, notify }: { data: Bootstrap; refresh: () =>
       {superAdmin && <article className="data-card"><div className="card-head"><div><h2>Modelli contrattuali</h2><p>{data.templates.length} versioni attive</p></div></div><div className="simple-list">{data.templates.map((template) => <div key={template.id}><span className="file-badge">{template.mime_type.includes("pdf") ? "PDF" : "DOC"}</span><div><strong>{template.name}</strong><small>{template.original_filename}</small></div><p>v{template.version}<button className="mini-link" onClick={() => window.open(`/api/templates/${template.id}/download`, "_blank")}>Scarica</button></p></div>)}{!data.templates.length && <Empty title="Nessun modello" text="Carica i documenti già pronti." />}</div></article>}
     </div>
     {editing && <UserEditModal actor={data.user} target={editing} users={data.users} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); notify("Ruolo, gerarchia e accesso aggiornati. Le sessioni precedenti sono state revocate."); await refresh(); }} />}
+  </section>;
+}
+
+function ApplicationsPanel({ applications, refresh, notify }: { applications: SalesApplication[]; refresh: () => Promise<void>; notify: (text: string, tone?: "ok" | "error") => void }) {
+  const { locale } = usePlatformLanguage();
+  const text = {
+    it: { eyebrow: "Rete commerciale", title: "Candidature", subtitle: "Valuta le richieste ricevute dalla pagina Lavora con noi.", all: "Tutte", empty: "Nessuna candidatura", emptyText: "Le nuove candidature compariranno qui.", language: "Lingue", availability: "Disponibilità", presentation: "Presentazione", notes: "Note interne", notesHint: "Colloquio, valutazione e prossimi passi…", save: "Salva", saving: "Salvataggio…", saved: "Candidatura aggiornata.", commission: "Collaborazione a provvigioni", received: "Ricevuta", reviewed: "Gestita da" },
+    es: { eyebrow: "Red comercial", title: "Candidaturas", subtitle: "Evalúa las solicitudes recibidas desde la página Trabaja con nosotros.", all: "Todas", empty: "Ninguna candidatura", emptyText: "Las nuevas candidaturas aparecerán aquí.", language: "Idiomas", availability: "Disponibilidad", presentation: "Presentación", notes: "Notas internas", notesHint: "Entrevista, evaluación y próximos pasos…", save: "Guardar", saving: "Guardando…", saved: "Candidatura actualizada.", commission: "Colaboración a comisión", received: "Recibida", reviewed: "Gestionada por" },
+    en: { eyebrow: "Sales network", title: "Applications", subtitle: "Review requests received through the Work with us page.", all: "All", empty: "No applications", emptyText: "New applications will appear here.", language: "Languages", availability: "Availability", presentation: "Introduction", notes: "Internal notes", notesHint: "Interview, assessment and next steps…", save: "Save", saving: "Saving…", saved: "Application updated.", commission: "Commission-based collaboration", received: "Received", reviewed: "Managed by" },
+  }[locale];
+  const statusCopy = {
+    it: { new: "Nuova", contacted: "Contattata", interview: "Colloquio", approved: "Approvata", rejected: "Rifiutata" },
+    es: { new: "Nueva", contacted: "Contactada", interview: "Entrevista", approved: "Aprobada", rejected: "Rechazada" },
+    en: { new: "New", contacted: "Contacted", interview: "Interview", approved: "Approved", rejected: "Rejected" },
+  }[locale];
+  const availabilityCopy = {
+    it: { immediate: "Subito", two_weeks: "Entro 2 settimane", one_month: "Entro 1 mese" },
+    es: { immediate: "Inmediatamente", two_weeks: "En 2 semanas", one_month: "En 1 mes" },
+    en: { immediate: "Immediately", two_weeks: "Within 2 weeks", one_month: "Within 1 month" },
+  }[locale];
+  const [filter, setFilter] = useState<"all" | SalesApplication["status"]>("all");
+  const [drafts, setDrafts] = useState<Record<string, { status: SalesApplication["status"]; adminNotes: string }>>({});
+  const [busy, setBusy] = useState("");
+  const visible = filter === "all" ? applications : applications.filter((item) => item.status === filter);
+  const draftFor = (item: SalesApplication) => drafts[item.id] ?? { status: item.status, adminNotes: item.admin_notes };
+
+  async function save(item: SalesApplication) {
+    const draft = draftFor(item); setBusy(item.id);
+    try {
+      await api(`/api/sales-applications/${item.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(draft) });
+      setDrafts((current) => { const next = { ...current }; delete next[item.id]; return next; });
+      notify(text.saved); await refresh();
+    } catch (cause) { notify(cause instanceof Error ? cause.message : "Operazione non riuscita.", "error"); }
+    finally { setBusy(""); }
+  }
+
+  return <section className="ops-page applications-page">
+    <PageHeading eyebrow={text.eyebrow} title={text.title} subtitle={text.subtitle} action={<span className="admin-badge">{applications.length}</span>} />
+    <div className="application-filters"><button className={filter === "all" ? "active" : ""} onClick={() => setFilter("all")}>{text.all} · {applications.length}</button>{(Object.keys(statusCopy) as SalesApplication["status"][]).map((status) => <button key={status} className={filter === status ? "active" : ""} onClick={() => setFilter(status)}>{statusCopy[status]} · {applications.filter((item) => item.status === status).length}</button>)}</div>
+    <div className="application-grid">{visible.map((item) => { const draft = draftFor(item); return <article className="application-card" key={item.id}>
+      <header><div className="application-person"><span>{initials(item.name)}</span><div><h2>{item.name}</h2><p>{item.city} · {item.island}</p></div></div><span className={`application-status ${item.status}`}>{statusCopy[item.status]}</span></header>
+      <div className="application-contacts"><a href={`tel:${item.phone}`}>{item.phone}</a><a href={`mailto:${item.email}`}>{item.email}</a></div>
+      <dl><div><dt>{text.language}</dt><dd>{item.languages}</dd></div><div><dt>{text.availability}</dt><dd>{availabilityCopy[item.availability]}</dd></div></dl>
+      <div className="application-presentation"><strong>{text.presentation}</strong><p>{item.presentation}</p></div>
+      <small className="application-meta">{text.commission} · {text.received} {dateTime(item.created_at)}{item.reviewed_by_name ? ` · ${text.reviewed} ${item.reviewed_by_name}` : ""}</small>
+      <div className="application-review"><label><span>{text.title}</span><select value={draft.status} onChange={(event) => setDrafts((current) => ({ ...current, [item.id]: { ...draft, status: event.target.value as SalesApplication["status"] } }))}>{(Object.keys(statusCopy) as SalesApplication["status"][]).map((status) => <option key={status} value={status}>{statusCopy[status]}</option>)}</select></label><label><span>{text.notes}</span><textarea rows={3} maxLength={2000} placeholder={text.notesHint} value={draft.adminNotes} onChange={(event) => setDrafts((current) => ({ ...current, [item.id]: { ...draft, adminNotes: event.target.value } }))} /></label><button className="primary" disabled={busy === item.id} onClick={() => void save(item)}>{busy === item.id ? text.saving : text.save}</button></div>
+    </article>; })}{!visible.length && <div className="data-card"><Empty title={text.empty} text={text.emptyText} /></div>}</div>
   </section>;
 }
 

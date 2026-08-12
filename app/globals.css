@@ -298,6 +298,12 @@ code { padding: 4px 7px; border-radius: 6px; color: #22516d; background: #eaf3f7
 .auth-trust { display: grid; max-width: 610px; grid-template-columns: repeat(3, 1fr); gap: 9px; margin-top: 28px; }
 .auth-trust span { display: flex; align-items: center; gap: 9px; min-height: 54px; padding: 10px 12px; border: 1px solid rgba(255,255,255,.11); border-radius: 11px; color: #dbe5eb; background: rgba(255,255,255,.055); font-size: 10px; font-weight: 800; }
 .auth-trust b { color: #ff8f81; font-size: 9px; }
+.auth-careers-cta { max-width: 610px; display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 12px; padding: 15px 17px; border: 1px solid rgba(255,143,129,.35); border-radius: 12px; color: white; background: rgba(245,62,48,.13); text-decoration: none; transition: transform .2s, background .2s; }
+.auth-careers-cta:hover { transform: translateY(-2px); background: rgba(245,62,48,.22); }
+.auth-careers-cta span { display: grid; gap: 4px; }
+.auth-careers-cta strong { font-size: 12px; }
+.auth-careers-cta small { color: #bfd0dc; font-size: 10px; font-weight: 500; letter-spacing: 0; }
+.auth-careers-cta > b { flex: 0 0 auto; color: #ff9f92; font-size: 10px; }
 .auth-islands { display: flex; flex-wrap: wrap; gap: 8px; }
 .auth-islands span { padding: 7px 10px; border: 1px solid rgba(255,255,255,.13); border-radius: 20px; color: #c8d6df; font-size: 9px; }
 .auth-panel { display: grid; place-items: center; padding: 32px; background: radial-gradient(circle at 100% 0, #f6f9fa, transparent 40%), white; }
@@ -319,6 +325,45 @@ code { padding: 4px 7px; border-radius: 6px; color: #22516d; background: #eaf3f7
 .link-button { border: 0; color: var(--coral-dark); background: transparent; font-size: 11px; }
 .auth-box .form-error { margin-top: 13px; }
 .privacy-note { display: block; margin-top: 18px; color: #8a99a4; font-size: 9px; line-height: 1.5; }
+.auth-careers-mobile { display: none; margin-top: 18px; padding: 16px; border: 1px solid #f0c4bc; border-radius: 11px; color: #102a43; background: #fff5f2; text-decoration: none; }
+.auth-careers-mobile strong, .auth-careers-mobile span, .auth-careers-mobile b { display: block; }
+.auth-careers-mobile strong { font-size: 14px; }
+.auth-careers-mobile span { margin: 5px 0 9px; color: #637786; font-size: 11px; line-height: 1.45; }
+.auth-careers-mobile b { color: #c83b30; font-size: 11px; }
+
+.application-filters { display: flex; gap: 7px; overflow-x: auto; margin: 0 0 18px; padding-bottom: 3px; }
+.application-filters button { min-height: 38px; flex: 0 0 auto; padding: 0 13px; border: 1px solid var(--line); border-radius: 20px; color: var(--muted); background: white; font-size: 10px; font-weight: 800; }
+.application-filters button.active { color: white; border-color: var(--ink); background: var(--ink); }
+.application-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
+.application-grid > .data-card { grid-column: 1 / -1; }
+.application-card { min-width: 0; padding: 21px; border: 1px solid var(--line); border-radius: 14px; background: white; box-shadow: 0 8px 28px rgba(16,42,67,.06); }
+.application-card > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.application-person { min-width: 0; display: flex; align-items: center; gap: 11px; }
+.application-person > span { width: 42px; height: 42px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 12px; color: white; background: var(--ink); font-size: 11px; font-weight: 900; }
+.application-person h2 { margin: 0; font: 700 19px Georgia,serif; }
+.application-person p { margin: 4px 0 0; color: var(--muted); font-size: 10px; }
+.application-status { flex: 0 0 auto; padding: 6px 8px; border-radius: 20px; color: #526777; background: #edf2f4; font-size: 8px; font-weight: 900; text-transform: uppercase; }
+.application-status.new { color: #9b3b31; background: #fff0ed; }
+.application-status.contacted { color: #245c78; background: #eaf5fb; }
+.application-status.interview { color: #725713; background: #fff7d9; }
+.application-status.approved { color: #236a55; background: #e8f6f0; }
+.application-status.rejected { color: #67747d; background: #eceff1; }
+.application-contacts { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+.application-contacts a { padding: 7px 9px; border-radius: 7px; color: #245c78; background: #edf5f8; text-decoration: none; font-size: 10px; font-weight: 800; overflow-wrap: anywhere; }
+.application-card dl { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin: 0 0 15px; }
+.application-card dl > div { padding: 10px; border-radius: 8px; background: #f7f9fa; }
+.application-card dt { color: var(--muted); font-size: 8px; font-weight: 900; text-transform: uppercase; }
+.application-card dd { margin: 4px 0 0; font-size: 10px; font-weight: 700; }
+.application-presentation { padding: 13px; border-left: 3px solid var(--coral); background: #fffaf9; }
+.application-presentation strong { font-size: 9px; text-transform: uppercase; }
+.application-presentation p { margin: 6px 0 0; color: #435d6d; font-size: 11px; line-height: 1.55; white-space: pre-wrap; }
+.application-meta { display: block; margin: 12px 0; color: var(--muted); font-size: 8px; line-height: 1.5; }
+.application-review { display: grid; gap: 10px; padding-top: 14px; border-top: 1px solid var(--line); }
+.application-review label { display: grid; gap: 6px; }
+.application-review label > span { color: var(--muted); font-size: 9px; font-weight: 800; }
+.application-review select, .application-review textarea { width: 100%; min-height: 40px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px; background: #fbfcfd; font: inherit; font-size: 11px; }
+.application-review textarea { resize: vertical; line-height: 1.5; }
+.application-review .primary { justify-self: end; min-width: 110px; }
 
 @media (max-width: 1050px) {
   .ops-shell { grid-template-columns: 205px minmax(0, 1fr); }
@@ -1148,11 +1193,16 @@ code { padding: 4px 7px; border-radius: 6px; color: #22516d; background: #eaf3f7
   .auth-panel { min-height: 100dvh; padding: 28px 18px; }
   .auth-box { width: 100%; max-width: 420px; }
   .auth-mobile-brand { display: flex; }
+  .auth-careers-mobile { display: block; }
   .auth-box h2 { font-size: 31px; }
   .auth-box > p { font-size: 14px; }
   .auth-tabs button { min-height: 46px; font-size: 12px; }
   .link-button { min-height: 44px; font-size: 13px; }
   .privacy-note { font-size: 11px; }
+  .application-grid { grid-template-columns: 1fr; }
+  .application-card { padding: 16px; }
+  .application-card dl { grid-template-columns: 1fr; }
+  .application-review .primary { width: 100%; min-height: 48px; }
 }
 
 @media (max-width: 380px) {

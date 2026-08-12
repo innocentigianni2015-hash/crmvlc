@@ -4,6 +4,7 @@ import {
   canCancelSignedContract,
   canCreateQuote,
   canManagePodcastCalendar,
+  canManageSalesApplications,
   canManageDeliveries,
   canManagePriceList,
   canCreateUserWithRole,
@@ -344,6 +345,9 @@ export async function handleCrmApi(
     if (url.pathname === "/api/public/leads" && request.method === "POST") {
       return await createPublicLandingLead(request, env);
     }
+    if (url.pathname === "/api/public/sales-applications" && request.method === "POST") {
+      return await createPublicSalesApplication(request, env);
+    }
 
     if (url.pathname.startsWith("/api/auth/password/") || url.pathname.startsWith("/api/auth/totp/")) {
       await ensureBootstrapAdmin(env);
@@ -394,6 +398,10 @@ export async function handleCrmApi(
     }
     if (url.pathname === "/api/bootstrap" && request.method === "GET") {
       return bootstrap(user, env);
+    }
+    const salesApplicationMatch = url.pathname.match(/^\/api\/sales-applications\/([^/]+)$/);
+    if (salesApplicationMatch && request.method === "PATCH") {
+      return updateSalesApplication(request, salesApplicationMatch[1], user, env);
     }
     if (url.pathname === "/api/profile" && request.method === "PATCH") {
       const profileResponse = await updateProfile(request, user, env);
@@ -842,6 +850,73 @@ async function consumePublicLeadRateLimit(request: Request, env: RuntimeEnv): Pr
   if (blockedUntil) throw new ApiError(429, "too_many_requests", "Troppe richieste. Riprova più tardi.");
 }
 
+async function createPublicSalesApplication(request: Request, env: RuntimeEnv): Promise<Response> {
+  const body = await readJson<Record<string, unknown>>(request);
+  if (cleanText(body.website, 200)) return json({ accepted: true }, 202);
+
+  const name = cleanText(body.name, 120);
+  const email = normalizeEmail(body.email);
+  const phone = normalizePhone(body.phone);
+  const city = cleanText(body.city, 100);
+  const island = cleanText(body.island, 40);
+  const languages = cleanText(body.languages, 180);
+  const availability = cleanText(body.availability, 40);
+  const presentation = cleanText(body.presentation, 1500);
+  const locale = normalizeUiLanguage(body.locale);
+
+  if (!name || !isEmail(email) || !phone || !city || !languages || !availability || presentation.length < 40) {
+    throw new ApiError(400, "required_fields", "Completa tutti i campi e inserisci una breve presentazione di almeno 40 caratteri.");
+  }
+  if (!isIsland(island)) throw new ApiError(400, "invalid_island", "Seleziona una delle cinque isole.");
+  if (!( ["immediate", "two_weeks", "one_month"] as string[]).includes(availability)) {
+    throw new ApiError(400, "invalid_availability", "Seleziona una disponibilità valida.");
+  }
+  if (body.consent !== true) throw new ApiError(400, "consent_required", "Il consenso privacy è obbligatorio.");
+
+  await consumePublicApplicationRateLimit(request, env);
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const duplicateSince = new Date(now.getTime() - 24 * 60 * 60_000).toISOString();
+  const duplicate = await env.DB.prepare(
+    "SELECT id FROM sales_applications WHERE email = ? AND phone = ? AND created_at >= ? ORDER BY created_at DESC LIMIT 1",
+  ).bind(email, phone, duplicateSince).first<{ id: string }>();
+  if (duplicate) return json({ accepted: true, applicationId: duplicate.id, duplicate: true }, 202);
+
+  const applicationId = crypto.randomUUID();
+  const auditPayload = { name, email, island, city, collaborationType: "commission", status: "new" };
+  const payloadJson = stableJson(auditPayload);
+  const rawIp = request.headers.get("cf-connecting-ip") ?? request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? null;
+  const ipHash = rawIp ? await sha256(`${env.AUTH_SECRET ?? "crmvlc"}:careers:${rawIp}`) : null;
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO sales_applications (
+        id, name, email, phone, city, island, languages, availability, presentation,
+        collaboration_type, locale, status, admin_notes, consent_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'commission', ?, 'new', '', ?, ?, ?)`,
+    ).bind(applicationId, name, email, phone, city, island, languages, availability, presentation, locale, nowIso, nowIso, nowIso),
+    env.DB.prepare(
+      "INSERT INTO audit_events (id, actor_user_id, action, entity_type, entity_id, payload_json, payload_sha256, ip_hash, user_agent, created_at) VALUES (?, NULL, 'sales_application.created', 'sales_application', ?, ?, ?, ?, ?, ?)",
+    ).bind(crypto.randomUUID(), applicationId, payloadJson, await sha256(payloadJson), ipHash, cleanOptionalText(request.headers.get("user-agent"), 300), nowIso),
+  ]);
+  return json({ accepted: true, applicationId }, 201);
+}
+
+async function consumePublicApplicationRateLimit(request: Request, env: RuntimeEnv): Promise<void> {
+  const rawIp = request.headers.get("cf-connecting-ip") ?? request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
+  const key = await sha256(`${env.AUTH_SECRET ?? "crmvlc"}:careers-rate:${rawIp}`);
+  const now = new Date();
+  const row = await env.DB.prepare("SELECT attempts, window_started_at, blocked_until FROM auth_rate_limits WHERE key = ? LIMIT 1")
+    .bind(key).first<{ attempts: number; window_started_at: string; blocked_until: string | null }>();
+  if (row?.blocked_until && Date.parse(row.blocked_until) > now.getTime()) throw new ApiError(429, "too_many_requests", "Troppe richieste. Riprova più tardi.");
+  const reset = !row || now.getTime() - Date.parse(row.window_started_at) >= 60 * 60_000;
+  const attempts = reset ? 1 : row.attempts + 1;
+  const blockedUntil = attempts > 5 ? new Date(now.getTime() + 60 * 60_000).toISOString() : null;
+  await env.DB.prepare(
+    "INSERT INTO auth_rate_limits (key, attempts, window_started_at, blocked_until) VALUES (?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET attempts = excluded.attempts, window_started_at = excluded.window_started_at, blocked_until = excluded.blocked_until",
+  ).bind(key, attempts, reset ? now.toISOString() : row!.window_started_at, blockedUntil).run();
+  if (blockedUntil) throw new ApiError(429, "too_many_requests", "Troppe richieste. Riprova più tardi.");
+}
+
 async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Response> {
   const scope = recordScope(user);
   const clients = user.role === "distributor"
@@ -914,8 +989,10 @@ async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Resp
   let users: Record<string, unknown>[] = [];
   let audit: Record<string, unknown>[] = [];
   let emailOutbox: Record<string, unknown>[] = [];
+  let salesApplications: Record<string, unknown>[] = [];
   if (user.role === "super_admin" || user.role === "admin") {
     users = (await env.DB.prepare("SELECT u.id, u.email, u.name, u.phone, u.language, u.role, u.island, u.sales_manager_id, u.active, u.created_at, m.name AS sales_manager_name FROM users u LEFT JOIN users m ON m.id = u.sales_manager_id ORDER BY u.role, u.name").all()).results;
+    salesApplications = (await env.DB.prepare("SELECT a.*, u.name AS reviewed_by_name FROM sales_applications a LEFT JOIN users u ON u.id = a.reviewed_by ORDER BY CASE a.status WHEN 'new' THEN 0 WHEN 'contacted' THEN 1 WHEN 'interview' THEN 2 WHEN 'approved' THEN 3 ELSE 4 END, a.created_at DESC LIMIT 500").all()).results;
   }
   if (user.role === "super_admin") {
     audit = (await env.DB.prepare("SELECT a.id, a.action, a.entity_type, a.entity_id, a.payload_json, a.created_at, u.name AS actor_name FROM audit_events a LEFT JOIN users u ON u.id = a.actor_user_id ORDER BY a.created_at DESC LIMIT 80").all()).results;
@@ -951,6 +1028,7 @@ async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Resp
     discountCampaigns,
     podcastAppointments,
     podcastInterviewers,
+    salesApplications,
     help,
     demoMode: isDemoEnabled(env) && user.email === normalizeEmail(env.DEMO_EMAIL),
   });
@@ -1633,6 +1711,28 @@ async function updateUser(request: Request, targetUserId: string, user: UserRow,
     active: active === 1,
     previousSalesManagerId: target.sales_manager_id ?? null,
     salesManagerId,
+  });
+  return json({ ok: true });
+}
+
+async function updateSalesApplication(request: Request, applicationId: string, user: AuthenticatedUser, env: RuntimeEnv): Promise<Response> {
+  if (!canManageSalesApplications(user)) throw new ApiError(403, "admin_required", "Solo Admin e Super Admin possono gestire le candidature.");
+  const current = await env.DB.prepare("SELECT id, status, admin_notes FROM sales_applications WHERE id = ? LIMIT 1")
+    .bind(applicationId).first<{ id: string; status: string; admin_notes: string }>();
+  if (!current) throw new ApiError(404, "application_not_found", "Candidatura non trovata.");
+  const body = await readJson<Record<string, unknown>>(request);
+  const status = body.status === undefined ? current.status : cleanText(body.status, 30);
+  const adminNotes = body.adminNotes === undefined ? current.admin_notes : cleanText(body.adminNotes, 2000);
+  if (!( ["new", "contacted", "interview", "approved", "rejected"] as string[]).includes(status)) {
+    throw new ApiError(400, "invalid_status", "Stato candidatura non valido.");
+  }
+  const now = new Date().toISOString();
+  await env.DB.prepare("UPDATE sales_applications SET status = ?, admin_notes = ?, reviewed_by = ?, reviewed_at = ?, updated_at = ? WHERE id = ?")
+    .bind(status, adminNotes, user.sessionActor.id, now, now, current.id).run();
+  await appendAudit(env, request, user, "sales_application.updated", "sales_application", current.id, {
+    previousStatus: current.status,
+    status,
+    notesChanged: adminNotes !== current.admin_notes,
   });
   return json({ ok: true });
 }

@@ -33,4 +33,9 @@ test("renders the public landing with development preview metadata", async () =>
   assert.match(body, developmentPreviewMeta);
   assert.match(body, /Il tuo brand/);
   assert.match(body, /Richiedi una chiamata/);
+  assert.match(body, /data-scroll-target="opportunita"/);
+  assert.match(body, /data-scroll-target="chi-siamo"/);
+  assert.match(body, /data-scroll-target="metodo"/);
+  assert.match(body, /data-scroll-target="contatti"/);
+  assert.doesNotMatch(body, /href="#(?:top|opportunita|chi-siamo|metodo|contatti)"/);
 });

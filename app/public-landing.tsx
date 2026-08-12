@@ -286,9 +286,19 @@ export default function PublicLanding() {
   const t = copy[locale];
   const year = useMemo(() => new Date().getFullYear(), []);
 
+  function scrollToSection(id: "top" | "opportunita" | "chi-siamo" | "metodo" | "contatti") {
+    const target = document.getElementById(id);
+    if (!target) return;
+
+    target.scrollIntoView({ behavior: "smooth" });
+    const nextUrl = new URL(window.location.href);
+    nextUrl.hash = id;
+    window.history.replaceState({}, "", `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
+  }
+
   function selectService(next: Service) {
     setService(next);
-    document.getElementById("contatti")?.scrollIntoView({ behavior: "smooth" });
+    scrollToSection("contatti");
   }
 
   async function submitLead(event: FormEvent<HTMLFormElement>) {
@@ -316,14 +326,14 @@ export default function PublicLanding() {
   return (
     <main className="public-landing">
       <header className="site-header">
-        <a className="brand" href="#top" aria-label="Vivi Le Canarie — home">
+        <button className="brand" type="button" onClick={() => scrollToSection("top")} aria-label="Vivi Le Canarie — home" data-scroll-target="top">
           <img src="/brand/viv-le-canarie-icon.svg" alt="Vivi Le Canarie" />
-        </a>
+        </button>
         <nav className="desktop-nav" aria-label="Navigazione principale">
-          <a href="#opportunita">{t.navServices}</a>
-          <a href="#chi-siamo">{t.navAbout}</a>
-          <a href="#metodo">{t.navMethod}</a>
-          <a href="#contatti">{t.navContact}</a>
+          <button type="button" onClick={() => scrollToSection("opportunita")} data-scroll-target="opportunita">{t.navServices}</button>
+          <button type="button" onClick={() => scrollToSection("chi-siamo")} data-scroll-target="chi-siamo">{t.navAbout}</button>
+          <button type="button" onClick={() => scrollToSection("metodo")} data-scroll-target="metodo">{t.navMethod}</button>
+          <button type="button" onClick={() => scrollToSection("contatti")} data-scroll-target="contatti">{t.navContact}</button>
         </nav>
         <div className="header-actions">
           <div className="language-switch" aria-label="Lingua">
@@ -343,8 +353,8 @@ export default function PublicLanding() {
           <h1>{t.titleTop}<br /><em>{t.titleAccent}</em><br />{t.titleBottom}</h1>
           <p className="hero-intro">{t.intro}</p>
           <div className="hero-actions">
-            <button className="button button-primary" onClick={() => document.getElementById("contatti")?.scrollIntoView({ behavior: "smooth" })}>{t.primaryCta}<span aria-hidden="true">↗</span></button>
-            <a className="button button-secondary" href="#opportunita">{t.secondaryCta}</a>
+            <button className="button button-primary" type="button" onClick={() => scrollToSection("contatti")} data-scroll-target="contatti">{t.primaryCta}<span aria-hidden="true">↗</span></button>
+            <button className="button button-secondary" type="button" onClick={() => scrollToSection("opportunita")} data-scroll-target="opportunita">{t.secondaryCta}</button>
           </div>
         </div>
         <div className="hero-visual">
@@ -499,7 +509,7 @@ export default function PublicLanding() {
 
       <footer>
         <div className="footer-brand"><img src="/brand/viv-le-canarie-icon.svg" alt="Vivi Le Canarie" /><p>{t.footerText}</p></div>
-        <div className="footer-links"><a href="https://www.vivilecanarie.com/" target="_blank" rel="noreferrer">Vivi Le Canarie ↗</a><a href="#chi-siamo">{t.navAbout}</a><a href="/mappe">{t.maps}</a><a href="/privacy">{t.privacy}</a><a href="/login">{t.crm}</a><span>© {year} VIV!</span></div>
+        <div className="footer-links"><a href="https://www.vivilecanarie.com/" target="_blank" rel="noreferrer">Vivi Le Canarie ↗</a><button type="button" onClick={() => scrollToSection("chi-siamo")} data-scroll-target="chi-siamo">{t.navAbout}</button><a href="/mappe">{t.maps}</a><a href="/privacy">{t.privacy}</a><a href="/login">{t.crm}</a><span>© {year} VIV!</span></div>
         <p className="footer-owner">{platformOwnership(locale)}</p>
       </footer>
     </main>

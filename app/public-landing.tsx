@@ -313,18 +313,25 @@ export default function PublicLanding() {
             <a className="button button-secondary" href="#opportunita">{t.secondaryCta}</a>
           </div>
         </div>
-        <div className="hero-visual" aria-hidden="true">
-          <div className="sun-disc" />
-          <div className="editorial-card card-back">
+        <div className="hero-visual">
+          <div className="sun-disc" aria-hidden="true" />
+          <div className="editorial-card card-back" aria-hidden="true">
             <span>VIV!</span>
             <strong>LE<br />CANARIE</strong>
             <small>STORIE · IMPRESE · TERRITORIO</small>
           </div>
           <div className="editorial-card card-front">
-            <img src="/brand/viv-le-canarie-icon.svg" alt="" />
-            <p>LA TUA<br /><strong>STORIA</strong><br />MERITA<br />SPAZIO.</p>
+            <img
+              src="/brand/vlc-08-2026-cover.jpg"
+              alt="Copertina di Vivi Le Canarie, edizione agosto 2026"
+              width="1124"
+              height="1400"
+              loading="eager"
+              fetchPriority="high"
+              decoding="async"
+            />
           </div>
-          <div className="location-chip">28°N · CANARIAS</div>
+          <div className="location-chip" aria-hidden="true">28°N · CANARIAS</div>
         </div>
       </section>
 

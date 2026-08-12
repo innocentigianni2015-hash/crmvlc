@@ -156,7 +156,7 @@ const copy = {
     ],
     podcastCta: "Hablemos del pódcast",
     aboutLabel: "Dirección y gestión",
-    aboutTitle: "Personas, territorio y una visión editorial concreta.",
+    aboutTitle: "Equipo, territorio y una visión editorial concreta.",
     aboutText: "Vivi Le Canarie une experiencia de gestión, producción, comunicación y desarrollo comercial para contar las empresas y comunidades del archipiélago.",
     gianniRole: "Dirección de gestión y comercial",
     gianniBio: "Managing Director y cofundador de LAVISIONARIA. En Vivi Le Canarie coordina organización, desarrollo, alianzas y red comercial.",

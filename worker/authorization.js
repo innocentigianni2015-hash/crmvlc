@@ -106,6 +106,10 @@ export function canManagePodcastCalendar(user) {
   return user.role === "super_admin" || user.role === "admin";
 }
 
+export function canManageSalesApplications(user) {
+  return user.role === "super_admin" || user.role === "admin";
+}
+
 export function canCreateUserWithRole(user, role) {
   if (user.role === "super_admin") return role !== "super_admin" && isRole(role);
   return user.role === "admin" && ["sales_manager", "sales", "distributor"].includes(role);

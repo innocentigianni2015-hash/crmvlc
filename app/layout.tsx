@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import "./public-landing.css";
+import "./careers-page.css";
 import { PlatformI18n } from "./i18n";
 
 export const metadata: Metadata = {

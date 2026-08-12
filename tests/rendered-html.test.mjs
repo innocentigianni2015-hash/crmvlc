@@ -39,3 +39,18 @@ test("renders the public landing with development preview metadata", async () =>
   assert.match(body, /data-scroll-target="contatti"/);
   assert.doesNotMatch(body, /href="#(?:top|opportunita|chi-siamo|metodo|contatti)"/);
 });
+
+test("renders the trilingual sales application page", async () => {
+  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
+  workerUrl.searchParams.set("careers", `${process.pid}-${Date.now()}`);
+  const { default: worker } = await import(workerUrl.href);
+  const response = await worker.fetch(new Request("http://localhost/lavora-con-noi", { headers: { accept: "text/html" } }), {
+    ASSETS: { fetch: async () => new Response("Not found", { status: 404 }) },
+  }, { waitUntil() {}, passThroughOnException() {} });
+  assert.equal(response.status, 200);
+  const body = await response.text();
+  assert.match(body, /Diventa il riferimento commerciale/);
+  assert.match(body, /Collaborazione a provvigioni/);
+  assert.match(body, /Candidatura commerciale/);
+  assert.match(body, /Invia candidatura/);
+});

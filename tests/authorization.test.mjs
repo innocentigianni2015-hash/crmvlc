@@ -8,6 +8,7 @@ import {
   canCreateUserWithRole,
   canManageDeliveries,
   canManagePodcastCalendar,
+  canManageSalesApplications,
   canManagePriceList,
   canReadDelivery,
   canReadPodcastCalendar,
@@ -131,6 +132,14 @@ test("separates podcast calendar visibility from management", () => {
   assert.equal(canManagePodcastCalendar({ role: "admin" }), true);
   assert.equal(canManagePodcastCalendar({ role: "sales_manager" }), false);
   assert.equal(canManagePodcastCalendar({ role: "sales" }), false);
+});
+
+test("reserves sales applications for administrators", () => {
+  assert.equal(canManageSalesApplications({ role: "super_admin" }), true);
+  assert.equal(canManageSalesApplications({ role: "admin" }), true);
+  assert.equal(canManageSalesApplications({ role: "sales_manager" }), false);
+  assert.equal(canManageSalesApplications({ role: "sales" }), false);
+  assert.equal(canManageSalesApplications({ role: "distributor" }), false);
 });
 
 test("converts Canary podcast slots to UTC and keeps one-hour duration", () => {

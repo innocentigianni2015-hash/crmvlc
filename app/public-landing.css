@@ -59,8 +59,12 @@ html:has(.public-landing) {
 
 .public-landing .brand {
   align-items: center;
+  background: none;
+  border: 0;
+  cursor: pointer;
   display: flex;
   justify-self: start;
+  padding: 0;
 }
 
 .public-landing .brand img {
@@ -79,12 +83,21 @@ html:has(.public-landing) {
   letter-spacing: 0.02em;
 }
 
-.public-landing .desktop-nav a,
+.public-landing .desktop-nav button,
 .public-landing .crm-link {
   position: relative;
 }
 
-.public-landing .desktop-nav a::after,
+.public-landing .desktop-nav button {
+  background: none;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+}
+
+.public-landing .desktop-nav button::after,
 .public-landing .crm-link::after {
   background: var(--public-ink);
   bottom: -7px;
@@ -98,7 +111,7 @@ html:has(.public-landing) {
   width: 100%;
 }
 
-.public-landing .desktop-nav a:hover::after,
+.public-landing .desktop-nav button:hover::after,
 .public-landing .crm-link:hover::after {
   transform: scaleX(1);
   transform-origin: left;
@@ -240,6 +253,9 @@ html:has(.public-landing) {
 }
 
 .public-landing .button:focus-visible,
+.public-landing .brand:focus-visible,
+.public-landing .desktop-nav button:focus-visible,
+.public-landing .footer-links button:focus-visible,
 .public-landing .service-card button:focus-visible,
 .public-landing .language-switch button:focus-visible,
 .public-landing input:focus-visible,
@@ -931,9 +947,19 @@ html:has(.public-landing) {
   gap: 24px;
 }
 
-.public-landing .footer-links a {
+.public-landing .footer-links a,
+.public-landing .footer-links button {
   text-decoration: underline;
   text-underline-offset: 4px;
+}
+
+.public-landing .footer-links button {
+  background: none;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
 }
 
 .public-legal .legal-page {

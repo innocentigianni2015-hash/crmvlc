@@ -112,9 +112,10 @@ test("restricts quote creation and discounts by role", () => {
   assert.equal(canCreateQuote({ role: "sales" }), true);
   assert.equal(canCreateQuote({ role: "distributor" }), false);
   assert.equal(canApplyQuoteDiscount({ role: "super_admin" }), true);
-  assert.equal(canApplyQuoteDiscount({ role: "admin" }), false);
-  assert.equal(canApplyQuoteDiscount({ role: "sales_manager" }), false);
-  assert.equal(canApplyQuoteDiscount({ role: "sales" }), false);
+  assert.equal(canApplyQuoteDiscount({ role: "admin" }), true);
+  assert.equal(canApplyQuoteDiscount({ role: "sales_manager" }), true);
+  assert.equal(canApplyQuoteDiscount({ role: "sales" }), true);
+  assert.equal(canApplyQuoteDiscount({ role: "distributor" }), false);
   assert.equal(canUseDiscountCampaign({ role: "super_admin" }), true);
   assert.equal(canUseDiscountCampaign({ role: "sales_manager" }), true);
   assert.equal(canUseDiscountCampaign({ role: "sales" }), true);

@@ -1252,7 +1252,7 @@ async function createQuote(request: Request, user: UserRow, env: RuntimeEnv, ctx
     }
     discountBps = Math.round(discountPercent * 100);
     if (discountBps > 0 && !canApplyQuoteDiscount(user)) {
-      throw new ApiError(403, "discount_not_allowed", "Solo il Super Admin può applicare sconti manuali.");
+      throw new ApiError(403, "discount_not_allowed", "Il tuo ruolo non può applicare sconti manuali.");
     }
     discountReason = cleanOptionalText(body.discountReason, 300);
     if (discountBps > 0 && !discountReason) throw new ApiError(400, "discount_reason_required", "Indica il motivo dello sconto.");

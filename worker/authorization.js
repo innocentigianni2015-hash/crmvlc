@@ -91,7 +91,7 @@ export function canCreateQuote(user) {
 }
 
 export function canApplyQuoteDiscount(user) {
-  return user.role === "super_admin";
+  return ["super_admin", "admin", "sales_manager", "sales"].includes(user.role);
 }
 
 export function canUseDiscountCampaign(user) {

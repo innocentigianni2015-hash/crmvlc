@@ -741,6 +741,7 @@ function PriceListPanel({ data, search, refresh, notify, preferredCampaignId, on
   const [creating, setCreating] = useState(false);
   const [quoteError, setQuoteError] = useState("");
   const priceList = data.priceList;
+  const canApplyManualDiscount = ["super_admin", "admin", "sales_manager", "sales"].includes(data.user.role);
   const validCampaigns = (data.discountCampaigns ?? []).filter((campaign) => campaign.active === 1 && campaign.starts_on <= canaryToday() && campaign.ends_on >= canaryToday());
   const selectedCampaign = validCampaigns.find((campaign) => campaign.id === discountCampaignId) ?? null;
 
@@ -780,8 +781,8 @@ function PriceListPanel({ data, search, refresh, notify, preferredCampaignId, on
           months,
           validDays,
           discountCampaignId: selectedCampaign?.id ?? null,
-          discountPercent: data.user.role === "super_admin" && !selectedCampaign ? discountPercent : 0,
-          discountReason: data.user.role === "super_admin" && !selectedCampaign ? discountReason : "",
+          discountPercent: canApplyManualDiscount && !selectedCampaign ? discountPercent : 0,
+          discountReason: canApplyManualDiscount && !selectedCampaign ? discountReason : "",
           customerNote,
           items: selectedItems.map((item) => ({ priceItemId: item.id, quantity: quantities[item.id] })),
         }),
@@ -823,7 +824,7 @@ function PriceListPanel({ data, search, refresh, notify, preferredCampaignId, on
         <div className="quote-fields"><label>Durata mesi<input type="number" min="1" max="36" value={months} onChange={(event) => setMonths(Math.min(36, Math.max(1, Number(event.target.value) || 1)))} /></label><label>Validità giorni<input type="number" min="1" max="90" value={validDays} onChange={(event) => setValidDays(Math.min(90, Math.max(1, Number(event.target.value) || 1)))} /></label></div>
         {validCampaigns.length > 0 && <label>Promozione disponibile<select value={discountCampaignId} onChange={(event) => { setDiscountCampaignId(event.target.value); if (event.target.value) { setDiscountPercent(0); setDiscountReason(""); } }}><option value="">Nessuna promozione</option>{validCampaigns.map((campaign) => <option key={campaign.id} value={campaign.id}>{campaign.title} · {(campaign.discount_bps / 100).toLocaleString("it-IT")}%</option>)}</select></label>}
         {selectedCampaign && <div className="campaign-selected"><strong>−{(selectedCampaign.discount_bps / 100).toLocaleString("it-IT")}% · {selectedCampaign.title}</strong><span>{selectedCampaign.message}</span><small>Valida fino al {dateOnly(selectedCampaign.ends_on)}. Lo sconto sarà congelato nel PDF.</small></div>}
-        {data.user.role === "super_admin" && !selectedCampaign ? <><label>Sconto manuale %<input type="number" min="0" max="100" step="0.01" value={discountPercent} onChange={(event) => setDiscountPercent(Math.min(100, Math.max(0, Number(event.target.value) || 0)))} /></label>{discountPercent > 0 && <label>Motivo sconto<input maxLength={300} value={discountReason} onChange={(event) => setDiscountReason(event.target.value)} required placeholder="Motivazione commerciale" /></label>}</> : !selectedCampaign && <div className="discount-lock"><strong>Nessuna promozione applicata</strong><span>Seleziona una promozione autorizzata quando disponibile.</span></div>}
+        {canApplyManualDiscount && !selectedCampaign ? <><label>Sconto manuale %<input type="number" min="0" max="100" step="0.01" value={discountPercent} onChange={(event) => setDiscountPercent(Math.min(100, Math.max(0, Number(event.target.value) || 0)))} /></label>{discountPercent > 0 && <label>Motivo sconto<input maxLength={300} value={discountReason} onChange={(event) => setDiscountReason(event.target.value)} required placeholder="Motivazione commerciale" /></label>}</> : !selectedCampaign && <div className="discount-lock"><strong>Nessuna promozione applicata</strong><span>Seleziona una promozione autorizzata quando disponibile.</span></div>}
         <label>Nota al cliente<textarea rows={2} maxLength={700} value={customerNote} onChange={(event) => setCustomerNote(event.target.value)} placeholder="Facoltativa" /></label>
         <div className="quote-lines">{selectedItems.map((item) => <div key={item.id}><span>{quantities[item.id]} × {item.name}<small>{months} {months === 1 ? "mese" : "mesi"}</small></span><strong>{money(item.monthly_price_cents * (quantities[item.id] ?? 0) * months)}</strong></div>)}{!selectedItems.length && <p>Seleziona almeno un formato dal listino.</p>}</div>
         <dl><div><dt>Subtotale netto</dt><dd>{money(selectedCents)}</dd></div>{discountCents > 0 && <div className="discount-total"><dt>Sconto {(discountBps / 100).toLocaleString("it-IT")}%</dt><dd>−{money(discountCents)}</dd></div>}<div><dt>Imponibile</dt><dd>{money(netCents)}</dd></div><div><dt>{priceList.tax_name} {(priceList.tax_rate_bps / 100).toLocaleString("it-IT")}%</dt><dd>{money(taxCents)}</dd></div><div className="quote-total"><dt>Totale</dt><dd>{money(totalCents)}</dd></div></dl>

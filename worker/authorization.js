@@ -83,7 +83,15 @@ export function canReadPriceList(user) {
 }
 
 export function canManagePriceList(user) {
-  return user.role === "super_admin";
+  return user.role === "super_admin" || user.role === "admin";
+}
+
+export function canManageDiscountCampaigns(user) {
+  return user.role === "super_admin" || user.role === "admin";
+}
+
+export function canImpersonateUsers(user) {
+  return user.role === "super_admin" || user.role === "admin";
 }
 
 export function canCreateQuote(user) {
@@ -95,7 +103,7 @@ export function canApplyQuoteDiscount(user) {
 }
 
 export function canUseDiscountCampaign(user) {
-  return user.role === "super_admin" || user.role === "sales_manager" || user.role === "sales";
+  return ["super_admin", "admin", "sales_manager", "sales"].includes(user.role);
 }
 
 export function canReadPodcastCalendar(user) {

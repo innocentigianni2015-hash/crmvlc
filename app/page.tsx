@@ -369,7 +369,7 @@ export default function Home() {
     entries: [], drafts: [], history: [], tickets: [], aiEnabled: false,
     usage: { month_key: "—", spent_micro_usd: 0, reserved_micro_usd: 0, request_count: 0, budget_micro_usd: 25_000_000, updated_at: new Date().toISOString() },
   };
-  const canImpersonate = sessionActor.role === "super_admin";
+  const canImpersonate = ["super_admin", "admin"].includes(sessionActor.role);
   const filteredClients = data.clients.filter((client) => `${client.company_name} ${client.contact_name} ${client.email} ${client.island}`.toLowerCase().includes(search.toLowerCase()));
   const filteredContracts = data.contracts.filter((contract) => `${contract.title} ${contract.client_company ?? ""} ${contract.island}`.toLowerCase().includes(search.toLowerCase()));
   const filteredQuotes = data.quotes.filter((quote) => `${quote.quote_number} ${quote.customer_company} ${quote.customer_contact} ${quote.customer_email} ${quote.island}`.toLowerCase().includes(search.toLowerCase()));
@@ -742,6 +742,7 @@ function PriceListPanel({ data, search, refresh, notify, preferredCampaignId, on
   const [quoteError, setQuoteError] = useState("");
   const priceList = data.priceList;
   const canApplyManualDiscount = ["super_admin", "admin", "sales_manager", "sales"].includes(data.user.role);
+  const canManagePricing = ["super_admin", "admin"].includes(data.user.role);
   const validCampaigns = (data.discountCampaigns ?? []).filter((campaign) => campaign.active === 1 && campaign.starts_on <= canaryToday() && campaign.ends_on >= canaryToday());
   const selectedCampaign = validCampaigns.find((campaign) => campaign.id === discountCampaignId) ?? null;
 
@@ -808,13 +809,13 @@ function PriceListPanel({ data, search, refresh, notify, preferredCampaignId, on
 
   return <section className="ops-page pricing-page">
     <PageHeading eyebrow="Vendita pubblicitaria" title="Listino" subtitle="Dodici formati mensili, prezzi netti e IGIC calcolato separatamente per tutte le isole." action={<span className="admin-badge">v{priceList.version} · {priceList.tax_name} {(priceList.tax_rate_bps / 100).toLocaleString(localeTag())}%</span>} />
-    {data.user.role === "super_admin" && <DiscountCampaignAdmin campaigns={data.discountCampaigns ?? []} refresh={refresh} notify={notify} />}
+    {canManagePricing && <DiscountCampaignAdmin campaigns={data.discountCampaigns ?? []} refresh={refresh} notify={notify} />}
     <div className="pricing-layout">
       <div className="pricing-catalog">
         <div className="pricing-notice"><strong>Prezzi base mensili</strong><span>{priceList.prices_include_tax ? `${priceList.tax_name} incluso` : `${priceList.tax_name} escluso`} · validi per Tenerife, Gran Canaria, Lanzarote, Fuerteventura e La Palma.</span></div>
         {categories.map((group) => <section className="price-group" key={group.category}><header><div><span>{String(group.items.length).padStart(2, "0")}</span><h2>{priceCategoryLabels[group.category]}</h2></div><small>Prezzo netto / mese</small></header><div className="price-grid">{group.items.map((item) => {
           const quantity = quantities[item.id] ?? 0;
-          return <article className={`price-card ${quantity ? "selected" : ""}`} key={item.id}><div className="price-card-top"><span className="price-code">{item.code}</span>{data.user.role === "super_admin" && <button className="price-edit" onClick={() => setEditing(item)}>Modifica</button>}</div><h3>{item.name}</h3><p className="price-size">{item.dimensions}</p><strong className="price-value">{money(item.monthly_price_cents)}<small>/mese</small></strong>{item.included_services && <ul>{item.included_services.split("\n").filter(Boolean).map((service) => <li key={service}>{service}</li>)}</ul>}<div className="quantity-control"><button aria-label={`Riduci ${item.name}`} onClick={() => setQuantity(item.id, quantity - 1)}>−</button><input aria-label={`Quantità ${item.name}`} type="number" min="0" max="99" value={quantity} onChange={(event) => setQuantity(item.id, Number(event.target.value))} /><button aria-label={`Aumenta ${item.name}`} onClick={() => setQuantity(item.id, quantity + 1)}>＋</button></div></article>;
+          return <article className={`price-card ${quantity ? "selected" : ""}`} key={item.id}><div className="price-card-top"><span className="price-code">{item.code}</span>{canManagePricing && <button className="price-edit" onClick={() => setEditing(item)}>Modifica</button>}</div><h3>{item.name}</h3><p className="price-size">{item.dimensions}</p><strong className="price-value">{money(item.monthly_price_cents)}<small>/mese</small></strong>{item.included_services && <ul>{item.included_services.split("\n").filter(Boolean).map((service) => <li key={service}>{service}</li>)}</ul>}<div className="quantity-control"><button aria-label={`Riduci ${item.name}`} onClick={() => setQuantity(item.id, quantity - 1)}>−</button><input aria-label={`Quantità ${item.name}`} type="number" min="0" max="99" value={quantity} onChange={(event) => setQuantity(item.id, Number(event.target.value))} /><button aria-label={`Aumenta ${item.name}`} onClick={() => setQuantity(item.id, quantity + 1)}>＋</button></div></article>;
         })}</div></section>)}
         {!categories.length && <div className="data-card"><Empty title="Nessun formato trovato" text="Modifica la ricerca per visualizzare il listino." /></div>}
       </div>

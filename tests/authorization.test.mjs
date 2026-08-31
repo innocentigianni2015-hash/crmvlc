@@ -7,9 +7,11 @@ import {
   canCreateQuote,
   canCreateUserWithRole,
   canManageDeliveries,
+  canManageDiscountCampaigns,
   canManagePodcastCalendar,
   canManageSalesApplications,
   canManagePriceList,
+  canImpersonateUsers,
   canReadDelivery,
   canReadPodcastCalendar,
   canReadPriceList,
@@ -100,7 +102,7 @@ test("keeps the commercial price list away from distributors", () => {
   assert.equal(canReadPriceList({ role: "sales" }), true);
   assert.equal(canReadPriceList({ role: "distributor" }), false);
   assert.equal(canManagePriceList({ role: "super_admin" }), true);
-  assert.equal(canManagePriceList({ role: "admin" }), false);
+  assert.equal(canManagePriceList({ role: "admin" }), true);
   assert.equal(canManagePriceList({ role: "sales_manager" }), false);
   assert.equal(canManagePriceList({ role: "sales" }), false);
 });
@@ -119,8 +121,17 @@ test("restricts quote creation and discounts by role", () => {
   assert.equal(canUseDiscountCampaign({ role: "super_admin" }), true);
   assert.equal(canUseDiscountCampaign({ role: "sales_manager" }), true);
   assert.equal(canUseDiscountCampaign({ role: "sales" }), true);
-  assert.equal(canUseDiscountCampaign({ role: "admin" }), false);
+  assert.equal(canUseDiscountCampaign({ role: "admin" }), true);
   assert.equal(canUseDiscountCampaign({ role: "distributor" }), false);
+  assert.equal(canManageDiscountCampaigns({ role: "super_admin" }), true);
+  assert.equal(canManageDiscountCampaigns({ role: "admin" }), true);
+  assert.equal(canManageDiscountCampaigns({ role: "sales_manager" }), false);
+  assert.equal(canManageDiscountCampaigns({ role: "sales" }), false);
+  assert.equal(canImpersonateUsers({ role: "super_admin" }), true);
+  assert.equal(canImpersonateUsers({ role: "admin" }), true);
+  assert.equal(canImpersonateUsers({ role: "sales_manager" }), false);
+  assert.equal(canImpersonateUsers({ role: "sales" }), false);
+  assert.equal(canImpersonateUsers({ role: "distributor" }), false);
 });
 
 test("separates podcast calendar visibility from management", () => {

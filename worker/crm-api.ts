@@ -6,7 +6,9 @@ import {
   canManagePodcastCalendar,
   canManageSalesApplications,
   canManageDeliveries,
+  canManageDiscountCampaigns,
   canManagePriceList,
+  canImpersonateUsers,
   canCreateUserWithRole,
   canReadPodcastCalendar,
   canReadPriceList,
@@ -558,7 +560,7 @@ async function logout(request: Request, env: RuntimeEnv): Promise<Response> {
 
 async function startImpersonation(request: Request, user: AuthenticatedUser, env: RuntimeEnv): Promise<Response> {
   const actor = user.sessionActor;
-  if (actor.role !== "super_admin") throw new ApiError(403, "super_admin_required", "Solo il Super Admin può usare le viste operative.");
+  if (!canImpersonateUsers(actor)) throw new ApiError(403, "impersonation_not_allowed", "Solo Super Admin e Admin possono usare le viste operative.");
   if (!env.AUTH_SECRET) throw new ApiError(503, "auth_not_configured", "La chiave di autenticazione non è configurata.");
 
   const body = await readJson<{ userId?: string }>(request);
@@ -597,7 +599,7 @@ async function startImpersonation(request: Request, user: AuthenticatedUser, env
 
 async function stopImpersonation(request: Request, user: AuthenticatedUser, env: RuntimeEnv): Promise<Response> {
   const actor = user.sessionActor;
-  if (actor.role !== "super_admin") throw new ApiError(403, "super_admin_required", "Solo il Super Admin può terminare la vista operativa.");
+  if (!canImpersonateUsers(actor)) throw new ApiError(403, "impersonation_not_allowed", "Solo Super Admin e Admin possono terminare la vista operativa.");
   if (user.impersonation) {
     await appendAudit(env, request, user, "impersonation.stopped", "user", user.id, {
       effectiveUserId: user.id,
@@ -964,7 +966,7 @@ async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Resp
   }
 
   let discountCampaigns: DiscountCampaignRow[] = [];
-  if (user.role === "super_admin") {
+  if (canManageDiscountCampaigns(user)) {
     discountCampaigns = (await env.DB.prepare(
       "SELECT dc.*, (SELECT COUNT(*) FROM quotes q WHERE q.discount_campaign_id = dc.id) AS usage_count FROM discount_campaigns dc ORDER BY dc.created_at DESC LIMIT 250",
     ).all<DiscountCampaignRow>()).results;
@@ -1002,7 +1004,7 @@ async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Resp
       .bind(user.id, user.island, user.id).all()).results;
   }
 
-  const impersonationUsers = user.sessionActor.role === "super_admin"
+  const impersonationUsers = canImpersonateUsers(user.sessionActor)
     ? (await env.DB.prepare(
       "SELECT id, email, name, phone, language, role, island, sales_manager_id, active, created_at FROM users WHERE active = 1 AND role IN ('sales', 'distributor') ORDER BY role, island, name",
     ).all()).results
@@ -1035,7 +1037,7 @@ async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Resp
 }
 
 async function updatePriceItem(request: Request, itemId: string, user: UserRow, env: RuntimeEnv): Promise<Response> {
-  if (!canManagePriceList(user)) throw new ApiError(403, "super_admin_required", "Solo il Super Admin può modificare il listino.");
+  if (!canManagePriceList(user)) throw new ApiError(403, "price_list_manager_required", "Solo Super Admin e Admin possono modificare il listino.");
   const current = await env.DB.prepare(
     "SELECT id, price_list_id, code, category, name, dimensions, monthly_price_cents, included_services, active, sort_order, version, updated_at FROM price_items WHERE id = ? LIMIT 1",
   ).bind(itemId).first<PriceItemRow>();
@@ -1065,7 +1067,7 @@ async function updatePriceItem(request: Request, itemId: string, user: UserRow, 
 }
 
 async function createDiscountCampaign(request: Request, user: UserRow, env: RuntimeEnv): Promise<Response> {
-  requireSuperAdmin(user);
+  requireDiscountCampaignManager(user);
   const body = await readJson<Record<string, unknown>>(request);
   const title = cleanText(body.title, 120);
   const message = cleanText(body.message, 300);
@@ -1094,7 +1096,7 @@ async function createDiscountCampaign(request: Request, user: UserRow, env: Runt
 }
 
 async function deactivateDiscountCampaign(request: Request, campaignId: string, user: UserRow, env: RuntimeEnv): Promise<Response> {
-  requireSuperAdmin(user);
+  requireDiscountCampaignManager(user);
   const body = await readJson<Record<string, unknown>>(request);
   if (body.active !== false) {
     throw new ApiError(400, "campaign_deactivation_required", "Le promozioni non si modificano: puoi solo disattivarle e crearne una nuova.");
@@ -1994,7 +1996,7 @@ async function requireUser(request: Request, env: RuntimeEnv, ctx: ExecutionCont
 
   const authenticatedActor: AuthenticatedUser = { ...sessionActor, sessionActor, impersonation: null };
   const impersonationToken = cookieValue(request, IMPERSONATION_COOKIE);
-  if (!impersonationToken || sessionActor.role !== "super_admin") return authenticatedActor;
+  if (!impersonationToken || !canImpersonateUsers(sessionActor)) return authenticatedActor;
   const stoppingImpersonation = new URL(request.url).pathname === "/api/admin/impersonation/stop";
   if (!env.AUTH_SECRET) {
     if (stoppingImpersonation) return authenticatedActor;
@@ -2283,6 +2285,12 @@ function requireAuthConfiguration(env: RuntimeEnv): void {
 
 function requireSuperAdmin(user: UserRow): void {
   if (user.role !== "super_admin") throw new ApiError(403, "super_admin_required", "Operazione riservata al Super Admin.");
+}
+
+function requireDiscountCampaignManager(user: UserRow): void {
+  if (!canManageDiscountCampaigns(user)) {
+    throw new ApiError(403, "discount_campaign_manager_required", "Solo Super Admin e Admin possono gestire le campagne promozionali.");
+  }
 }
 
 function requireUserManager(user: UserRow): void {

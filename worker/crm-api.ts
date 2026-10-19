@@ -14,6 +14,8 @@ import {
   canReadPriceList,
   canReadRecord,
   canUseDiscountCampaign,
+  canEditDeliveryDetails,
+  canTransitionDeliveryStatus,
   canWriteDelivery,
   canWriteRecord,
   canUpdateUserRole,
@@ -923,7 +925,7 @@ async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Resp
   const scope = recordScope(user);
   const clients = user.role === "distributor"
     ? (await env.DB.prepare(
-      "SELECT DISTINCT c.*, u.name AS owner_name, u.sales_manager_id AS owner_sales_manager_id FROM clients c JOIN users u ON u.id = c.owner_user_id JOIN deliveries d ON d.client_id = c.id WHERE c.archived_at IS NULL AND d.distributor_user_id = ? ORDER BY c.updated_at DESC LIMIT 250",
+      "SELECT DISTINCT c.id, c.company_name, c.contact_name, c.email, c.phone, c.island, 'lead' AS stage, 0 AS value_cents, c.owner_user_id, '' AS notes, c.version, c.created_by, c.created_at, c.updated_at, u.name AS owner_name, u.sales_manager_id AS owner_sales_manager_id FROM clients c JOIN users u ON u.id = c.owner_user_id JOIN deliveries d ON d.client_id = c.id WHERE c.archived_at IS NULL AND d.distributor_user_id = ? ORDER BY c.updated_at DESC LIMIT 250",
     ).bind(user.id).all<ClientRow>()).results
     : (await env.DB.prepare(
       `SELECT c.*, u.name AS owner_name, u.sales_manager_id AS owner_sales_manager_id FROM clients c JOIN users u ON u.id = c.owner_user_id WHERE c.archived_at IS NULL${scope.sql.replaceAll("island", "c.island").replaceAll("owner_user_id", "c.owner_user_id")} ORDER BY c.updated_at DESC LIMIT 250`,
@@ -948,9 +950,13 @@ async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Resp
     `SELECT d.*, c.company_name AS client_company, u.name AS distributor_name, p.name AS distribution_point_name, p.address AS distribution_point_address, p.latitude_e6 AS distribution_point_latitude_e6, p.longitude_e6 AS distribution_point_longitude_e6 FROM deliveries d JOIN clients c ON c.id = d.client_id JOIN users u ON u.id = d.distributor_user_id LEFT JOIN distribution_points p ON p.id = d.distribution_point_id WHERE 1 = 1${deliveryFilter.sql} ORDER BY CASE d.status WHEN 'issue' THEN 0 WHEN 'assigned' THEN 1 WHEN 'in_progress' THEN 2 ELSE 3 END, d.updated_at DESC LIMIT 250`,
   ).bind(...deliveryFilter.values).all<DeliveryRow>()).results;
 
-  const distributionPoints = (await env.DB.prepare(
-    `SELECT p.id, p.client_id, p.name, p.island, p.address, p.latitude_e6, p.longitude_e6, p.capacity, p.stock FROM distribution_points p WHERE p.public_visible = 1${isGlobalOperator(user) ? "" : " AND p.island = ?"} ORDER BY p.island, p.name LIMIT 500`,
-  ).bind(...(isGlobalOperator(user) ? [] : [String(user.island ?? "")])).all()).results;
+  const distributionPoints = user.role === "distributor"
+    ? (await env.DB.prepare(
+      "SELECT DISTINCT p.id, p.client_id, p.name, p.island, p.address, p.latitude_e6, p.longitude_e6, p.capacity, p.stock FROM distribution_points p JOIN deliveries d ON d.distribution_point_id = p.id WHERE p.public_visible = 1 AND d.distributor_user_id = ? ORDER BY p.name LIMIT 500",
+    ).bind(user.id).all()).results
+    : (await env.DB.prepare(
+      `SELECT p.id, p.client_id, p.name, p.island, p.address, p.latitude_e6, p.longitude_e6, p.capacity, p.stock FROM distribution_points p WHERE p.public_visible = 1${isGlobalOperator(user) ? "" : " AND p.island = ?"} ORDER BY p.island, p.name LIMIT 500`,
+    ).bind(...(isGlobalOperator(user) ? [] : [String(user.island ?? "")])).all()).results;
 
   let priceList: PriceListRow | null = null;
   let priceItems: PriceItemRow[] = [];
@@ -980,12 +986,15 @@ async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Resp
   let podcastAppointments: PodcastAppointmentRow[] = [];
   let podcastInterviewers: Record<string, unknown>[] = [];
   if (canReadPodcastCalendar(user)) {
+    const globalPodcastAccess = isGlobalOperator(user);
     podcastAppointments = (await env.DB.prepare(
-      "SELECT p.*, u.name AS interviewer_name FROM podcast_appointments p JOIN users u ON u.id = p.interviewer_user_id ORDER BY p.starts_at DESC LIMIT 500",
-    ).all<PodcastAppointmentRow>()).results;
-    podcastInterviewers = (await env.DB.prepare(
-      "SELECT id, email, name, phone, language, role, island, active FROM users WHERE active = 1 AND role <> 'distributor' ORDER BY name",
-    ).all()).results;
+      `SELECT p.*, u.name AS interviewer_name FROM podcast_appointments p JOIN users u ON u.id = p.interviewer_user_id${globalPodcastAccess ? "" : " WHERE u.island = ?"} ORDER BY p.starts_at DESC LIMIT 500`,
+    ).bind(...(globalPodcastAccess ? [] : [String(user.island ?? "")])).all<PodcastAppointmentRow>()).results;
+    if (canManagePodcastCalendar(user)) {
+      podcastInterviewers = (await env.DB.prepare(
+        "SELECT id, email, name, phone, language, role, island, active FROM users WHERE active = 1 AND role <> 'distributor' ORDER BY name",
+      ).all()).results;
+    }
   }
 
   let users: Record<string, unknown>[] = [];
@@ -1608,17 +1617,21 @@ async function updateDelivery(request: Request, deliveryId: string, user: UserRo
   const version = Number(body.version);
   if (version !== current.version) throw new ApiError(409, "version_conflict", "La consegna è stata aggiornata da un altro utente. Ricarica i dati.");
 
+  const canEditDetails = canEditDeliveryDetails(user);
   const status = String(body.status ?? current.status);
   if (!isDeliveryStatus(status)) throw new ApiError(400, "invalid_delivery_status", "Stato della consegna non valido.");
-  const quantity = body.quantity === undefined ? current.quantity : positiveInteger(body.quantity, 1_000_000);
-  const unit = body.unit === undefined ? current.unit : cleanText(body.unit, 30);
-  const scheduledFor = body.scheduledFor === undefined ? current.scheduled_for : optionalDate(body.scheduledFor);
-  const deliveryContactName = body.deliveryContactName === undefined ? current.delivery_contact_name : cleanText(body.deliveryContactName, 120);
-  const deliveryContactEmail = body.deliveryContactEmail === undefined ? current.delivery_contact_email : normalizeEmail(body.deliveryContactEmail);
-  const deliveryContactPhone = body.deliveryContactPhone === undefined ? current.delivery_contact_phone : cleanOptionalText(body.deliveryContactPhone, 40);
-  const deliveryAddress = body.deliveryAddress === undefined ? current.delivery_address : cleanOptionalText(body.deliveryAddress, 300);
+  if (!canTransitionDeliveryStatus(user, current.status, status)) {
+    throw new ApiError(409, "invalid_delivery_transition", "Lo stato della consegna non può tornare indietro.");
+  }
+  const quantity = !canEditDetails || body.quantity === undefined ? current.quantity : positiveInteger(body.quantity, 1_000_000);
+  const unit = !canEditDetails || body.unit === undefined ? current.unit : cleanText(body.unit, 30);
+  const scheduledFor = !canEditDetails || body.scheduledFor === undefined ? current.scheduled_for : optionalDate(body.scheduledFor);
+  const deliveryContactName = !canEditDetails || body.deliveryContactName === undefined ? current.delivery_contact_name : cleanText(body.deliveryContactName, 120);
+  const deliveryContactEmail = !canEditDetails || body.deliveryContactEmail === undefined ? current.delivery_contact_email : normalizeEmail(body.deliveryContactEmail);
+  const deliveryContactPhone = !canEditDetails || body.deliveryContactPhone === undefined ? current.delivery_contact_phone : cleanOptionalText(body.deliveryContactPhone, 40);
+  const deliveryAddress = !canEditDetails || body.deliveryAddress === undefined ? current.delivery_address : cleanOptionalText(body.deliveryAddress, 300);
   const notes = body.notes === undefined ? current.notes : cleanOptionalText(body.notes, 2000);
-  const distributionPointId = body.distributionPointId === undefined ? current.distribution_point_id : String(body.distributionPointId ?? "");
+  const distributionPointId = !canEditDetails || body.distributionPointId === undefined ? current.distribution_point_id : String(body.distributionPointId ?? "");
   const distributionPoint = await env.DB.prepare(
     "SELECT id FROM distribution_points WHERE id = ? AND island = ? AND public_visible = 1 AND (client_id IS NULL OR client_id = ?) LIMIT 1",
   ).bind(distributionPointId, current.island, current.client_id).first<{ id: string }>();
@@ -2577,3 +2590,4 @@ function safeFilename(value: string): string {
 function escapeHtml(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
 }
+

@@ -125,6 +125,9 @@ export async function handleOperationsApi(
 async function operationsSnapshot(env: RuntimeEnv, user: OperationsUser): Promise<Response> {
   const sponsorScope = scopeFor(user, "s.island", "s.owner_user_id");
   const islandScope = scopeFor(user, "x.island", null);
+  const couponScope = user.role === "sales"
+    ? { sql: " AND s.owner_user_id = ? AND m.created_by_user_id = ?", values: [user.id, user.id] }
+    : sponsorScope;
   const financeScope = isGlobalOperator(user)
     ? { sql: "", values: [] as string[] }
     : user.role === "sales_manager"
@@ -135,13 +138,19 @@ async function operationsSnapshot(env: RuntimeEnv, user: OperationsUser): Promis
     ? (await env.DB.prepare("SELECT s.id, s.name, s.island, s.category, s.status, s.offer_title, s.discount_text, s.address, s.latitude_e6, s.longitude_e6, s.instagram_handle, s.client_id, s.updated_at FROM sponsors s WHERE s.client_id IN (SELECT d.client_id FROM deliveries d WHERE d.distributor_user_id = ?) ORDER BY s.updated_at DESC LIMIT 150").bind(user.id).all()).results
     : (await env.DB.prepare(`SELECT s.id, s.name, s.island, s.category, s.status, s.offer_title, s.discount_text, s.address, s.latitude_e6, s.longitude_e6, s.instagram_handle, s.client_id, s.updated_at FROM sponsors s WHERE 1 = 1${sponsorScope.sql} ORDER BY s.updated_at DESC LIMIT 150`).bind(...sponsorScope.values).all()).results;
 
-  const vipMembers = user.role === "distributor" ? [] : (await env.DB.prepare(
-    `SELECT x.id, x.name, x.phone, x.island, x.tier, x.streak_months, x.consent_at, x.created_at FROM vip_members x WHERE 1 = 1${islandScope.sql} ORDER BY x.created_at DESC LIMIT 150`,
-  ).bind(...islandScope.values).all()).results;
+  const vipMembers = user.role === "distributor"
+    ? []
+    : user.role === "sales"
+      ? (await env.DB.prepare(
+        "SELECT x.id, x.name, x.phone, x.island, x.tier, x.streak_months, x.consent_at, x.created_at FROM vip_members x WHERE x.created_by_user_id = ? ORDER BY x.created_at DESC LIMIT 150",
+      ).bind(user.id).all()).results
+      : (await env.DB.prepare(
+        `SELECT x.id, x.name, x.phone, x.island, x.tier, x.streak_months, x.consent_at, x.created_at FROM vip_members x WHERE 1 = 1${islandScope.sql} ORDER BY x.created_at DESC LIMIT 150`,
+      ).bind(...islandScope.values).all()).results;
 
   const coupons = user.role === "distributor" ? [] : (await env.DB.prepare(
-    `SELECT c.id, c.code, c.status, c.issued_at, c.expires_at, c.redeemed_at, s.name AS sponsor_name, s.island, m.name AS member_name, m.phone AS member_phone FROM coupons c JOIN sponsors s ON s.id = c.sponsor_id JOIN vip_members m ON m.id = c.member_id WHERE 1 = 1${scopeFor(user, "s.island", "s.owner_user_id").sql} ORDER BY c.issued_at DESC LIMIT 200`,
-  ).bind(...sponsorScope.values).all()).results;
+    `SELECT c.id, c.code, c.status, c.issued_at, c.expires_at, c.redeemed_at, s.name AS sponsor_name, s.island, m.name AS member_name, m.phone AS member_phone FROM coupons c JOIN sponsors s ON s.id = c.sponsor_id JOIN vip_members m ON m.id = c.member_id WHERE 1 = 1${couponScope.sql} ORDER BY c.issued_at DESC LIMIT 200`,
+  ).bind(...couponScope.values).all()).results;
 
   const commissionRules = user.role === "super_admin" ? (await env.DB.prepare(
     "SELECT id, name, role, island, rate_bps, active, created_at, updated_at FROM commission_rules ORDER BY active DESC, role, island",
@@ -160,9 +169,13 @@ async function operationsSnapshot(env: RuntimeEnv, user: OperationsUser): Promis
     `SELECT x.id, x.issue_label, x.island, x.slot_code, x.slot_name, x.width_mm, x.height_mm, x.status, x.client_id, c.company_name AS client_company, x.contract_id, x.updated_at FROM ad_inventory x LEFT JOIN clients c ON c.id = x.client_id WHERE 1 = 1${inventoryScope.sql} ORDER BY x.issue_label DESC, x.island, x.slot_code LIMIT 250`,
   ).bind(...inventoryScope.values).all()).results;
 
-  const distributionPoints = (await env.DB.prepare(
-    `SELECT x.id, x.client_id, c.company_name AS client_company, x.name, x.island, x.address, x.latitude_e6, x.longitude_e6, x.capacity, x.stock, x.public_visible, x.updated_at FROM distribution_points x LEFT JOIN clients c ON c.id = x.client_id WHERE 1 = 1${islandScope.sql} ORDER BY x.island, x.stock, x.name LIMIT 300`,
-  ).bind(...islandScope.values).all()).results;
+  const distributionPoints = user.role === "distributor"
+    ? (await env.DB.prepare(
+      "SELECT DISTINCT x.id, x.client_id, c.company_name AS client_company, x.name, x.island, x.address, x.latitude_e6, x.longitude_e6, x.capacity, x.stock, x.public_visible, x.updated_at FROM distribution_points x LEFT JOIN clients c ON c.id = x.client_id JOIN deliveries d ON d.distribution_point_id = x.id WHERE d.distributor_user_id = ? ORDER BY x.stock, x.name LIMIT 300",
+    ).bind(user.id).all()).results
+    : (await env.DB.prepare(
+      `SELECT x.id, x.client_id, c.company_name AS client_company, x.name, x.island, x.address, x.latitude_e6, x.longitude_e6, x.capacity, x.stock, x.public_visible, x.updated_at FROM distribution_points x LEFT JOIN clients c ON c.id = x.client_id WHERE 1 = 1${islandScope.sql} ORDER BY x.island, x.stock, x.name LIMIT 300`,
+    ).bind(...islandScope.values).all()).results;
 
   const auditScope = isGlobalOperator(user) ? { sql: "", values: [] as string[] }
     : user.role === "sales_manager" ? { sql: " AND p.island = ?", values: [String(user.island)] }
@@ -266,8 +279,8 @@ async function createVipMember(request: Request, env: RuntimeEnv, user: Operatio
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   try {
-    await env.DB.prepare("INSERT INTO vip_members (id, name, phone, island, tier, streak_months, consent_at, created_at) VALUES (?, ?, ?, ?, 'standard', 0, ?, ?)")
-      .bind(id, name, phone, island, now, now).run();
+    await env.DB.prepare("INSERT INTO vip_members (id, name, phone, island, tier, streak_months, consent_at, created_by_user_id, created_at) VALUES (?, ?, ?, ?, 'standard', 0, ?, ?, ?)")
+      .bind(id, name, phone, island, now, user.id, now).run();
   } catch (error) {
     if (String(error).includes("UNIQUE")) throw new OperationsError(409, "member_exists", "Questo numero WhatsApp è già registrato.");
     throw error;
@@ -282,8 +295,11 @@ async function issueCoupon(request: Request, env: RuntimeEnv, user: OperationsUs
   const sponsorId = clean(body.sponsorId, 80);
   const memberId = clean(body.memberId, 80);
   const sponsor = await getSponsor(env, sponsorId);
-  const member = await env.DB.prepare("SELECT id, island FROM vip_members WHERE id = ? LIMIT 1").bind(memberId).first<{ id: string; island: string }>();
+  const member = await env.DB.prepare("SELECT id, island, created_by_user_id FROM vip_members WHERE id = ? LIMIT 1").bind(memberId).first<{ id: string; island: string; created_by_user_id: string | null }>();
   if (!sponsor || !member || !canAccessIsland(user, sponsor.island) || !canAccessIsland(user, member.island)) {
+    throw new OperationsError(404, "coupon_subject_not_found", "Sponsor o membro VIP non disponibile nel tuo perimetro.");
+  }
+  if (user.role === "sales" && (sponsor.owner_user_id !== user.id || member.created_by_user_id !== user.id)) {
     throw new OperationsError(404, "coupon_subject_not_found", "Sponsor o membro VIP non disponibile nel tuo perimetro.");
   }
   const id = crypto.randomUUID();
@@ -436,6 +452,12 @@ async function updateDistributionStock(request: Request, env: RuntimeEnv, user: 
   const stock = nonNegativeInt(body.stock, 1_000_000);
   const row = await env.DB.prepare("SELECT id, island FROM distribution_points WHERE id = ? LIMIT 1").bind(id).first<{ id: string; island: string }>();
   if (!row || !canAccessIsland(user, row.island)) throw new OperationsError(404, "point_not_found", "Punto distribuzione non trovato.");
+  if (user.role === "distributor") {
+    const assigned = await env.DB.prepare(
+      "SELECT 1 AS ok FROM deliveries WHERE distributor_user_id = ? AND distribution_point_id = ? LIMIT 1",
+    ).bind(user.id, row.id).first();
+    if (!assigned) throw new OperationsError(404, "point_not_found", "Punto distribuzione non trovato.");
+  }
   const now = new Date().toISOString();
   await env.DB.prepare("UPDATE distribution_points SET stock = ?, updated_at = ? WHERE id = ?").bind(stock, now, id).run();
   await appendOperationsAudit(env, request, user, "distribution_point.stock_updated", "distribution_point", id, { stock });
@@ -796,3 +818,4 @@ function extensionFor(contentType: string): string {
   if (contentType === "image/webp") return "webp";
   return "jpg";
 }
+

@@ -71,6 +71,21 @@ export function canWriteDelivery(user, delivery) {
   return canReadDelivery(user, delivery);
 }
 
+export function canEditDeliveryDetails(user) {
+  return user.role === "super_admin" || user.role === "admin" || user.role === "sales_manager";
+}
+
+export function canTransitionDeliveryStatus(user, currentStatus, nextStatus) {
+  if (user.role !== "distributor") return true;
+  const transitions = {
+    assigned: ["assigned", "in_progress", "delivered", "issue"],
+    in_progress: ["in_progress", "delivered", "issue"],
+    issue: ["issue", "in_progress", "delivered"],
+    delivered: ["delivered"],
+  };
+  return (transitions[currentStatus] ?? []).includes(nextStatus);
+}
+
 export function deliveryScope(user) {
   if (user.role === "super_admin" || user.role === "admin") return { sql: "", values: [] };
   if (user.role === "sales_manager") return { sql: " AND d.island = ?", values: [user.island] };
@@ -128,3 +143,4 @@ export function canUpdateUserRole(user, targetRole, nextRole) {
   if (user.role === "super_admin") return true;
   return user.role === "admin" && targetRole !== "admin" && ["sales_manager", "sales", "distributor"].includes(nextRole);
 }
+

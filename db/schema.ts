@@ -380,8 +380,9 @@ export const vipMembers = sqliteTable("vip_members", {
   tier: text("tier", { enum: ["standard", "platinum"] }).notNull().default("standard"),
   streakMonths: integer("streak_months").notNull().default(0),
   consentAt: text("consent_at").notNull(),
+  createdByUserId: text("created_by_user_id").references(() => users.id),
   createdAt: text("created_at").notNull(),
-}, (table) => [uniqueIndex("vip_members_phone_unique").on(table.phone), index("vip_members_island_idx").on(table.island)]);
+}, (table) => [uniqueIndex("vip_members_phone_unique").on(table.phone), index("vip_members_island_idx").on(table.island), index("vip_members_created_by_idx").on(table.createdByUserId)]);
 
 export const coupons = sqliteTable("coupons", {
   id: text("id").primaryKey(),
@@ -603,3 +604,4 @@ export const aiMonthlyUsage = sqliteTable("ai_monthly_usage", {
   budgetMicroUsd: integer("budget_micro_usd").notNull().default(25000000),
   updatedAt: text("updated_at").notNull(),
 });
+

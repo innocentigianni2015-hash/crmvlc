@@ -6,6 +6,7 @@ import {
   canAssignClientOwner,
   canCreateQuote,
   canCreateUserWithRole,
+  canEditDeliveryDetails,
   canManageDeliveries,
   canManageDiscountCampaigns,
   canManagePodcastCalendar,
@@ -16,6 +17,7 @@ import {
   canReadPodcastCalendar,
   canReadPriceList,
   canReadRecord,
+  canTransitionDeliveryStatus,
   canUseDiscountCampaign,
   canUpdateUserRole,
   deliveryScope,
@@ -84,6 +86,15 @@ test("enforces delivery visibility and management", () => {
   assert.equal(canManageDeliveries({ role: "admin" }), true);
   assert.equal(canManageDeliveries({ role: "sales_manager" }), true);
   assert.equal(canManageDeliveries({ role: "sales" }), false);
+  assert.equal(canEditDeliveryDetails({ role: "super_admin" }), true);
+  assert.equal(canEditDeliveryDetails({ role: "admin" }), true);
+  assert.equal(canEditDeliveryDetails({ role: "sales_manager" }), true);
+  assert.equal(canEditDeliveryDetails({ role: "sales" }), false);
+  assert.equal(canEditDeliveryDetails({ role: "distributor" }), false);
+  assert.equal(canTransitionDeliveryStatus({ role: "distributor" }, "assigned", "delivered"), true);
+  assert.equal(canTransitionDeliveryStatus({ role: "distributor" }, "in_progress", "assigned"), false);
+  assert.equal(canTransitionDeliveryStatus({ role: "distributor" }, "delivered", "issue"), false);
+  assert.equal(canTransitionDeliveryStatus({ role: "sales_manager" }, "delivered", "assigned"), true);
   assert.equal(canReadDelivery({ role: "sales_manager", island: "Tenerife" }, delivery), true);
   assert.equal(canReadDelivery({ role: "admin", island: null }, delivery), true);
   assert.equal(canReadDelivery({ role: "sales_manager", island: "Lanzarote" }, delivery), false);
@@ -182,3 +193,4 @@ test("signs, validates and expires administrative impersonation tokens", async (
   assert.equal(await verifyImpersonationToken("a-long-production-secret", `${token.slice(0, -1)}x`, 2_100), null);
   assert.equal(await verifyImpersonationToken("a-long-production-secret", token, 5_600), null);
 });
+

@@ -378,9 +378,9 @@ export function usePlatformLanguage(): LanguageContextValue {
 }
 
 export function platformOwnership(locale: UiLocale): string {
-  if (locale === "it") return "La piattaforma CRMVLC.com è stata creata e sviluppata ed è di proprietà di Great Consulting LLC — 8 The Green, Suite R, Dover, Delaware 19901, USA.";
-  if (locale === "en") return "The CRMVLC.com platform was created and developed by, and is owned by, Great Consulting LLC — 8 The Green, Suite R, Dover, Delaware 19901, USA.";
-  return "La plataforma CRMVLC.com ha sido creada y desarrollada y es propiedad de Great Consulting LLC — 8 The Green, Suite R, Dover, Delaware 19901, USA.";
+  if (locale === "it") return "Editore - Direttore: Canary 360. Canary 360 & Comunication SL — Avenida Las Americas 8, Local 396E (Arona), Santa Cruz de Tenerife — NIF B56378318. N° Depósito Legal TF 146-2024 · ISSN 3015-1554. Testata attiva dal 2010.";
+  if (locale === "en") return "Publisher - Director: Canary 360. Canary 360 & Comunication SL — Avenida Las Americas 8, Local 396E (Arona), Santa Cruz de Tenerife — NIF B56378318. Legal Deposit No. TF 146-2024 · ISSN 3015-1554. Active publication since 2010.";
+  return "Editor - Director: Canary 360. Canary 360 & Comunication SL — Avenida Las Américas 8, Local 396E (Arona), Santa Cruz de Tenerife — NIF B56378318. N° Depósito Legal TF 146-2024 · ISSN 3015-1554. Publicación activa desde 2010.";
 }
 
 export function PlatformI18n({ children }: { children: ReactNode }) {

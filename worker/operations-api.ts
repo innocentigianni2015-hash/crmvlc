@@ -95,11 +95,17 @@ export async function handleOperationsApi(
     if (url.pathname === "/api/operations/distribution-points" && request.method === "POST") {
       return createDistributionPoint(request, env, user);
     }
+    if (url.pathname === "/api/operations/distribution-points/self-register" && request.method === "POST") {
+      return selfRegisterDistributionPoint(request, env, user);
+    }
     if (url.pathname === "/api/operations/distribution-points/stock" && request.method === "POST") {
       return updateDistributionStock(request, env, user);
     }
     if (url.pathname === "/api/operations/photo-audits" && request.method === "POST") {
       return uploadPhotoAudit(request, env, user);
+    }
+    if (url.pathname === "/api/operations/delivery-checks" && request.method === "POST") {
+      return createDeliveryCheck(request, env, user);
     }
     if (url.pathname === "/api/operations/photo-audits/review" && request.method === "POST") {
       return reviewPhotoAudit(request, env, user);
@@ -169,13 +175,21 @@ async function operationsSnapshot(env: RuntimeEnv, user: OperationsUser): Promis
     `SELECT x.id, x.issue_label, x.island, x.slot_code, x.slot_name, x.width_mm, x.height_mm, x.status, x.client_id, c.company_name AS client_company, x.contract_id, x.updated_at FROM ad_inventory x LEFT JOIN clients c ON c.id = x.client_id WHERE 1 = 1${inventoryScope.sql} ORDER BY x.issue_label DESC, x.island, x.slot_code LIMIT 250`,
   ).bind(...inventoryScope.values).all()).results;
 
+  const nowIsoForDue = new Date().toISOString();
   const distributionPoints = user.role === "distributor"
     ? (await env.DB.prepare(
-      "SELECT x.id, x.client_id, c.company_name AS client_company, x.name, x.island, x.address, x.latitude_e6, x.longitude_e6, x.capacity, x.stock, x.public_visible, x.updated_at FROM distribution_points x LEFT JOIN clients c ON c.id = x.client_id WHERE x.island = ? AND x.public_visible = 1 ORDER BY x.stock, x.name LIMIT 300",
-    ).bind(String(user.island ?? "")).all()).results
+      "SELECT x.id, x.client_id, c.company_name AS client_company, x.name, x.island, x.address, x.latitude_e6, x.longitude_e6, x.capacity, x.stock, x.public_visible, x.self_registered, x.created_by, x.next_check_due_at, x.updated_at FROM distribution_points x LEFT JOIN clients c ON c.id = x.client_id WHERE x.island = ? AND x.public_visible = 1 ORDER BY (x.next_check_due_at IS NOT NULL AND x.next_check_due_at <= ?) DESC, x.next_check_due_at IS NULL, x.next_check_due_at, x.name LIMIT 300",
+    ).bind(String(user.island ?? ""), nowIsoForDue).all()).results
     : (await env.DB.prepare(
-      `SELECT x.id, x.client_id, c.company_name AS client_company, x.name, x.island, x.address, x.latitude_e6, x.longitude_e6, x.capacity, x.stock, x.public_visible, x.updated_at FROM distribution_points x LEFT JOIN clients c ON c.id = x.client_id WHERE 1 = 1${islandScope.sql} ORDER BY x.island, x.stock, x.name LIMIT 300`,
+      `SELECT x.id, x.client_id, c.company_name AS client_company, x.name, x.island, x.address, x.latitude_e6, x.longitude_e6, x.capacity, x.stock, x.public_visible, x.self_registered, x.created_by, x.next_check_due_at, x.updated_at FROM distribution_points x LEFT JOIN clients c ON c.id = x.client_id WHERE 1 = 1${islandScope.sql} ORDER BY x.island, x.stock, x.name LIMIT 300`,
     ).bind(...islandScope.values).all()).results;
+
+  const checkScope = isGlobalOperator(user) ? { sql: "", values: [] as string[] }
+    : user.role === "sales_manager" ? { sql: " AND dc.island = ?", values: [String(user.island)] }
+      : { sql: " AND dc.distributor_user_id = ?", values: [user.id] };
+  const deliveryChecks = user.role === "sales" ? [] : (await env.DB.prepare(
+    `SELECT dc.id, dc.distribution_point_id, p.name AS point_name, dc.distributor_user_id, u.name AS distributor_name, dc.delivery_id, dc.island, dc.quantity_left, dc.quantity_found, dc.quantity_taken, dc.geofence_distance_m, dc.notes, dc.created_at FROM delivery_checks dc JOIN distribution_points p ON p.id = dc.distribution_point_id JOIN users u ON u.id = dc.distributor_user_id WHERE 1 = 1${checkScope.sql} ORDER BY dc.created_at DESC LIMIT 150`,
+  ).bind(...checkScope.values).all()).results;
 
   const auditScope = isGlobalOperator(user) ? { sql: "", values: [] as string[] }
     : user.role === "sales_manager" ? { sql: " AND p.island = ?", values: [String(user.island)] }
@@ -224,6 +238,7 @@ async function operationsSnapshot(env: RuntimeEnv, user: OperationsUser): Promis
     inventory,
     distributionPoints,
     photoAudits,
+    deliveryChecks,
     salesCheckins,
     salesTasks,
     leaderboard,
@@ -464,6 +479,135 @@ async function updateDistributionStock(request: Request, env: RuntimeEnv, user: 
   return json({ ok: true });
 }
 
+async function geocodeAddress(env: RuntimeEnv, address: string, island: string): Promise<{ latitude: number; longitude: number; formattedAddress: string; locationType: string } | null> {
+  if (!env.MAPS_TOKEN) return null;
+  try {
+    const query = `${address}, ${island}, Islas Canarias, España`;
+    const endpoint = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&key=${env.MAPS_TOKEN}`;
+    const response = await fetch(endpoint);
+    if (!response.ok) return null;
+    const payload = await response.json<{ status: string; results: Array<{ formatted_address: string; geometry: { location: { lat: number; lng: number }; location_type: string } }> }>();
+    if (payload.status !== "OK" || !payload.results.length) return null;
+    const best = payload.results[0];
+    return { latitude: best.geometry.location.lat, longitude: best.geometry.location.lng, formattedAddress: best.formatted_address, locationType: best.geometry.location_type };
+  } catch (error) {
+    console.error(JSON.stringify({ level: "error", event: "geocode_failed", error: error instanceof Error ? error.message : "unknown" }));
+    return null;
+  }
+}
+
+async function selfRegisterDistributionPoint(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  if (!env.BUCKET) throw new OperationsError(503, "storage_missing", "Archivio fotografico non configurato.");
+  if (user.role !== "distributor" || !user.island) throw new OperationsError(403, "not_allowed", "La registrazione di un nuovo punto è riservata ai Distributori.");
+  const length = Number(request.headers.get("content-length") ?? 0);
+  if (length > MAX_PHOTO_BYTES + 256_000) throw new OperationsError(413, "photo_too_large", "La foto supera 8 MB.");
+  if (!(request.headers.get("content-type") ?? "").includes("multipart/form-data")) throw new OperationsError(415, "form_required", "Invia nome, foto e coordinate del punto.");
+  const form = await request.formData();
+  const photo = form.get("photo");
+  if (!(photo instanceof File) || photo.size === 0 || photo.size > MAX_PHOTO_BYTES || !["image/jpeg", "image/png", "image/webp"].includes(photo.type)) {
+    throw new OperationsError(400, "invalid_photo", "Carica una foto JPG, PNG o WebP fino a 8 MB.");
+  }
+  const name = clean(form.get("name"), 120);
+  const address = clean(form.get("address"), 260);
+  const latitude = requiredCoordinate(form.get("latitude"), -90, 90);
+  const longitude = requiredCoordinate(form.get("longitude"), -180, 180);
+  const quantity = positiveInt(form.get("quantity"), 1_000_000);
+  const unit = clean(form.get("unit"), 30) || "copie";
+  const reminderDays = Math.min(60, Math.max(1, nonNegativeInt(form.get("reminderDays"), 60) || 7));
+  if (!name || !address) throw new OperationsError(400, "invalid_point", "Nome e indirizzo del punto sono obbligatori.");
+
+  const geocode = await geocodeAddress(env, address, user.island);
+  const addressVerified = geocode !== null;
+  const addressDistanceM = geocode ? Math.round(haversineMeters(latitude, longitude, geocode.latitude, geocode.longitude)) : null;
+  const addressMismatch = addressDistanceM !== null && addressDistanceM > 600;
+
+  const bytes = await photo.arrayBuffer();
+  const digest = await sha256(bytes);
+  const duplicate = await env.DB.prepare("SELECT id, delivery_id FROM photo_audits WHERE sha256 = ? ORDER BY created_at DESC LIMIT 1").bind(digest).first<{ id: string; delivery_id: string }>();
+  const pointId = crypto.randomUUID();
+  const deliveryId = crypto.randomUUID();
+  const auditId = crypto.randomUUID();
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const key = `distribution-points/${user.island}/${nowIso.slice(0, 10)}/${pointId}.${extensionFor(photo.type)}`;
+  const watermarkText = `CRMVLC | NUOVO PUNTO | ${user.island} | ${nowIso} | ${latitude.toFixed(6)},${longitude.toFixed(6)} | ${digest.slice(0, 12)}`;
+  const aiAnalysis = await analyzeDeliveryPhoto(env, bytes, photo.type, {
+    quantity,
+    unit,
+    pointName: name,
+    pointAddress: address,
+    geofenceDistanceM: 0,
+    exactDuplicate: Boolean(duplicate),
+  }, null);
+  if (addressMismatch || !addressVerified) aiAnalysis.verdict = "review_required";
+  if (addressMismatch) aiAnalysis.reasons = [`Indirizzo digitato a ${addressDistanceM} m dalla posizione GPS rilevata da Google Maps.`, ...aiAnalysis.reasons].slice(0, 4);
+  else if (!addressVerified) aiAnalysis.reasons = ["Indirizzo non verificabile su Google Maps: revisione manuale consigliata.", ...aiAnalysis.reasons].slice(0, 4);
+  await env.BUCKET.put(key, bytes, { httpMetadata: { contentType: photo.type, cacheControl: "private, no-store" }, customMetadata: { sha256: digest, watermark: watermarkText, pointId, deliveryId } });
+  const nextCheckDueAt = new Date(now.getTime() + reminderDays * 86_400_000).toISOString();
+
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO distribution_points (id, client_id, name, island, address, latitude_e6, longitude_e6, capacity, stock, public_visible, created_at, updated_at, created_by, self_registered, point_photo_r2_key, next_check_due_at) VALUES (?, NULL, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?, ?, 1, ?, ?)",
+    ).bind(pointId, name, user.island, address, toE6(latitude), toE6(longitude), quantity, nowIso, nowIso, user.id, key, nextCheckDueAt),
+    env.DB.prepare(
+      "INSERT INTO deliveries (id, client_id, distributor_user_id, distribution_point_id, island, status, quantity, unit, scheduled_for, delivery_contact_name, delivery_contact_email, delivery_contact_phone, delivery_address, notes, version, created_by, completed_at, created_at, updated_at) VALUES (?, NULL, ?, ?, ?, 'delivered', ?, ?, ?, NULL, NULL, NULL, ?, ?, 1, ?, ?, ?, ?)",
+    ).bind(deliveryId, user.id, pointId, user.island, quantity, unit, canaryDateKey(now), address, "Punto registrato e prima consegna dal Distributore.", user.id, nowIso, nowIso, nowIso),
+    env.DB.prepare(
+      "INSERT INTO photo_audits (id, delivery_id, distributor_user_id, island, r2_key, sha256, latitude_e6, longitude_e6, geofence_distance_m, status, quality_score, duplicate_of_audit_id, ai_model, ai_verdict, ai_result_json, watermark_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(auditId, deliveryId, user.id, user.island, key, digest, toE6(latitude), toE6(longitude), aiAnalysis.qualityScore, duplicate?.id ?? null, aiAnalysis.model, aiAnalysis.verdict, JSON.stringify(aiAnalysis), watermarkText, nowIso),
+  ]);
+
+  await appendOperationsAudit(env, request, user, "distribution_point.self_registered", "distribution_point", pointId, { name, address, quantity, unit, reminderDays, deliveryId, duplicateOfAuditId: duplicate?.id ?? null, addressVerified, addressDistanceM, geocodedAddress: geocode?.formattedAddress ?? null });
+  return json({ id: pointId, deliveryId, auditId, nextCheckDueAt, addressVerified, addressDistanceM, geocodedAddress: geocode?.formattedAddress ?? null, addressMismatch }, 201);
+}
+
+async function createDeliveryCheck(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  if (!env.BUCKET) throw new OperationsError(503, "storage_missing", "Archivio fotografico non configurato.");
+  if (user.role !== "distributor" || !user.island) throw new OperationsError(403, "not_allowed", "Il controllo di un punto è riservato ai Distributori.");
+  const length = Number(request.headers.get("content-length") ?? 0);
+  if (length > MAX_PHOTO_BYTES + 256_000) throw new OperationsError(413, "photo_too_large", "La foto supera 8 MB.");
+  if (!(request.headers.get("content-type") ?? "").includes("multipart/form-data")) throw new OperationsError(415, "form_required", "Invia foto e coordinate del controllo.");
+  const form = await request.formData();
+  const photo = form.get("photo");
+  if (!(photo instanceof File) || photo.size === 0 || photo.size > MAX_PHOTO_BYTES || !["image/jpeg", "image/png", "image/webp"].includes(photo.type)) {
+    throw new OperationsError(400, "invalid_photo", "Carica una foto JPG, PNG o WebP fino a 8 MB.");
+  }
+  const pointId = clean(form.get("distributionPointId"), 80);
+  const quantityFound = nonNegativeInt(form.get("quantityFound"), 1_000_000);
+  const latitude = requiredCoordinate(form.get("latitude"), -90, 90);
+  const longitude = requiredCoordinate(form.get("longitude"), -180, 180);
+  const notes = cleanOptional(form.get("notes"), 500);
+
+  const point = await env.DB.prepare("SELECT id, island, latitude_e6, longitude_e6 FROM distribution_points WHERE id = ? LIMIT 1").bind(pointId).first<{ id: string; island: string; latitude_e6: number; longitude_e6: number }>();
+  if (!point || !canAccessIsland(user, point.island)) throw new OperationsError(404, "point_not_found", "Punto di distribuzione non trovato.");
+
+  const lastDelivery = await env.DB.prepare(
+    "SELECT id, quantity FROM deliveries WHERE distribution_point_id = ? ORDER BY created_at DESC LIMIT 1",
+  ).bind(pointId).first<{ id: string; quantity: number }>();
+  const quantityLeft = lastDelivery?.quantity ?? 0;
+  const quantityTaken = Math.max(0, quantityLeft - quantityFound);
+
+  const bytes = await photo.arrayBuffer();
+  const digest = await sha256(bytes);
+  const distanceM = Math.round(haversineMeters(latitude, longitude, point.latitude_e6 / 1_000_000, point.longitude_e6 / 1_000_000));
+  const id = crypto.randomUUID();
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const key = `distribution-checks/${point.island}/${nowIso.slice(0, 10)}/${id}.${extensionFor(photo.type)}`;
+  const watermarkText = `CRMVLC | CONTROLLO | ${point.island} | ${nowIso} | ${latitude.toFixed(6)},${longitude.toFixed(6)} | ${digest.slice(0, 12)}`;
+  await env.BUCKET.put(key, bytes, { httpMetadata: { contentType: photo.type, cacheControl: "private, no-store" }, customMetadata: { sha256: digest, watermark: watermarkText, pointId } });
+
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO delivery_checks (id, distribution_point_id, delivery_id, distributor_user_id, island, quantity_left, quantity_found, quantity_taken, r2_key, latitude_e6, longitude_e6, geofence_distance_m, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(id, pointId, lastDelivery?.id ?? null, user.id, point.island, quantityLeft, quantityFound, quantityTaken, key, toE6(latitude), toE6(longitude), distanceM, notes, nowIso),
+    env.DB.prepare("UPDATE distribution_points SET next_check_due_at = NULL, updated_at = ? WHERE id = ?").bind(nowIso, pointId),
+  ]);
+
+  await appendOperationsAudit(env, request, user, "delivery_check.created", "delivery_check", id, { pointId, deliveryId: lastDelivery?.id ?? null, quantityLeft, quantityFound, quantityTaken, distanceM });
+  return json({ id, quantityLeft, quantityFound, quantityTaken, geofenceDistanceM: distanceM }, 201);
+}
+
 async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
   if (!env.BUCKET) throw new OperationsError(503, "storage_missing", "Archivio fotografico non configurato.");
   if (!["super_admin", "admin", "sales_manager", "distributor"].includes(user.role)) throw new OperationsError(403, "not_allowed", "Non puoi caricare verifiche fotografiche.");
@@ -484,15 +628,20 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
     const distributionPointId = clean(form.get("distributionPointId"), 80);
     const quantity = positiveInt(form.get("quantity"), 1_000_000);
     const unit = clean(form.get("unit"), 30);
+    const reminderDays = Math.min(60, Math.max(1, nonNegativeInt(form.get("reminderDays"), 60) || 7));
     const point = await env.DB.prepare(
-      "SELECT p.id, p.client_id, p.island, p.address, c.contact_name, c.email, c.phone FROM distribution_points p JOIN clients c ON c.id = p.client_id WHERE p.id = ? AND p.island = ? AND p.public_visible = 1 LIMIT 1",
-    ).bind(distributionPointId, user.island).first<{ id: string; client_id: string; island: string; address: string; contact_name: string; email: string; phone: string | null }>();
+      "SELECT p.id, p.client_id, p.island, p.address, c.contact_name, c.email, c.phone FROM distribution_points p LEFT JOIN clients c ON c.id = p.client_id WHERE p.id = ? AND p.island = ? AND p.public_visible = 1 LIMIT 1",
+    ).bind(distributionPointId, user.island).first<{ id: string; client_id: string | null; island: string; address: string; contact_name: string | null; email: string | null; phone: string | null }>();
     if (!point || !unit) throw new OperationsError(404, "point_not_found", "Scegli un punto di distribuzione valido per la tua isola.");
     deliveryId = crypto.randomUUID();
     const createdAt = new Date().toISOString();
-    await env.DB.prepare(
-      "INSERT INTO deliveries (id, client_id, distributor_user_id, distribution_point_id, island, status, quantity, unit, scheduled_for, delivery_contact_name, delivery_contact_email, delivery_contact_phone, delivery_address, notes, version, created_by, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'delivered', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
-    ).bind(deliveryId, point.client_id, user.id, point.id, point.island, quantity, unit, canaryDateKey(new Date()), point.contact_name, point.email, point.phone, point.address, "Conferma libera registrata dal Distributore.", user.id, createdAt, createdAt, createdAt).run();
+    const nextCheckDueAt = new Date(Date.now() + reminderDays * 86_400_000).toISOString();
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO deliveries (id, client_id, distributor_user_id, distribution_point_id, island, status, quantity, unit, scheduled_for, delivery_contact_name, delivery_contact_email, delivery_contact_phone, delivery_address, notes, version, created_by, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'delivered', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
+      ).bind(deliveryId, point.client_id, user.id, point.id, point.island, quantity, unit, canaryDateKey(new Date()), point.contact_name, point.email, point.phone, point.address, "Conferma libera registrata dal Distributore.", user.id, createdAt, createdAt, createdAt),
+      env.DB.prepare("UPDATE distribution_points SET next_check_due_at = ?, updated_at = ? WHERE id = ?").bind(nextCheckDueAt, createdAt, point.id),
+    ]);
     selfReported = true;
   }
   const delivery = await env.DB.prepare("SELECT d.id, d.distributor_user_id, d.island, d.quantity, d.unit, d.distribution_point_id, p.name AS point_name, p.address AS point_address, p.latitude_e6 AS point_latitude_e6, p.longitude_e6 AS point_longitude_e6 FROM deliveries d LEFT JOIN distribution_points p ON p.id = d.distribution_point_id WHERE d.id = ? LIMIT 1").bind(deliveryId).first<{ id: string; distributor_user_id: string; island: string; quantity: number; unit: string; distribution_point_id: string | null; point_name: string | null; point_address: string | null; point_latitude_e6: number | null; point_longitude_e6: number | null }>();
@@ -845,4 +994,3 @@ function extensionFor(contentType: string): string {
   if (contentType === "image/webp") return "webp";
   return "jpg";
 }
-

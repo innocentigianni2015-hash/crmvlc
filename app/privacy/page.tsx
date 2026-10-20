@@ -25,7 +25,7 @@ export default function PrivacyPage() {
         <h2>Derechos</h2>
         <p>Puede solicitar el acceso, la rectificación o la supresión de sus datos escribiendo a <a href="mailto:info@vivilecanarie.com">info@vivilecanarie.com</a>.</p>
         <h2>Propiedad de la plataforma</h2>
-        <p>La plataforma CRMVLC.com ha sido creada y desarrollada y es propiedad de Great Consulting LLC — 8 The Green, Suite R, Dover, Delaware 19901, USA.</p>
+        <p>La plataforma CRMVLC.com ha sido creada y desarrollada y es propiedad de Canary 360 &amp; Comunication SL.</p>
       </main>
     </div>
   );

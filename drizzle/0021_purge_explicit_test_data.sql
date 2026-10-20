@@ -34,25 +34,39 @@ WHERE lower(`email`) NOT IN ('innocentigianni@proton.me', 'marcolifestyle.offici
     OR lower(`email`) GLOB '*@test.local'
     OR lower(`id`) GLOB 'test-*'
     OR lower(`id`) GLOB 'demo-*'
+  )
+  -- Users referenced by immutable legal/audit records must remain so their
+  -- historical foreign keys continue to identify the original actor.
+  AND NOT EXISTS (
+    SELECT 1 FROM `quotes` q
+    WHERE q.`owner_user_id` = `users`.`id` OR q.`created_by` = `users`.`id`
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM `audit_events` a WHERE a.`actor_user_id` = `users`.`id`
   );
 --> statement-breakpoint
 CREATE TABLE `_purge_test_clients` (`id` text PRIMARY KEY NOT NULL);
 --> statement-breakpoint
 INSERT INTO `_purge_test_clients` (`id`)
 SELECT `id` FROM `clients`
-WHERE (' ' || replace(replace(lower(`company_name`), '-', ' '), '_', ' ') || ' ') LIKE '% test %'
-   OR (' ' || replace(replace(lower(`company_name`), '-', ' '), '_', ' ') || ' ') LIKE '% demo %'
-   OR (' ' || replace(replace(lower(`contact_name`), '-', ' '), '_', ' ') || ' ') LIKE '% test %'
-   OR (' ' || replace(replace(lower(`contact_name`), '-', ' '), '_', ' ') || ' ') LIKE '% demo %'
-   OR lower(`email`) GLOB 'test@*'
-   OR lower(`email`) GLOB 'test+*@*'
-   OR lower(`email`) GLOB 'demo@*'
-   OR lower(`email`) GLOB 'demo+*@*'
-   OR lower(`email`) GLOB '*@example.com'
-   OR lower(`email`) GLOB '*@example.org'
-   OR lower(`email`) GLOB '*@example.net'
-   OR lower(`id`) GLOB 'test-*'
-   OR lower(`id`) GLOB 'demo-*';
+WHERE (
+     (' ' || replace(replace(lower(`company_name`), '-', ' '), '_', ' ') || ' ') LIKE '% test %'
+  OR (' ' || replace(replace(lower(`company_name`), '-', ' '), '_', ' ') || ' ') LIKE '% demo %'
+  OR (' ' || replace(replace(lower(`contact_name`), '-', ' '), '_', ' ') || ' ') LIKE '% test %'
+  OR (' ' || replace(replace(lower(`contact_name`), '-', ' '), '_', ' ') || ' ') LIKE '% demo %'
+  OR lower(`email`) GLOB 'test@*'
+  OR lower(`email`) GLOB 'test+*@*'
+  OR lower(`email`) GLOB 'demo@*'
+  OR lower(`email`) GLOB 'demo+*@*'
+  OR lower(`email`) GLOB '*@example.com'
+  OR lower(`email`) GLOB '*@example.org'
+  OR lower(`email`) GLOB '*@example.net'
+  OR lower(`id`) GLOB 'test-*'
+  OR lower(`id`) GLOB 'demo-*'
+)
+AND NOT EXISTS (
+  SELECT 1 FROM `quotes` q WHERE q.`client_id` = `clients`.`id`
+);
 --> statement-breakpoint
 CREATE TABLE `_purge_test_quotes` (`id` text PRIMARY KEY NOT NULL);
 --> statement-breakpoint
@@ -73,17 +87,21 @@ CREATE TABLE `_purge_test_contracts` (`id` text PRIMARY KEY NOT NULL);
 --> statement-breakpoint
 INSERT INTO `_purge_test_contracts` (`id`)
 SELECT `id` FROM `contracts`
-WHERE `client_id` IN (SELECT `id` FROM `_purge_test_clients`)
-   OR `quote_id` IN (SELECT `id` FROM `_purge_test_quotes`)
-   OR (' ' || replace(replace(lower(`title`), '-', ' '), '_', ' ') || ' ') LIKE '% test %'
-   OR (' ' || replace(replace(lower(`title`), '-', ' '), '_', ' ') || ' ') LIKE '% demo %'
-   OR lower(coalesce(`signer_email`, '')) GLOB 'test@*'
-   OR lower(coalesce(`signer_email`, '')) GLOB 'test+*@*'
-   OR lower(coalesce(`signer_email`, '')) GLOB 'demo@*'
-   OR lower(coalesce(`signer_email`, '')) GLOB 'demo+*@*'
-   OR lower(coalesce(`signer_email`, '')) GLOB '*@example.com'
-   OR lower(coalesce(`signer_email`, '')) GLOB '*@example.org'
-   OR lower(coalesce(`signer_email`, '')) GLOB '*@example.net';
+WHERE (
+     `client_id` IN (SELECT `id` FROM `_purge_test_clients`)
+  OR (' ' || replace(replace(lower(`title`), '-', ' '), '_', ' ') || ' ') LIKE '% test %'
+  OR (' ' || replace(replace(lower(`title`), '-', ' '), '_', ' ') || ' ') LIKE '% demo %'
+  OR lower(coalesce(`signer_email`, '')) GLOB 'test@*'
+  OR lower(coalesce(`signer_email`, '')) GLOB 'test+*@*'
+  OR lower(coalesce(`signer_email`, '')) GLOB 'demo@*'
+  OR lower(coalesce(`signer_email`, '')) GLOB 'demo+*@*'
+  OR lower(coalesce(`signer_email`, '')) GLOB '*@example.com'
+  OR lower(coalesce(`signer_email`, '')) GLOB '*@example.org'
+  OR lower(coalesce(`signer_email`, '')) GLOB '*@example.net'
+)
+-- Signed contracts and contracts linked to immutable quotes are legal records.
+AND `status` <> 'signed'
+AND `quote_id` IS NULL;
 --> statement-breakpoint
 CREATE TABLE `_purge_test_deliveries` (`id` text PRIMARY KEY NOT NULL);
 --> statement-breakpoint
@@ -149,10 +167,6 @@ CREATE TABLE IF NOT EXISTS `r2_deletion_queue` (
   `attempts` integer DEFAULT 0 NOT NULL,
   `last_error` text
 );
---> statement-breakpoint
-INSERT OR IGNORE INTO `r2_deletion_queue` (`r2_key`,`source`,`created_at`)
-SELECT `pdf_r2_key`, 'test_quote', CURRENT_TIMESTAMP FROM `quotes`
-WHERE `id` IN (SELECT `id` FROM `_purge_test_quotes`) AND `pdf_r2_key` <> '';
 --> statement-breakpoint
 INSERT OR IGNORE INTO `r2_deletion_queue` (`r2_key`,`source`,`created_at`)
 SELECT `draft_r2_key`, 'test_contract', CURRENT_TIMESTAMP FROM `contracts`
@@ -247,11 +261,7 @@ WHERE `interviewer_user_id` IN (SELECT `id` FROM `_purge_test_users`)
    OR (' ' || replace(replace(lower(`topic`), '-', ' '), '_', ' ') || ' ') LIKE '% test %'
    OR (' ' || replace(replace(lower(`topic`), '-', ' '), '_', ' ') || ' ') LIKE '% demo %';
 --> statement-breakpoint
-DELETE FROM `quote_items` WHERE `quote_id` IN (SELECT `id` FROM `_purge_test_quotes`);
---> statement-breakpoint
 DELETE FROM `contracts` WHERE `id` IN (SELECT `id` FROM `_purge_test_contracts`);
---> statement-breakpoint
-DELETE FROM `quotes` WHERE `id` IN (SELECT `id` FROM `_purge_test_quotes`);
 --> statement-breakpoint
 DELETE FROM `deliveries` WHERE `id` IN (SELECT `id` FROM `_purge_test_deliveries`);
 --> statement-breakpoint
@@ -264,7 +274,11 @@ DELETE FROM `sponsors` WHERE `id` IN (SELECT `id` FROM `_purge_test_sponsors`);
 --> statement-breakpoint
 DELETE FROM `vip_members` WHERE `id` IN (SELECT `id` FROM `_purge_test_members`);
 --> statement-breakpoint
-DELETE FROM `clients` WHERE `id` IN (SELECT `id` FROM `_purge_test_clients`);
+DELETE FROM `clients`
+WHERE `id` IN (SELECT `id` FROM `_purge_test_clients`)
+  AND NOT EXISTS (SELECT 1 FROM `quotes` q WHERE q.`client_id` = `clients`.`id`)
+  AND NOT EXISTS (SELECT 1 FROM `contracts` c WHERE c.`client_id` = `clients`.`id`)
+  AND NOT EXISTS (SELECT 1 FROM `deliveries` d WHERE d.`client_id` = `clients`.`id`);
 --> statement-breakpoint
 -- An issued quote is legally/audit immutable. Never remove its promotion link;
 -- retain any campaign that is still referenced by a quote and delete only
@@ -302,10 +316,6 @@ UPDATE `deliveries` SET
   `distributor_user_id` = CASE WHEN `distributor_user_id` IN (SELECT `id` FROM `_purge_test_users`) THEN (SELECT `id` FROM `users` WHERE lower(`email`) = 'innocentigianni@proton.me' LIMIT 1) ELSE `distributor_user_id` END,
   `created_by` = CASE WHEN `created_by` IN (SELECT `id` FROM `_purge_test_users`) THEN (SELECT `id` FROM `users` WHERE lower(`email`) = 'innocentigianni@proton.me' LIMIT 1) ELSE `created_by` END;
 --> statement-breakpoint
-UPDATE `quotes` SET
-  `owner_user_id` = CASE WHEN `owner_user_id` IN (SELECT `id` FROM `_purge_test_users`) THEN (SELECT `id` FROM `users` WHERE lower(`email`) = 'innocentigianni@proton.me' LIMIT 1) ELSE `owner_user_id` END,
-  `created_by` = CASE WHEN `created_by` IN (SELECT `id` FROM `_purge_test_users`) THEN (SELECT `id` FROM `users` WHERE lower(`email`) = 'innocentigianni@proton.me' LIMIT 1) ELSE `created_by` END;
---> statement-breakpoint
 UPDATE `contracts` SET
   `owner_user_id` = CASE WHEN `owner_user_id` IN (SELECT `id` FROM `_purge_test_users`) THEN (SELECT `id` FROM `users` WHERE lower(`email`) = 'innocentigianni@proton.me' LIMIT 1) ELSE `owner_user_id` END,
   `created_by` = CASE WHEN `created_by` IN (SELECT `id` FROM `_purge_test_users`) THEN (SELECT `id` FROM `users` WHERE lower(`email`) = 'innocentigianni@proton.me' LIMIT 1) ELSE `created_by` END,
@@ -324,8 +334,6 @@ WHERE `owner_user_id` IN (SELECT `id` FROM `_purge_test_users`);
 UPDATE `coupons` SET `redeemed_by_user_id` = NULL WHERE `redeemed_by_user_id` IN (SELECT `id` FROM `_purge_test_users`);
 --> statement-breakpoint
 UPDATE `payout_requests` SET `reviewed_by` = NULL WHERE `reviewed_by` IN (SELECT `id` FROM `_purge_test_users`);
---> statement-breakpoint
-UPDATE `audit_events` SET `actor_user_id` = NULL WHERE `actor_user_id` IN (SELECT `id` FROM `_purge_test_users`);
 --> statement-breakpoint
 UPDATE `faq_entries` SET
   `created_by` = CASE WHEN `created_by` IN (SELECT `id` FROM `_purge_test_users`) THEN NULL ELSE `created_by` END,

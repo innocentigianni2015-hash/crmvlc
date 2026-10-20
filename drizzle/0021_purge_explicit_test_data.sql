@@ -266,10 +266,14 @@ DELETE FROM `vip_members` WHERE `id` IN (SELECT `id` FROM `_purge_test_members`)
 --> statement-breakpoint
 DELETE FROM `clients` WHERE `id` IN (SELECT `id` FROM `_purge_test_clients`);
 --> statement-breakpoint
-UPDATE `quotes` SET `discount_campaign_id` = NULL
-WHERE `discount_campaign_id` IN (SELECT `id` FROM `_purge_test_campaigns`);
---> statement-breakpoint
-DELETE FROM `discount_campaigns` WHERE `id` IN (SELECT `id` FROM `_purge_test_campaigns`);
+-- An issued quote is legally/audit immutable. Never remove its promotion link;
+-- retain any campaign that is still referenced by a quote and delete only
+-- orphaned test campaigns.
+DELETE FROM `discount_campaigns`
+WHERE `id` IN (SELECT `id` FROM `_purge_test_campaigns`)
+  AND NOT EXISTS (
+    SELECT 1 FROM `quotes` q WHERE q.`discount_campaign_id` = `discount_campaigns`.`id`
+  );
 --> statement-breakpoint
 UPDATE `contracts` SET `template_id` = NULL
 WHERE `template_id` IN (SELECT `id` FROM `_purge_test_templates`);

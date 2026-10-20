@@ -6,6 +6,8 @@ type RuntimeEnv = Env & {
   WHATSAPP_PHONE_NUMBER_ID?: string;
   STRIPE_SECRET_KEY?: string;
   MAPS_TOKEN?: string;
+  NEUTRINO_USER_ID?: string;
+  NEUTRINO_API_KEY?: string;
 };
 
 export type OperationsUser = {
@@ -480,16 +482,23 @@ async function updateDistributionStock(request: Request, env: RuntimeEnv, user: 
 }
 
 async function geocodeAddress(env: RuntimeEnv, address: string, island: string): Promise<{ latitude: number; longitude: number; formattedAddress: string; locationType: string } | null> {
-  if (!env.MAPS_TOKEN) return null;
+  if (!env.NEUTRINO_USER_ID || !env.NEUTRINO_API_KEY) return null;
   try {
     const query = `${address}, ${island}, Islas Canarias, España`;
-    const endpoint = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&key=${env.MAPS_TOKEN}`;
-    const response = await fetch(endpoint);
+    const response = await fetch("https://neutrinoapi.net/geocode-address", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-ID": env.NEUTRINO_USER_ID,
+        "API-Key": env.NEUTRINO_API_KEY,
+      },
+      body: new URLSearchParams({ address: query, "country-code": "ES", "fuzzy-search": "true" }).toString(),
+    });
     if (!response.ok) return null;
-    const payload = await response.json<{ status: string; results: Array<{ formatted_address: string; geometry: { location: { lat: number; lng: number }; location_type: string } }> }>();
-    if (payload.status !== "OK" || !payload.results.length) return null;
-    const best = payload.results[0];
-    return { latitude: best.geometry.location.lat, longitude: best.geometry.location.lng, formattedAddress: best.formatted_address, locationType: best.geometry.location_type };
+    const payload = await response.json<{ found: number; locations: Array<{ latitude: number; longitude: number; address: string; "location-type": string }> }>();
+    if (!payload.found || !payload.locations?.length) return null;
+    const best = payload.locations[0];
+    return { latitude: best.latitude, longitude: best.longitude, formattedAddress: best.address, locationType: best["location-type"] };
   } catch (error) {
     console.error(JSON.stringify({ level: "error", event: "geocode_failed", error: error instanceof Error ? error.message : "unknown" }));
     return null;
@@ -540,8 +549,8 @@ async function selfRegisterDistributionPoint(request: Request, env: RuntimeEnv, 
     exactDuplicate: Boolean(duplicate),
   }, null);
   if (addressMismatch || !addressVerified) aiAnalysis.verdict = "review_required";
-  if (addressMismatch) aiAnalysis.reasons = [`Indirizzo digitato a ${addressDistanceM} m dalla posizione GPS rilevata da Google Maps.`, ...aiAnalysis.reasons].slice(0, 4);
-  else if (!addressVerified) aiAnalysis.reasons = ["Indirizzo non verificabile su Google Maps: revisione manuale consigliata.", ...aiAnalysis.reasons].slice(0, 4);
+  if (addressMismatch) aiAnalysis.reasons = [`Indirizzo digitato a ${addressDistanceM} m dalla posizione GPS rilevata dal geocoding.`, ...aiAnalysis.reasons].slice(0, 4);
+  else if (!addressVerified) aiAnalysis.reasons = ["Indirizzo non verificabile tramite geocoding: revisione manuale consigliata.", ...aiAnalysis.reasons].slice(0, 4);
   await env.BUCKET.put(key, bytes, { httpMetadata: { contentType: photo.type, cacheControl: "private, no-store" }, customMetadata: { sha256: digest, watermark: watermarkText, pointId, deliveryId } });
   const nextCheckDueAt = new Date(now.getTime() + reminderDays * 86_400_000).toISOString();
 

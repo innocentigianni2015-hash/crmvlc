@@ -59,17 +59,11 @@ const copy = {
     podcastFormats: [
       "1 minuto · 1 telecamera",
       "3–5 minuti · 3 telecamere e montaggio",
-      "Format speciale con MarcoLifestyle",
     ],
     podcastCta: "Parliamo del podcast",
     aboutLabel: "Direzione e gestione",
     aboutTitle: "Persone, territorio e una visione editoriale concreta.",
     aboutText: "Vivi Le Canarie unisce esperienza gestionale, produzione, comunicazione e sviluppo commerciale per raccontare le imprese e le comunità dell’arcipelago.",
-    gianniRole: "Direzione gestionale e commerciale",
-    gianniBio: "Managing Director e cofondatore di LAVISIONARIA. In Vivi Le Canarie coordina organizzazione, sviluppo, partnership e rete commerciale.",
-    marcoRole: "Direzione editoriale e immagine",
-    marcoBio: "Presidente e cofondatore di LAVISIONARIA, Executive Producer. In Vivi Le Canarie guida identità, contenuti, relazioni e sviluppo dei format.",
-    aboutSource: "Conosci anche il progetto LAVISIONARIA",
     methodLabel: "Il metodo",
     methodTitle: "Una richiesta. Il referente giusto. Nessun giro a vuoto.",
     steps: [
@@ -152,17 +146,11 @@ const copy = {
     podcastFormats: [
       "1 minuto · 1 cámara",
       "3–5 minutos · 3 cámaras y edición",
-      "Formato especial con MarcoLifestyle",
     ],
     podcastCta: "Hablemos del pódcast",
     aboutLabel: "Dirección y gestión",
     aboutTitle: "Equipo, territorio y una visión editorial concreta.",
     aboutText: "Vivi Le Canarie une experiencia de gestión, producción, comunicación y desarrollo comercial para contar las empresas y comunidades del archipiélago.",
-    gianniRole: "Dirección de gestión y comercial",
-    gianniBio: "Managing Director y cofundador de LAVISIONARIA. En Vivi Le Canarie coordina organización, desarrollo, alianzas y red comercial.",
-    marcoRole: "Dirección editorial e imagen",
-    marcoBio: "Presidente y cofundador de LAVISIONARIA, Executive Producer. En Vivi Le Canarie dirige identidad, contenidos, relaciones y desarrollo de formatos.",
-    aboutSource: "Conoce también el proyecto LAVISIONARIA",
     methodLabel: "El método",
     methodTitle: "Una solicitud. La persona adecuada. Sin vueltas.",
     steps: [
@@ -234,16 +222,11 @@ const copy = {
     podcastTag: "02 · Podcast",
     podcastTitle: "Put your story in front of the cameras",
     podcastText: "From quick content to a complete story, we choose the format that turns an interview into a genuine point of contact.",
-    podcastFormats: ["1 minute · 1 camera", "3–5 minutes · 3 cameras and editing", "Special format with MarcoLifestyle"],
+    podcastFormats: ["1 minute · 1 camera", "3–5 minutes · 3 cameras and editing"],
     podcastCta: "Discuss the podcast",
     aboutLabel: "Direction and management",
     aboutTitle: "People, territory and a clear editorial vision.",
     aboutText: "Vivi Le Canarie combines management, production, communication and business development expertise to tell the stories of the archipelago’s companies and communities.",
-    gianniRole: "Management and commercial direction",
-    gianniBio: "Managing Director and co-founder of LAVISIONARIA. At Vivi Le Canarie he coordinates operations, development, partnerships and the sales network.",
-    marcoRole: "Editorial and image direction",
-    marcoBio: "President and co-founder of LAVISIONARIA, Executive Producer. At Vivi Le Canarie he leads identity, content, relationships and format development.",
-    aboutSource: "Discover the LAVISIONARIA project",
     methodLabel: "The method",
     methodTitle: "One request. The right contact. No runaround.",
     steps: [["01", "Choose your goal", "Magazine, podcast or an integrated campaign."], ["02", "Tell us your island", "The request goes to the local sales team."], ["03", "Discuss the project", "An adviser calls you and builds the proposal with you."]],
@@ -427,21 +410,6 @@ export default function PublicLanding() {
           <h2>{t.aboutTitle}</h2>
           <p>{t.aboutText}</p>
         </div>
-        <div className="about-grid">
-          <article className="about-card about-gianni">
-            <span className="profile-number">01</span>
-            <p className="profile-role">{t.gianniRole}</p>
-            <h3>Gianni Innocenti</h3>
-            <p>{t.gianniBio}</p>
-          </article>
-          <article className="about-card about-marco">
-            <span className="profile-number">02</span>
-            <p className="profile-role">{t.marcoRole}</p>
-            <h3>MarcoLifestyle</h3>
-            <p>{t.marcoBio}</p>
-          </article>
-        </div>
-        <a className="about-source" href="https://lavisionaria.com/tenerife" target="_blank" rel="noreferrer">{t.aboutSource}<span aria-hidden="true">↗</span></a>
       </section>
 
       <section className="method-section" id="metodo">

@@ -127,9 +127,18 @@ export function OperationsHub({ user, clients, users, deliveries, notify }: {
       const location = await currentLocation();
       const formData = new FormData(form);
       const deliveryId = String(formData.get("deliveryId") ?? "");
+      const distributionPointId = String(formData.get("distributionPointId") ?? "");
+      const quantity = String(formData.get("quantity") ?? "");
+      const unit = String(formData.get("unit") ?? "copie");
       const selected = formData.get("photo");
-      if (!deliveryId || !(selected instanceof File) || selected.size === 0) {
-        throw new Error("Seleziona una consegna e scatta la fotografia.");
+      if (!(selected instanceof File) || selected.size === 0) {
+        throw new Error("Scatta la fotografia della consegna.");
+      }
+      if (!deliveryId && (user.role !== "distributor" || !distributionPointId || Number(quantity) < 1)) {
+        throw new Error("Seleziona una consegna oppure un punto e indica la quantità consegnata.");
+      }
+      if (!deliveryId && !navigator.onLine) {
+        throw new Error("La conferma libera richiede la rete. Riprova quando il telefono è online.");
       }
 
       const photo = await prepareDeliveryPhoto(selected);
@@ -137,6 +146,11 @@ export function OperationsHub({ user, clients, users, deliveries, notify }: {
       if (!queued) {
         const upload = new FormData();
         upload.set("deliveryId", deliveryId);
+        if (!deliveryId) {
+          upload.set("distributionPointId", distributionPointId);
+          upload.set("quantity", quantity);
+          upload.set("unit", unit);
+        }
         upload.set("latitude", String(location.latitude));
         upload.set("longitude", String(location.longitude));
         upload.set("photo", photo, photo.name);
@@ -144,6 +158,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify }: {
           await request("/api/operations/photo-audits", { method: "POST", body: upload });
         } catch (error) {
           if (error instanceof RequestError) throw error;
+          if (!deliveryId) throw new Error("Connessione persa: la conferma libera non è stata registrata. Riprova quando sei online.");
           queued = true;
         }
       }
@@ -310,6 +325,7 @@ function InventoryPanel({ data, user, busy, run }: PanelProps) {
 
 function GeoAuditPanel({ data, user, clients, deliveries, busy, run, submitPhotoAudit }: PanelProps & { clients: Client[]; deliveries: Delivery[]; submitPhotoAudit: (event: FormEvent<HTMLFormElement>) => void }) {
   const canManage = ["super_admin", "admin", "sales_manager"].includes(user.role);
+  const freeConfirmationPoints = data.distributionPoints.filter((row) => row.client_id);
   return <div className="hub-stack">
     <DailyRouteCard deliveries={deliveries} user={user} />
     <div className="hub-two">
@@ -320,10 +336,15 @@ function GeoAuditPanel({ data, user, clients, deliveries, busy, run, submitPhoto
       </ActionCard>}
       <ActionCard index="02" title="Foto di consegna" text="Foto, posizione, hash e controllo geofence.">
         <form onSubmit={submitPhotoAudit}>
-          <select name="deliveryId" required><option value="">Seleziona consegna</option>{deliveries.map((delivery) => <option key={delivery.id} value={delivery.id}>{delivery.client_company ?? delivery.id} · {delivery.island}</option>)}</select>
+          <select name="deliveryId"><option value="">{user.role === "distributor" ? "Nessuna consegna assegnata / conferma libera" : "Seleziona consegna"}</option>{deliveries.map((delivery) => <option key={delivery.id} value={delivery.id}>{delivery.client_company ?? delivery.id} · {delivery.island}</option>)}</select>
+          {user.role === "distributor" && <>
+            <select name="distributionPointId"><option value="">Punto per conferma libera</option>{freeConfirmationPoints.map((row) => <option key={String(row.id)} value={String(row.id)}>{row.name} · {row.address}</option>)}</select>
+            <div className="field-pair"><input name="quantity" type="number" min="1" max="1000000" defaultValue="1" placeholder="Quantità" /><input name="unit" defaultValue="copie" maxLength={30} placeholder="Unità" /></div>
+            <p className="form-microcopy">Se non hai consegne assegnate, scegli il punto, indica la quantità e scatta la foto. Il CRM creerà e chiuderà la conferma a tuo nome.</p>
+          </>}
           <input name="photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" required />
           <p className="form-microcopy">Foto, coordinate e orario vengono acquisiti insieme. Senza rete restano protetti nell’archivio locale del telefono e sono inviati alla riapertura dell’app.</p>
-          <button className="primary" disabled={busy || !deliveries.length}>Scatta foto e registra consegna</button>
+          <button className="primary" disabled={busy || (!deliveries.length && (user.role !== "distributor" || !freeConfirmationPoints.length))}>Scatta foto e registra consegna</button>
         </form>
       </ActionCard>
     </div>
@@ -422,3 +443,4 @@ async function currentLocation(): Promise<{ latitude: number; longitude: number 
     { enableHighAccuracy: true, timeout: 15_000, maximumAge: 0 },
   ));
 }
+

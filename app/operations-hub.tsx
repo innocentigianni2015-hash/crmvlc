@@ -1,4 +1,4 @@
-[Resource from github at repo://innocentigianni2015-hash/crmvlc/sha/9e4a311e50d1dfec059bd4738a1e097cdc94e664/contents/app/operations-hub.tsx] "use client";
+"use client";
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { loadOfflineSnapshot, prepareDeliveryPhoto, queuePhotoAudit, saveOfflineSnapshot } from "./offline";

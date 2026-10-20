@@ -295,7 +295,7 @@ function drawFooter(ctx, page, pageNumber, pageCount) {
   page.drawLine({ start: { x: MARGIN, y: 50 }, end: { x: PAGE_WIDTH - MARGIN, y: 50 }, thickness: 0.6, color: ctx.colors.line });
   page.drawText(`Presupuesto ${latin(ctx.contract.quoteNumber)} · Contrato en español`, { x: MARGIN, y: 35, size: 6.6, font: ctx.font, color: ctx.colors.muted });
   rightText({ ...ctx, page }, `Página ${pageNumber} de ${pageCount}`, PAGE_WIDTH - MARGIN, 35, 6.6, ctx.font, ctx.colors.muted);
-  page.drawText("CRMVLC · Plataforma propiedad de Great Consulting LLC · 8 The Green, Suite R, Dover, DE 19901, USA", { x: MARGIN, y: 23, size: 5.7, font: ctx.font, color: ctx.colors.muted });
+  page.drawText("CRMVLC · Plataforma propiedad de Canary 360 & Comunication SL", { x: MARGIN, y: 23, size: 5.7, font: ctx.font, color: ctx.colors.muted });
 }
 
 function centerText(ctx, value, left, right, y, size) {

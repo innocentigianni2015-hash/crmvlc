@@ -378,9 +378,9 @@ export function usePlatformLanguage(): LanguageContextValue {
 }
 
 export function platformOwnership(locale: UiLocale): string {
-  if (locale === "it") return "Editore - Direttore: Canary 360. Canary 360 & Comunication SL — Avenida Las Americas 8, Local 396E (Arona), Santa Cruz de Tenerife — NIF B56378318. N° Depósito Legal TF 146-2024 · ISSN 3015-1554. Testata attiva dal 2010.";
-  if (locale === "en") return "Publisher - Director: Canary 360. Canary 360 & Comunication SL — Avenida Las Americas 8, Local 396E (Arona), Santa Cruz de Tenerife — NIF B56378318. Legal Deposit No. TF 146-2024 · ISSN 3015-1554. Active publication since 2010.";
-  return "Editor - Director: Canary 360. Canary 360 & Comunication SL — Avenida Las Américas 8, Local 396E (Arona), Santa Cruz de Tenerife — NIF B56378318. N° Depósito Legal TF 146-2024 · ISSN 3015-1554. Publicación activa desde 2010.";
+  if (locale === "it") return "Editore - Direttore: Canary 360. Canary 360 & Comunication SL — Avenida Las Americas 8, Local 396E (Arona), Santa Cruz de Tenerife — NIF B56378318. N° Depósito Legal TF 146-2024 · ISSN 3015-1554. Testata attiva dal 2010."crm sviluppato da https://appnexuslink.com;
+  if (locale === "en") return "Publisher - Director: Canary 360. Canary 360 & Comunication SL — Avenida Las Americas 8, Local 396E (Arona), Santa Cruz de Tenerife — NIF B56378318. Legal Deposit No. TF 146-2024 · ISSN 3015-1554. Active publication since 2010."crm sviluppato da https://appnexuslink.com;
+  return "Editor - Director: Canary 360. Canary 360 & Comunication SL — Avenida Las Américas 8, Local 396E (Arona), Santa Cruz de Tenerife — NIF B56378318. N° Depósito Legal TF 146-2024 · ISSN 3015-1554. Publicación activa desde 2010."crm sviluppato da https://appnexuslink.com;
 }
 
 export function PlatformI18n({ children }: { children: ReactNode }) {

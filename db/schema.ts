@@ -213,6 +213,14 @@ export const emailOutbox = sqliteTable("email_outbox", {
   sentAt: text("sent_at"),
 }, (table) => [index("email_outbox_pending_idx").on(table.status, table.nextAttemptAt)]);
 
+export const r2DeletionQueue = sqliteTable("r2_deletion_queue", {
+  r2Key: text("r2_key").primaryKey(),
+  source: text("source").notNull(),
+  createdAt: text("created_at").notNull(),
+  attempts: integer("attempts").notNull().default(0),
+  lastError: text("last_error"),
+});
+
 export const priceLists = sqliteTable("price_lists", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),

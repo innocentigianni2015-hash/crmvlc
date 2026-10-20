@@ -2129,6 +2129,31 @@ export async function processEmailOutbox(env: RuntimeEnv): Promise<void> {
   await Promise.all(pending.results.map((message) => deliverOutboxMessage(env, message.id)));
 }
 
+export async function processR2DeletionQueue(env: RuntimeEnv): Promise<void> {
+  let objects: { r2_key: string }[];
+  try {
+    objects = (await env.DB.prepare(
+      "SELECT r2_key FROM r2_deletion_queue ORDER BY created_at ASC LIMIT 50",
+    ).all<{ r2_key: string }>()).results;
+  } catch (error) {
+    // Deployments created before the cleanup migration do not have the queue yet.
+    if (String(error).toLowerCase().includes("no such table")) return;
+    throw error;
+  }
+
+  for (const object of objects) {
+    try {
+      await env.BUCKET.delete(object.r2_key);
+      await env.DB.prepare("DELETE FROM r2_deletion_queue WHERE r2_key = ?")
+        .bind(object.r2_key).run();
+    } catch (error) {
+      await env.DB.prepare(
+        "UPDATE r2_deletion_queue SET attempts = attempts + 1, last_error = ? WHERE r2_key = ?",
+      ).bind(cleanText(error instanceof Error ? error.message : String(error), 1000), object.r2_key).run();
+    }
+  }
+}
+
 async function deliverOutboxMessage(env: RuntimeEnv, messageId: string): Promise<void> {
   const message = await env.DB.prepare(
     "SELECT id, recipient, subject, body_text, attachment_r2_key, attachment_filename, attempts FROM email_outbox WHERE id = ? AND status = 'pending' LIMIT 1",

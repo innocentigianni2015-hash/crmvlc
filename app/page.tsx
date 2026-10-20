@@ -1236,7 +1236,7 @@ function AdminPanel({ data, refresh, notify }: { data: Bootstrap; refresh: () =>
       formElement.reset();
       setNewRole("sales");
       setNewIsland(ISLANDS[0]);
-      notify("Utente creato. Al primo accesso dovrà cambiare la password temporanea.");
+      notify("Utente creato. L’email d’invito è stata inviata.");
       await refresh();
     } catch (cause) {
       notify(cause instanceof Error ? cause.message : "Creazione non riuscita.", "error");
@@ -1271,7 +1271,7 @@ function AdminPanel({ data, refresh, notify }: { data: Bootstrap; refresh: () =>
         <form className="stack-form" onSubmit={createUser}>
           <label>Nome e cognome<input name="name" required maxLength={120} /></label>
           <label>Email aziendale<input name="email" type="email" required /></label>
-          <label>Password temporanea<input name="temporaryPassword" type="password" required minLength={12} maxLength={256} autoComplete="new-password" /><small>Almeno 12 caratteri. Al primo accesso dovrà essere cambiata.</small></label>
+          <div className="profile-security"><strong>Invito automatico</strong><span>L’utente riceverà un’email con un collegamento valido 48 ore per scegliere la propria password.</span></div>
           <div className="two-cols"><label>Ruolo<select name="role" value={newRole} onChange={(event) => setNewRole(event.target.value as Role)}>{creatableRoles.map((role) => <option key={role} value={role}>{roleLabels[role]}</option>)}</select></label>{newRole !== "admin" && <label>Isola<select name="island" value={newIsland} onChange={(event) => setNewIsland(event.target.value)}>{ISLANDS.map((island) => <option key={island}>{island}</option>)}</select></label>}</div>
           <label>Lingua iniziale<select name="language" defaultValue="es"><option value="es">Español</option><option value="it">Italiano</option><option value="en">English</option></select><small>L’utente potrà cambiarla dal proprio profilo.</small></label>
           {newRole === "sales" && <label>Sales Manager<select name="salesManagerId"><option value="">Nessuno · solo Admin e Super Admin</option>{newUserManagers.map((manager) => <option key={manager.id} value={manager.id}>{manager.name} · {manager.island}</option>)}</select><small>Il Sales resta operativo anche senza manager, ma nessun Sales Manager vedrà i suoi clienti.</small></label>}

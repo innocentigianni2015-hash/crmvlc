@@ -31,7 +31,7 @@ import { buildQuotePdf } from "./quote-pdf.js";
 import { buildContractPdf } from "./contract-pdf.js";
 import { handleOperationsApi, handlePublicOperationsApi } from "./operations-api.js";
 import { handleVipPublicApi } from "./vip-public-api.js";
-import { createPasswordHash, handlePasswordAuth } from "./password-auth.js";
+import { handlePasswordAuth, sendUserInvitation } from "./password-auth.js";
 import { createImpersonationToken, verifyImpersonationToken } from "./impersonation.js";
 import { canaryDateKey, canaryLocalToIso, oneHourAfter } from "./podcast-scheduling.js";
 import { handleHelpApi, loadHelpBootstrap } from "./help-assistant.js";
@@ -1657,7 +1657,6 @@ async function createUser(request: Request, user: UserRow, env: RuntimeEnv): Pro
   const name = cleanText(body.name, 120);
   const role = String(body.role ?? "");
   const requestedIsland = String(body.island ?? "");
-  const temporaryPassword = String(body.temporaryPassword ?? "");
   const language = normalizeUiLanguage(body.language);
   if (!isEmail(email) || !name || !canCreateUserWithRole(user, role)) {
     throw new ApiError(400, "invalid_user", "Nome, email e ruolo operativo sono obbligatori.");
@@ -1667,18 +1666,30 @@ async function createUser(request: Request, user: UserRow, env: RuntimeEnv): Pro
   const salesManagerId = role === "sales"
     ? await validateSalesManager(env, cleanOptionalText(body.salesManagerId, 128), String(island ?? ""))
     : null;
-  if (temporaryPassword.length < 12 || temporaryPassword.length > 256) throw new ApiError(400, "weak_password", "La password temporanea deve contenere almeno 12 caratteri.");
-  const credentials = await createPasswordHash(temporaryPassword, env.AUTH_SECRET ?? "");
+  if (!env.AUTH_SECRET || !env.EMAIL || !env.EMAIL_FROM) {
+    throw new ApiError(503, "invitation_not_configured", "L’invio degli inviti non è configurato.");
+  }
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   try {
-    await env.DB.prepare("INSERT INTO users (id, email, name, language, role, island, sales_manager_id, active, password_hash, password_salt, password_iterations, must_change_password, password_changed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, 1, NULL, ?, ?)")
-      .bind(id, email, name, language, role, island, salesManagerId, credentials.hash, credentials.salt, credentials.iterations, now, now).run();
-  } catch {
+    await env.DB.prepare("INSERT INTO users (id, email, name, language, role, island, sales_manager_id, active, password_hash, password_salt, password_iterations, must_change_password, password_changed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, NULL, 0, NULL, ?, ?)")
+      .bind(id, email, name, language, role, island, salesManagerId, now, now).run();
+  } catch (error) {
+    if (!String(error).includes("UNIQUE")) throw error;
     throw new ApiError(409, "email_exists", "Esiste già un utente con questa email.");
   }
-  await appendAudit(env, request, user, "user.created", "user", id, { email, language, role, island, salesManagerId });
-  return json({ id }, 201);
+  try {
+    await sendUserInvitation(request, env, { id, email, name, language });
+  } catch (error) {
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM auth_flow_tokens WHERE user_id = ?").bind(id),
+      env.DB.prepare("DELETE FROM users WHERE id = ?").bind(id),
+    ]);
+    console.error(JSON.stringify({ level: "error", event: "user_invitation_failed", userId: id, error: error instanceof Error ? error.message : "unknown" }));
+    throw new ApiError(503, "invitation_delivery_failed", "Non è stato possibile inviare l’invito. L’utente non è stato creato.");
+  }
+  await appendAudit(env, request, user, "user.created", "user", id, { email, language, role, island, salesManagerId, invitationSent: true });
+  return json({ id, invitationSent: true }, 201);
 }
 
 async function updateUser(request: Request, targetUserId: string, user: UserRow, env: RuntimeEnv): Promise<Response> {

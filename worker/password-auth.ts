@@ -80,6 +80,38 @@ export async function createPasswordHash(password: string, authSecret: string): 
   };
 }
 
+export async function sendUserInvitation(
+  request: Request,
+  env: AuthEnv,
+  user: Pick<PasswordUser, "id" | "email" | "name" | "language">,
+): Promise<void> {
+  requireConfiguration(env);
+  if (!env.EMAIL || !env.EMAIL_FROM) throw new AuthError(503, "email_not_configured", "Invio email non configurato.");
+
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    "UPDATE auth_flow_tokens SET consumed_at = ? WHERE user_id = ? AND purpose = 'password_reset' AND consumed_at IS NULL",
+  ).bind(now, user.id).run();
+  const token = await createFlow(env, user.id, "password_reset", 48 * 60);
+  const link = `${new URL(request.url).origin}/?reset=${encodeURIComponent(token)}`;
+  const message = userInvitationMessage(user.language ?? "es", user.name, link);
+
+  try {
+    await env.EMAIL.send({
+      from: { name: "CRMVLC", email: env.EMAIL_FROM },
+      to: user.email,
+      subject: message.subject,
+      text: message.text,
+      html: message.html,
+    });
+  } catch (error) {
+    await env.DB.prepare(
+      "DELETE FROM auth_flow_tokens WHERE user_id = ? AND purpose = 'password_reset' AND token_hash = ?",
+    ).bind(user.id, await sha256(token)).run();
+    throw error;
+  }
+}
+
 async function passwordLogin(request: Request, env: AuthEnv): Promise<Response> {
   const body = await readJson<{ email?: string; password?: string }>(request);
   const email = normalizeEmail(body.email);
@@ -220,7 +252,7 @@ async function resetPassword(request: Request, env: AuthEnv): Promise<Response> 
     env.DB.prepare("UPDATE users SET password_hash = ?, password_salt = ?, password_iterations = ?, must_change_password = 0, password_changed_at = ?, updated_at = ? WHERE id = ? AND active = 1")
       .bind(credentials.hash, credentials.salt, credentials.iterations, now, now, flow.user_id),
     env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(flow.user_id),
-    env.DB.prepare("UPDATE auth_flow_tokens SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL").bind(now, flow.id),
+    env.DB.prepare("UPDATE auth_flow_tokens SET consumed_at = ? WHERE user_id = ? AND purpose = 'password_reset' AND consumed_at IS NULL").bind(now, flow.user_id),
   ]);
   return authJson({ ok: true, message: "Password impostata. Ora puoi accedere." });
 }
@@ -397,6 +429,26 @@ function passwordResetMessage(language: PasswordUser["language"], link: string) 
     html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto"><h2>CRMVLC</h2><p>Abre el enlace en un plazo de 30 minutos para configurar tu contraseña.</p><p><a href="${safeLink}">Configurar contraseña</a></p><p>Si no has solicitado esta operación, ignora el mensaje.</p></div>`,
   };
 }
+
+function userInvitationMessage(language: PasswordUser["language"], name: string, link: string) {
+  const safeLink = escapeHtml(link);
+  const safeName = escapeHtml(name);
+  if (language === "it") return {
+    subject: "Sei stato invitato su CRMVLC",
+    text: `Ciao ${name}, il tuo account CRMVLC è pronto. Apri questo collegamento entro 48 ore per scegliere la password: ${link}`,
+    html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto"><h2>CRMVLC</h2><p>Ciao ${safeName},</p><p>il tuo account CRMVLC è pronto. Scegli la password personale entro 48 ore.</p><p><a href="${safeLink}" style="display:inline-block;padding:12px 18px;border-radius:8px;color:#fff;background:#ef6a54;text-decoration:none;font-weight:700">Imposta la password</a></p><p style="color:#667085">Se non riconosci questo invito, ignora il messaggio.</p></div>`,
+  };
+  if (language === "en") return {
+    subject: "You have been invited to CRMVLC",
+    text: `Hello ${name}, your CRMVLC account is ready. Open this link within 48 hours to choose your password: ${link}`,
+    html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto"><h2>CRMVLC</h2><p>Hello ${safeName},</p><p>Your CRMVLC account is ready. Choose your personal password within 48 hours.</p><p><a href="${safeLink}" style="display:inline-block;padding:12px 18px;border-radius:8px;color:#fff;background:#ef6a54;text-decoration:none;font-weight:700">Set your password</a></p><p style="color:#667085">If you do not recognise this invitation, ignore this message.</p></div>`,
+  };
+  return {
+    subject: "Has sido invitado a CRMVLC",
+    text: `Hola ${name}, tu cuenta CRMVLC está lista. Abre este enlace antes de 48 horas para elegir tu contraseña: ${link}`,
+    html: `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto"><h2>CRMVLC</h2><p>Hola ${safeName},</p><p>Tu cuenta CRMVLC está lista. Elige tu contraseña personal antes de 48 horas.</p><p><a href="${safeLink}" style="display:inline-block;padding:12px 18px;border-radius:8px;color:#fff;background:#ef6a54;text-decoration:none;font-weight:700">Crear contraseña</a></p><p style="color:#667085">Si no reconoces esta invitación, ignora el mensaje.</p></div>`,
+  };
+}
 function digits(value: unknown) { return String(value ?? "").replace(/\D/g, "").slice(0, 6); }
 function isEmail(value: string) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) && value.length <= 254; }
 function safeJson(value: string | null): Record<string, unknown> { try { return value ? JSON.parse(value) as Record<string, unknown> : {}; } catch { return {}; } }
@@ -410,3 +462,4 @@ function base32Encode(bytes: Uint8Array) { const alphabet = "ABCDEFGHIJKLMNOPQRS
 function base32Decode(value: string) { const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"; let bits = 0; let buffer = 0; const output: number[] = []; for (const character of value.toUpperCase().replace(/=+$/g, "")) { const index = alphabet.indexOf(character); if (index < 0) continue; buffer = (buffer << 5) | index; bits += 5; if (bits >= 8) { output.push((buffer >>> (bits - 8)) & 255); bits -= 8; } } return new Uint8Array(output); }
 function sessionCookie(token: string, request: Request, maxAge: number) { const secure = new URL(request.url).protocol === "https:" ? "; Secure" : ""; return `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure}`; }
 function escapeHtml(value: string) { return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;"); }
+

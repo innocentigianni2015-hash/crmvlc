@@ -1,4 +1,4 @@
-"use client";
+[Resource from github at repo://innocentigianni2015-hash/crmvlc/sha/9e4a311e50d1dfec059bd4738a1e097cdc94e664/contents/app/page.tsx] "use client";
 
 import { FormEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect, useRef, useState } from "react";
 import QRCode from "qrcode";
@@ -198,7 +198,7 @@ export default function Home() {
       setLocale(result.user.language ?? "es");
       setData(result);
       await saveOfflineSnapshot("bootstrap", result.user.id, result);
-      if (result.user.role === "distributor") setActive("distribution");
+      if (result.user.role === "distributor") setActive("operations");
       setAuthRequired(false);
       setOfflineMode(false);
       setOfflineSavedAt(null);
@@ -211,7 +211,7 @@ export default function Home() {
         const cached = await loadOfflineSnapshot<Bootstrap>("bootstrap").catch(() => null);
         if (cached) {
           setData(cached.value);
-          if (cached.value.user.role === "distributor") setActive("distribution");
+          if (cached.value.user.role === "distributor") setActive("operations");
           setAuthRequired(false);
           setOfflineMode(true);
           setOfflineSavedAt(cached.savedAt);
@@ -418,7 +418,7 @@ export default function Home() {
   async function impersonationStarted(role: "sales" | "distributor") {
     await clearOfflineSnapshots();
     setImpersonationModal(null);
-    setActive(role === "distributor" ? "distribution" : "crm");
+    setActive(role === "distributor" ? "operations" : "crm");
     await refresh();
     notify(`Modalità ${roleLabels[role]} attivata. Stai lavorando su dati reali.`);
   }
@@ -475,7 +475,7 @@ export default function Home() {
   return (
     <div className="ops-shell">
       <aside className="ops-sidebar">
-        <button className="ops-brand" onClick={() => setActive(data.user.role === "distributor" ? "distribution" : "crm")}><img src={BRAND_LOGO} alt="" /><div><strong>CRMVLC</strong><small>CRM & Contratti</small></div></button>
+        <button className="ops-brand" onClick={() => setActive(data.user.role === "distributor" ? "operations" : "crm")}><img src={BRAND_LOGO} alt="" /><div><strong>CRMVLC</strong><small>CRM & Contratti</small></div></button>
         <nav>
           {data.user.role !== "distributor" && <button className={active === "crm" ? "active" : ""} onClick={() => setActive("crm")}><i>01</i> CRM</button>}
           <button className={active === "operations" ? "active" : ""} onClick={() => setActive("operations")}><i>02</i> Moduli OS</button>

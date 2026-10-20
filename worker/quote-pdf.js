@@ -93,7 +93,7 @@ export async function buildQuotePdf(quote) {
   page.drawLine({ start: { x: MARGIN, y: 55 }, end: { x: PAGE_WIDTH - MARGIN, y: 55 }, thickness: 0.7, color: line });
   page.drawText("Canary 360 & Comunication SL · B56378318 · Avenida Las Americas 8, Local 396E, Arona, Santa Cruz de Tenerife", { x: MARGIN, y: 42, size: 6.2, font, color: muted });
   page.drawText("+34 822 140 134 · info@vivilecanarie.com · crmvlc.com", { x: MARGIN, y: 31, size: 6.2, font, color: muted });
-  page.drawText("Plataforma creada, desarrollada y propiedad de Great Consulting LLC · 8 The Green, Suite R, Dover, DE 19901, USA", { x: MARGIN, y: 20, size: 5.6, font, color: muted });
+  page.drawText("Plataforma creada, desarrollada y propiedad de Canary 360 & Comunication SL.", { x: MARGIN, y: 20, size: 5.6, font, color: muted });
   drawRight(page, font, safeText(quote.quoteNumber), PAGE_WIDTH - MARGIN, 31, 6.2, muted);
 
   pdf.setTitle(`Presupuesto ${safeText(quote.quoteNumber)}`);

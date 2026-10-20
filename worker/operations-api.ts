@@ -171,8 +171,8 @@ async function operationsSnapshot(env: RuntimeEnv, user: OperationsUser): Promis
 
   const distributionPoints = user.role === "distributor"
     ? (await env.DB.prepare(
-      "SELECT DISTINCT x.id, x.client_id, c.company_name AS client_company, x.name, x.island, x.address, x.latitude_e6, x.longitude_e6, x.capacity, x.stock, x.public_visible, x.updated_at FROM distribution_points x LEFT JOIN clients c ON c.id = x.client_id JOIN deliveries d ON d.distribution_point_id = x.id WHERE d.distributor_user_id = ? ORDER BY x.stock, x.name LIMIT 300",
-    ).bind(user.id).all()).results
+      "SELECT x.id, x.client_id, c.company_name AS client_company, x.name, x.island, x.address, x.latitude_e6, x.longitude_e6, x.capacity, x.stock, x.public_visible, x.updated_at FROM distribution_points x LEFT JOIN clients c ON c.id = x.client_id WHERE x.island = ? AND x.public_visible = 1 ORDER BY x.stock, x.name LIMIT 300",
+    ).bind(String(user.island ?? "")).all()).results
     : (await env.DB.prepare(
       `SELECT x.id, x.client_id, c.company_name AS client_company, x.name, x.island, x.address, x.latitude_e6, x.longitude_e6, x.capacity, x.stock, x.public_visible, x.updated_at FROM distribution_points x LEFT JOIN clients c ON c.id = x.client_id WHERE 1 = 1${islandScope.sql} ORDER BY x.island, x.stock, x.name LIMIT 300`,
     ).bind(...islandScope.values).all()).results;
@@ -475,9 +475,26 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
   if (!(photo instanceof File) || photo.size === 0 || photo.size > MAX_PHOTO_BYTES || !["image/jpeg", "image/png", "image/webp"].includes(photo.type)) {
     throw new OperationsError(400, "invalid_photo", "Carica una foto JPG, PNG o WebP fino a 8 MB.");
   }
-  const deliveryId = clean(form.get("deliveryId"), 80);
+  let deliveryId = clean(form.get("deliveryId"), 80);
   const latitude = requiredCoordinate(form.get("latitude"), -90, 90);
   const longitude = requiredCoordinate(form.get("longitude"), -180, 180);
+  let selfReported = false;
+  if (!deliveryId) {
+    if (user.role !== "distributor" || !user.island) throw new OperationsError(400, "delivery_required", "Seleziona una consegna.");
+    const distributionPointId = clean(form.get("distributionPointId"), 80);
+    const quantity = positiveInt(form.get("quantity"), 1_000_000);
+    const unit = clean(form.get("unit"), 30);
+    const point = await env.DB.prepare(
+      "SELECT p.id, p.client_id, p.island, p.address, c.contact_name, c.email, c.phone FROM distribution_points p JOIN clients c ON c.id = p.client_id WHERE p.id = ? AND p.island = ? AND p.public_visible = 1 LIMIT 1",
+    ).bind(distributionPointId, user.island).first<{ id: string; client_id: string; island: string; address: string; contact_name: string; email: string; phone: string | null }>();
+    if (!point || !unit) throw new OperationsError(404, "point_not_found", "Scegli un punto di distribuzione valido per la tua isola.");
+    deliveryId = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    await env.DB.prepare(
+      "INSERT INTO deliveries (id, client_id, distributor_user_id, distribution_point_id, island, status, quantity, unit, scheduled_for, delivery_contact_name, delivery_contact_email, delivery_contact_phone, delivery_address, notes, version, created_by, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'delivered', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
+    ).bind(deliveryId, point.client_id, user.id, point.id, point.island, quantity, unit, canaryDateKey(new Date()), point.contact_name, point.email, point.phone, point.address, "Conferma libera registrata dal Distributore.", user.id, createdAt, createdAt, createdAt).run();
+    selfReported = true;
+  }
   const delivery = await env.DB.prepare("SELECT d.id, d.distributor_user_id, d.island, d.quantity, d.unit, d.distribution_point_id, p.name AS point_name, p.address AS point_address, p.latitude_e6 AS point_latitude_e6, p.longitude_e6 AS point_longitude_e6 FROM deliveries d LEFT JOIN distribution_points p ON p.id = d.distribution_point_id WHERE d.id = ? LIMIT 1").bind(deliveryId).first<{ id: string; distributor_user_id: string; island: string; quantity: number; unit: string; distribution_point_id: string | null; point_name: string | null; point_address: string | null; point_latitude_e6: number | null; point_longitude_e6: number | null }>();
   if (!delivery || !canAccessIsland(user, delivery.island) || (user.role === "distributor" && delivery.distributor_user_id !== user.id)) {
     throw new OperationsError(404, "delivery_not_found", "Consegna non disponibile nel tuo perimetro.");
@@ -503,10 +520,16 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
   const qualityScore = aiAnalysis.qualityScore;
   const key = `distribution-audit/${delivery.island}/${now.slice(0, 10)}/${id}.${extensionFor(photo.type)}`;
   await env.BUCKET.put(key, bytes, { httpMetadata: { contentType: photo.type, cacheControl: "private, no-store" }, customMetadata: { sha256: digest, watermark: watermarkText, deliveryId } });
-  await env.DB.prepare("INSERT INTO photo_audits (id, delivery_id, distributor_user_id, island, r2_key, sha256, latitude_e6, longitude_e6, geofence_distance_m, status, quality_score, duplicate_of_audit_id, ai_model, ai_verdict, ai_result_json, watermark_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)")
-    .bind(id, delivery.id, delivery.distributor_user_id, delivery.island, key, digest, toE6(latitude), toE6(longitude), nearest?.distanceM ?? null, qualityScore, duplicate?.id ?? null, aiAnalysis.model, aiAnalysis.verdict, JSON.stringify(aiAnalysis), watermarkText, now).run();
-  await appendOperationsAudit(env, request, user, "photo_audit.created", "photo_audit", id, { deliveryId, digest, distanceM: nearest?.distanceM ?? null, qualityScore, duplicateOfAuditId: duplicate?.id ?? null, aiVerdict: aiAnalysis.verdict });
-  return json({ id, status: "pending", qualityScore, geofenceDistanceM: nearest?.distanceM ?? null, watermarkText, aiVerdict: aiAnalysis.verdict, duplicate: Boolean(duplicate) }, 201);
+  const mutations = [
+    env.DB.prepare("INSERT INTO photo_audits (id, delivery_id, distributor_user_id, island, r2_key, sha256, latitude_e6, longitude_e6, geofence_distance_m, status, quality_score, duplicate_of_audit_id, ai_model, ai_verdict, ai_result_json, watermark_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)")
+      .bind(id, delivery.id, delivery.distributor_user_id, delivery.island, key, digest, toE6(latitude), toE6(longitude), nearest?.distanceM ?? null, qualityScore, duplicate?.id ?? null, aiAnalysis.model, aiAnalysis.verdict, JSON.stringify(aiAnalysis), watermarkText, now),
+  ];
+  if (user.role === "distributor" && !selfReported) {
+    mutations.push(env.DB.prepare("UPDATE deliveries SET status = 'delivered', completed_at = ?, version = version + 1, updated_at = ? WHERE id = ? AND distributor_user_id = ? AND status IN ('assigned','in_progress','issue')").bind(now, now, delivery.id, user.id));
+  }
+  await env.DB.batch(mutations);
+  await appendOperationsAudit(env, request, user, "photo_audit.created", "photo_audit", id, { deliveryId, selfReported, digest, distanceM: nearest?.distanceM ?? null, qualityScore, duplicateOfAuditId: duplicate?.id ?? null, aiVerdict: aiAnalysis.verdict });
+  return json({ id, deliveryId, selfReported, status: "pending", qualityScore, geofenceDistanceM: nearest?.distanceM ?? null, watermarkText, aiVerdict: aiAnalysis.verdict, duplicate: Boolean(duplicate) }, 201);
 }
 
 type PhotoAiResult = {
@@ -761,6 +784,10 @@ function nonNegativeInt(value: unknown, max: number): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 0 || parsed > max) throw new OperationsError(400, "invalid_number", `Inserisci un intero tra 0 e ${max}.`);
   return parsed;
+}
+
+function canaryDateKey(value: Date): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Atlantic/Canary", year: "numeric", month: "2-digit", day: "2-digit" }).format(value);
 }
 
 function requiredCoordinate(value: unknown, min: number, max: number): number {

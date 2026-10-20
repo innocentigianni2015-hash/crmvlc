@@ -26,6 +26,7 @@ type Snapshot = {
   inventory: RecordRow[];
   distributionPoints: RecordRow[];
   photoAudits: RecordRow[];
+  deliveryChecks: RecordRow[];
   salesCheckins: RecordRow[];
   salesTasks: RecordRow[];
   leaderboard: RecordRow[];
@@ -130,6 +131,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify }: {
       const distributionPointId = String(formData.get("distributionPointId") ?? "");
       const quantity = String(formData.get("quantity") ?? "");
       const unit = String(formData.get("unit") ?? "copie");
+      const reminderDays = String(formData.get("reminderDays") ?? "7");
       const selected = formData.get("photo");
       if (!(selected instanceof File) || selected.size === 0) {
         throw new Error("Scatta la fotografia della consegna.");
@@ -150,6 +152,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify }: {
           upload.set("distributionPointId", distributionPointId);
           upload.set("quantity", quantity);
           upload.set("unit", unit);
+          upload.set("reminderDays", reminderDays);
         }
         upload.set("latitude", String(location.latitude));
         upload.set("longitude", String(location.longitude));
@@ -185,6 +188,80 @@ export function OperationsHub({ user, clients, users, deliveries, notify }: {
     }
   }
 
+  async function submitPointRegistration(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    setBusy(true);
+    try {
+      if (!navigator.onLine) throw new Error("La registrazione di un nuovo punto richiede la rete.");
+      const location = await currentLocation();
+      const formData = new FormData(form);
+      const name = String(formData.get("name") ?? "");
+      const address = String(formData.get("address") ?? "");
+      const quantity = String(formData.get("quantity") ?? "1");
+      const unit = String(formData.get("unit") ?? "copie");
+      const reminderDays = String(formData.get("reminderDays") ?? "7");
+      const selected = formData.get("photo");
+      if (!name || !address) throw new Error("Indica nome e indirizzo del punto vendita.");
+      if (!(selected instanceof File) || selected.size === 0) throw new Error("Scatta la foto del punto vendita.");
+
+      const photo = await prepareDeliveryPhoto(selected);
+      const upload = new FormData();
+      upload.set("name", name);
+      upload.set("address", address);
+      upload.set("quantity", quantity);
+      upload.set("unit", unit);
+      upload.set("reminderDays", reminderDays);
+      upload.set("latitude", String(location.latitude));
+      upload.set("longitude", String(location.longitude));
+      upload.set("photo", photo, photo.name);
+      await request("/api/operations/distribution-points/self-register", { method: "POST", body: upload });
+
+      form.reset();
+      notify("Punto vendita registrato e prima consegna inviata.");
+      await refresh();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Registrazione non riuscita.", "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitDeliveryCheck(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    setBusy(true);
+    try {
+      if (!navigator.onLine) throw new Error("Il controllo del punto richiede la rete.");
+      const location = await currentLocation();
+      const formData = new FormData(form);
+      const distributionPointId = String(formData.get("distributionPointId") ?? "");
+      const quantityFound = String(formData.get("quantityFound") ?? "0");
+      const notes = String(formData.get("notes") ?? "");
+      const selected = formData.get("photo");
+      if (!distributionPointId) throw new Error("Seleziona il punto da controllare.");
+      if (!(selected instanceof File) || selected.size === 0) throw new Error("Scatta la foto del punto al ritiro.");
+
+      const photo = await prepareDeliveryPhoto(selected);
+      const upload = new FormData();
+      upload.set("distributionPointId", distributionPointId);
+      upload.set("quantityFound", quantityFound);
+      upload.set("notes", notes);
+      upload.set("latitude", String(location.latitude));
+      upload.set("longitude", String(location.longitude));
+      upload.set("photo", photo, photo.name);
+      await request("/api/operations/delivery-checks", { method: "POST", body: upload });
+
+      form.reset();
+      notify("Controllo registrato.");
+      await refresh();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Controllo non riuscito.", "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (!data) return <section className="ops-page"><div className="module-loading"><span /><p>Caricamento moduli operativi…</p></div></section>;
 
   return <section className="ops-page operations-hub">
@@ -200,7 +277,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify }: {
     {tab === "vip" && user.role !== "distributor" && <VipPanel data={data} user={user} clients={clients} busy={busy} run={run} />}
     {tab === "finance" && user.role !== "distributor" && <FinancePanel data={data} user={user} busy={busy} run={run} />}
     {tab === "inventory" && user.role !== "distributor" && <InventoryPanel data={data} user={user} busy={busy} run={run} />}
-    {tab === "distribution" && <GeoAuditPanel data={data} user={user} clients={clients} deliveries={deliveries} busy={busy} run={run} submitPhotoAudit={submitPhotoAudit} />}
+    {tab === "distribution" && <GeoAuditPanel data={data} user={user} clients={clients} deliveries={deliveries} busy={busy} run={run} submitPhotoAudit={submitPhotoAudit} submitPointRegistration={submitPointRegistration} submitDeliveryCheck={submitDeliveryCheck} />}
     {tab === "sales" && user.role !== "distributor" && <SalesPanel data={data} user={user} users={users} clients={clients} busy={busy} run={run} />}
   </section>;
 }
@@ -323,9 +400,11 @@ function InventoryPanel({ data, user, busy, run }: PanelProps) {
   </div>;
 }
 
-function GeoAuditPanel({ data, user, clients, deliveries, busy, run, submitPhotoAudit }: PanelProps & { clients: Client[]; deliveries: Delivery[]; submitPhotoAudit: (event: FormEvent<HTMLFormElement>) => void }) {
+function GeoAuditPanel({ data, user, clients, deliveries, busy, run, submitPhotoAudit, submitPointRegistration, submitDeliveryCheck }: PanelProps & { clients: Client[]; deliveries: Delivery[]; submitPhotoAudit: (event: FormEvent<HTMLFormElement>) => void; submitPointRegistration: (event: FormEvent<HTMLFormElement>) => void; submitDeliveryCheck: (event: FormEvent<HTMLFormElement>) => void }) {
   const canManage = ["super_admin", "admin", "sales_manager"].includes(user.role);
-  const freeConfirmationPoints = data.distributionPoints.filter((row) => row.client_id);
+  const freeConfirmationPoints = data.distributionPoints;
+  const nowMs = Date.now();
+  const isOverdue = (row: RecordRow) => Boolean(row.next_check_due_at) && new Date(String(row.next_check_due_at)).getTime() <= nowMs;
   return <div className="hub-stack">
     <DailyRouteCard deliveries={deliveries} user={user} />
     <div className="hub-two">
@@ -338,20 +417,43 @@ function GeoAuditPanel({ data, user, clients, deliveries, busy, run, submitPhoto
         <form onSubmit={submitPhotoAudit}>
           <select name="deliveryId"><option value="">{user.role === "distributor" ? "Nessuna consegna assegnata / conferma libera" : "Seleziona consegna"}</option>{deliveries.map((delivery) => <option key={delivery.id} value={delivery.id}>{delivery.client_company ?? delivery.id} · {delivery.island}</option>)}</select>
           {user.role === "distributor" && <>
-            <select name="distributionPointId"><option value="">Punto per conferma libera</option>{freeConfirmationPoints.map((row) => <option key={String(row.id)} value={String(row.id)}>{row.name} · {row.address}</option>)}</select>
+            <select name="distributionPointId"><option value="">Punto per conferma libera</option>{freeConfirmationPoints.map((row) => <option key={String(row.id)} value={String(row.id)}>{row.name} · {row.address}{isOverdue(row) ? " · DA CONTROLLARE" : ""}</option>)}</select>
             <div className="field-pair"><input name="quantity" type="number" min="1" max="1000000" defaultValue="1" placeholder="Quantità" /><input name="unit" defaultValue="copie" maxLength={30} placeholder="Unità" /></div>
-            <p className="form-microcopy">Se non hai consegne assegnate, scegli il punto, indica la quantità e scatta la foto. Il CRM creerà e chiuderà la conferma a tuo nome.</p>
+            <input name="reminderDays" type="number" min="1" max="60" defaultValue="7" placeholder="Torna a controllare dopo (giorni)" />
+            <p className="form-microcopy">Se non hai consegne assegnate, scegli il punto, indica la quantità e scatta la foto. Il CRM creerà e chiuderà la conferma a tuo nome, e ti ricorderà di tornare a controllare.</p>
           </>}
           <input name="photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" required />
           <p className="form-microcopy">Foto, coordinate e orario vengono acquisiti insieme. Senza rete restano protetti nell’archivio locale del telefono e sono inviati alla riapertura dell’app.</p>
           <button className="primary" disabled={busy || (!deliveries.length && (user.role !== "distributor" || !freeConfirmationPoints.length))}>Scatta foto e registra consegna</button>
         </form>
       </ActionCard>
+      {user.role === "distributor" && <ActionCard index="03" title="Registra nuovo punto vendita" text="Nome, foto del punto, quantità lasciata e promemoria di ritorno.">
+        <form onSubmit={submitPointRegistration}>
+          <input name="name" placeholder="Nome punto (es. Bar/Negozio)" required maxLength={120} />
+          <input name="address" placeholder="Indirizzo o riferimento" required maxLength={260} />
+          <div className="field-pair"><input name="quantity" type="number" min="1" max="1000000" defaultValue="1" placeholder="Quante copie lasci" /><input name="unit" defaultValue="copie" maxLength={30} placeholder="Unità" /></div>
+          <input name="reminderDays" type="number" min="1" max="60" defaultValue="7" placeholder="Torna a controllare dopo (giorni)" />
+          <input name="photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" required />
+          <p className="form-microcopy">Posizione GPS acquisita automaticamente. Il punto viene creato e la prima consegna registrata a tuo nome, senza bisogno di un cliente già in anagrafica.</p>
+          <button className="primary" disabled={busy}>Registra punto e prima consegna</button>
+        </form>
+      </ActionCard>}
+      {user.role === "distributor" && <ActionCard index="04" title="Controlla punto" text="Torna sul punto, conta le copie rimaste e fotografa.">
+        <form onSubmit={submitDeliveryCheck}>
+          <select name="distributionPointId" required><option value="">Seleziona punto da controllare</option>{freeConfirmationPoints.map((row) => <option key={String(row.id)} value={String(row.id)}>{row.name} · {row.address}{isOverdue(row) ? " · DA CONTROLLARE" : ""}</option>)}</select>
+          <input name="quantityFound" type="number" min="0" max="1000000" placeholder="Quante copie trovi ancora" required />
+          <input name="notes" placeholder="Nota facoltativa" maxLength={500} />
+          <input name="photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" required />
+          <p className="form-microcopy">Il CRM calcola quante copie sono state prese e azzera il promemoria: lascia di nuovo copie dal modulo sopra quando vuoi riavviare il giro.</p>
+          <button className="primary" disabled={busy || !freeConfirmationPoints.length}>Registra controllo</button>
+        </form>
+      </ActionCard>}
     </div>
     <div className="hub-two">
-      <DataCard title="Punti e stock" count={data.distributionPoints.length}><a className="public-map-link" href="/mappe" target="_blank" rel="noopener noreferrer">Apri mappa pubblica ↗</a>{data.distributionPoints.length ? data.distributionPoints.map((row) => <div className="hub-list-row" key={String(row.id)}><div><strong>{row.name}</strong><small>{row.address} · {row.island}</small></div><b className={Number(row.stock) <= Math.max(5, Number(row.capacity) * .15) ? "low-stock" : ""}>{row.stock}/{row.capacity}</b></div>) : <MiniEmpty text="Nessun punto geolocalizzato." />}</DataCard>
+      <DataCard title="Punti e stock" count={data.distributionPoints.length}><a className="public-map-link" href="/mappe" target="_blank" rel="noopener noreferrer">Apri mappa pubblica ↗</a>{data.distributionPoints.length ? data.distributionPoints.map((row) => <div className="hub-list-row" key={String(row.id)}><div><strong>{row.name}</strong><small>{row.address} · {row.island}{Number(row.self_registered) === 1 ? " · registrato da distributore" : ""}</small>{row.next_check_due_at && <small className={isOverdue(row) ? "ai-review" : ""}>{isOverdue(row) ? "Da controllare" : `Controllo entro ${when(row.next_check_due_at)}`}</small>}</div><b className={Number(row.stock) <= Math.max(5, Number(row.capacity) * .15) ? "low-stock" : ""}>{row.stock}/{row.capacity}</b></div>) : <MiniEmpty text="Nessun punto geolocalizzato." />}</DataCard>
       <DataCard title="Audit fotografici" count={data.photoAudits.length}>{data.photoAudits.length ? data.photoAudits.map((row) => { const ai = photoAiSummary(row); return <div className="hub-list-row audit-row" key={String(row.id)}><div><strong>{row.distributor_name}</strong><small>{row.island} · {when(row.created_at)} · distanza {row.geofence_distance_m ?? "—"} m</small>{ai && <small className={ai.verdict === "compliant_candidate" ? "ai-pass" : "ai-review"}>AI: {ai.magazinesDetected || ai.displayDetected ? "riviste/espositore rilevati" : "contenuto da verificare"} · {ai.possibleDuplicate ? "possibile duplicato" : "nessun duplicato rilevato"} · confidenza {ai.confidence}%</small>}{row.duplicate_of_audit_id && <small className="ai-review">Hash identico a una foto già registrata.</small>}</div><b>Qualità {row.quality_score}%</b><span className={`module-status ${row.status}`}>{row.status}</span>{canManage && row.status === "pending" && <div className="inline-actions"><button disabled={busy} onClick={() => void run(() => post("/api/operations/photo-audits/review", { id: row.id, status: "approved" }), "Foto approvata.")}>Approva</button><button disabled={busy} onClick={() => void run(() => post("/api/operations/photo-audits/review", { id: row.id, status: "rejected" }), "Foto rifiutata.")}>Rifiuta</button></div>}</div>; }) : <MiniEmpty text="Nessuna foto da verificare." />}</DataCard>
     </div>
+    <DataCard title="Controlli ritiro" count={data.deliveryChecks.length}>{data.deliveryChecks.length ? data.deliveryChecks.map((row) => <div className="hub-list-row" key={String(row.id)}><div><strong>{row.point_name}</strong><small>{row.distributor_name ? `${row.distributor_name} · ` : ""}{when(row.created_at)} · distanza {row.geofence_distance_m ?? "—"} m</small></div><b>{row.quantity_found}/{row.quantity_left}</b><span className="module-status">prese {row.quantity_taken}</span></div>) : <MiniEmpty text="Nessun controllo di ritiro registrato." />}</DataCard>
   </div>;
 }
 

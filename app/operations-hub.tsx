@@ -1,4 +1,4 @@
-"use client";
+[Resource from github at repo://innocentigianni2015-hash/crmvlc/sha/9e4a311e50d1dfec059bd4738a1e097cdc94e664/contents/app/operations-hub.tsx] "use client";
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { loadOfflineSnapshot, prepareDeliveryPhoto, queuePhotoAudit, saveOfflineSnapshot } from "./offline";
@@ -78,7 +78,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify }: {
   notify: (text: string, tone?: "ok" | "error") => void;
 }) {
   const [data, setData] = useState<Snapshot | null>(null);
-  const [tab, setTab] = useState<(typeof TABS)[number][0]>("overview");
+  const [tab, setTab] = useState<(typeof TABS)[number][0]>(user.role === "distributor" ? "distribution" : "overview");
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {

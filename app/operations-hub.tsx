@@ -262,6 +262,39 @@ export function OperationsHub({ user, clients, users, deliveries, notify }: {
     }
   }
 
+  async function submitBulkPhotoAudit(
+    distributorId: string,
+    items: Array<{ distributionPointId: string; quantity: string; unit: string; file: File }>,
+    onProgress: (index: number, status: "ok" | "error", message?: string) => void,
+  ) {
+    if (!distributorId) { notify("Seleziona il distributore.", "error"); return; }
+    if (!items.length) { notify("Aggiungi almeno una foto.", "error"); return; }
+    setBusy(true);
+    let okCount = 0;
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index];
+      try {
+        if (!item.distributionPointId) throw new Error("Seleziona il punto di distribuzione per questa foto.");
+        if (!(item.file instanceof File) || item.file.size === 0) throw new Error("Foto mancante.");
+        const upload = new FormData();
+        upload.set("distributorId", distributorId);
+        upload.set("distributionPointId", item.distributionPointId);
+        upload.set("quantity", item.quantity || "1");
+        upload.set("unit", item.unit || "copie");
+        upload.set("reminderDays", "7");
+        upload.set("photo", item.file, item.file.name);
+        await request("/api/operations/photo-audits", { method: "POST", body: upload });
+        okCount += 1;
+        onProgress(index, "ok");
+      } catch (error) {
+        onProgress(index, "error", error instanceof Error ? error.message : "Caricamento non riuscito.");
+      }
+    }
+    notify(`${okCount}/${items.length} foto caricate e attribuite al distributore.`, okCount === items.length ? "ok" : "error");
+    await refresh();
+    setBusy(false);
+  }
+
   if (!data) return <section className="ops-page"><div className="module-loading"><span /><p>Caricamento moduli operativi…</p></div></section>;
 
   return <section className="ops-page operations-hub">
@@ -277,7 +310,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify }: {
     {tab === "vip" && user.role !== "distributor" && <VipPanel data={data} user={user} clients={clients} busy={busy} run={run} />}
     {tab === "finance" && user.role !== "distributor" && <FinancePanel data={data} user={user} busy={busy} run={run} />}
     {tab === "inventory" && user.role !== "distributor" && <InventoryPanel data={data} user={user} busy={busy} run={run} />}
-    {tab === "distribution" && <GeoAuditPanel data={data} user={user} clients={clients} deliveries={deliveries} busy={busy} run={run} submitPhotoAudit={submitPhotoAudit} submitPointRegistration={submitPointRegistration} submitDeliveryCheck={submitDeliveryCheck} />}
+    {tab === "distribution" && <GeoAuditPanel data={data} user={user} users={users} clients={clients} deliveries={deliveries} busy={busy} run={run} submitPhotoAudit={submitPhotoAudit} submitPointRegistration={submitPointRegistration} submitDeliveryCheck={submitDeliveryCheck} submitBulkPhotoAudit={submitBulkPhotoAudit} />}
     {tab === "sales" && user.role !== "distributor" && <SalesPanel data={data} user={user} users={users} clients={clients} busy={busy} run={run} />}
   </section>;
 }
@@ -400,7 +433,19 @@ function InventoryPanel({ data, user, busy, run }: PanelProps) {
   </div>;
 }
 
-function GeoAuditPanel({ data, user, clients, deliveries, busy, run, submitPhotoAudit, submitPointRegistration, submitDeliveryCheck }: PanelProps & { clients: Client[]; deliveries: Delivery[]; submitPhotoAudit: (event: FormEvent<HTMLFormElement>) => void; submitPointRegistration: (event: FormEvent<HTMLFormElement>) => void; submitDeliveryCheck: (event: FormEvent<HTMLFormElement>) => void }) {
+function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, submitPhotoAudit, submitPointRegistration, submitDeliveryCheck, submitBulkPhotoAudit }: PanelProps & {
+  users: User[];
+  clients: Client[];
+  deliveries: Delivery[];
+  submitPhotoAudit: (event: FormEvent<HTMLFormElement>) => void;
+  submitPointRegistration: (event: FormEvent<HTMLFormElement>) => void;
+  submitDeliveryCheck: (event: FormEvent<HTMLFormElement>) => void;
+  submitBulkPhotoAudit: (
+    distributorId: string,
+    items: Array<{ distributionPointId: string; quantity: string; unit: string; file: File }>,
+    onProgress: (index: number, status: "ok" | "error", message?: string) => void,
+  ) => Promise<void>;
+}) {
   const canManage = ["super_admin", "admin", "sales_manager"].includes(user.role);
   const freeConfirmationPoints = data.distributionPoints;
   const nowMs = Date.now();
@@ -448,6 +493,7 @@ function GeoAuditPanel({ data, user, clients, deliveries, busy, run, submitPhoto
           <button className="primary" disabled={busy || !freeConfirmationPoints.length}>Registra controllo</button>
         </form>
       </ActionCard>}
+      {canManage && <BulkPhotoUploadCard user={user} users={users} distributionPoints={data.distributionPoints} busy={busy} onSubmit={submitBulkPhotoAudit} />}
     </div>
     <div className="hub-two">
       <DataCard title="Punti e stock" count={data.distributionPoints.length}><a className="public-map-link" href="/mappe" target="_blank" rel="noopener noreferrer">Apri mappa pubblica ↗</a>{data.distributionPoints.length ? data.distributionPoints.map((row) => <div className="hub-list-row" key={String(row.id)}><div><strong>{row.name}</strong><small>{row.address} · {row.island}{Number(row.self_registered) === 1 ? " · registrato da distributore" : ""}</small>{row.next_check_due_at && <small className={isOverdue(row) ? "ai-review" : ""}>{isOverdue(row) ? "Da controllare" : `Controllo entro ${when(row.next_check_due_at)}`}</small>}</div><b className={Number(row.stock) <= Math.max(5, Number(row.capacity) * .15) ? "low-stock" : ""}>{row.stock}/{row.capacity}</b></div>) : <MiniEmpty text="Nessun punto geolocalizzato." />}</DataCard>
@@ -455,6 +501,85 @@ function GeoAuditPanel({ data, user, clients, deliveries, busy, run, submitPhoto
     </div>
     <DataCard title="Controlli ritiro" count={data.deliveryChecks.length}>{data.deliveryChecks.length ? data.deliveryChecks.map((row) => <div className="hub-list-row" key={String(row.id)}><div><strong>{row.point_name}</strong><small>{row.distributor_name ? `${row.distributor_name} · ` : ""}{when(row.created_at)} · distanza {row.geofence_distance_m ?? "—"} m</small></div><b>{row.quantity_found}/{row.quantity_left}</b><span className="module-status">prese {row.quantity_taken}</span></div>) : <MiniEmpty text="Nessun controllo di ritiro registrato." />}</DataCard>
   </div>;
+}
+
+type BulkPhotoRow = { key: string; distributionPointId: string; quantity: string; unit: string; file: File | null; status: "idle" | "ok" | "error"; error?: string };
+
+function BulkPhotoUploadCard({ user, users, distributionPoints, busy, onSubmit }: {
+  user: User;
+  users: User[];
+  distributionPoints: RecordRow[];
+  busy: boolean;
+  onSubmit: (
+    distributorId: string,
+    items: Array<{ distributionPointId: string; quantity: string; unit: string; file: File }>,
+    onProgress: (index: number, status: "ok" | "error", message?: string) => void,
+  ) => Promise<void>;
+}) {
+  const distributors = users.filter((item) => item.role === "distributor");
+  const [distributorId, setDistributorId] = useState("");
+  const [rows, setRows] = useState<BulkPhotoRow[]>([]);
+  const selectedDistributor = distributors.find((item) => item.id === distributorId) ?? null;
+  const points = selectedDistributor ? distributionPoints.filter((row) => row.island === selectedDistributor.island) : distributionPoints;
+
+  function addFiles(files: FileList | null) {
+    if (!files || !files.length) return;
+    setRows((current) => [
+      ...current,
+      ...Array.from(files).map((file) => ({ key: crypto.randomUUID(), distributionPointId: "", quantity: "1", unit: "copie", file, status: "idle" as const })),
+    ]);
+  }
+
+  function updateRow(key: string, patch: Partial<BulkPhotoRow>) {
+    setRows((current) => current.map((row) => (row.key === key ? { ...row, ...patch } : row)));
+  }
+
+  function removeRow(key: string) {
+    setRows((current) => current.filter((row) => row.key !== key));
+  }
+
+  async function handleSubmit() {
+    setRows((current) => current.map((row) => ({ ...row, status: "idle", error: undefined })));
+    await onSubmit(
+      distributorId,
+      rows.map((row) => ({ distributionPointId: row.distributionPointId, quantity: row.quantity, unit: row.unit, file: row.file as File })),
+      (index, status, message) => {
+        setRows((current) => current.map((row, rowIndex) => (rowIndex === index ? { ...row, status, error: message } : row)));
+      },
+    );
+  }
+
+  const ready = rows.length > 0 && rows.every((row) => row.distributionPointId && row.file instanceof File);
+
+  return <ActionCard index="05" title="Carico multiplo" text="Seleziona un distributore e carica più foto di consegna in un'unica operazione, senza impersonazione.">
+    <div className="bulk-upload-form">
+      <select value={distributorId} onChange={(event) => { setDistributorId(event.target.value); setRows([]); }}>
+        <option value="">Seleziona distributore</option>
+        {distributors.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.island}</option>)}
+      </select>
+      {distributorId && <>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+          <span className="primary" style={{ display: "inline-block" }}>+ Aggiungi foto</span>
+          <input type="file" accept="image/jpeg,image/png,image/webp" multiple style={{ display: "none" }} onChange={(event) => { addFiles(event.target.files); event.target.value = ""; }} />
+        </label>
+        {rows.map((row, index) => <div key={row.key} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, padding: "6px 0", borderTop: "1px solid rgba(0,0,0,.08)" }}>
+          <span style={{ minWidth: 18 }}>{index + 1}</span>
+          <small style={{ maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis" }}>{row.file?.name ?? "—"}</small>
+          <select value={row.distributionPointId} onChange={(event) => updateRow(row.key, { distributionPointId: event.target.value })}>
+            <option value="">Punto di distribuzione</option>
+            {points.map((point) => <option key={String(point.id)} value={String(point.id)}>{point.name} · {point.address}</option>)}
+          </select>
+          <input type="number" min="1" max="1000000" value={row.quantity} style={{ width: 70 }} onChange={(event) => updateRow(row.key, { quantity: event.target.value })} placeholder="Quantità" />
+          <input value={row.unit} maxLength={30} style={{ width: 80 }} onChange={(event) => updateRow(row.key, { unit: event.target.value })} placeholder="Unità" />
+          <button type="button" onClick={() => removeRow(row.key)} disabled={busy}>✕</button>
+          {row.status === "ok" && <span style={{ color: "seagreen" }}>✓ caricata</span>}
+          {row.status === "error" && <span style={{ color: "crimson" }} title={row.error}>⚠ {row.error ?? "errore"}</span>}
+        </div>)}
+        <p className="form-microcopy">Ogni foto crea una conferma di consegna attribuita al distributore selezionato, con le coordinate del punto scelto: non serve il GPS di chi carica, perché non è sul posto.</p>
+        <button type="button" className="primary" disabled={busy || !ready} onClick={() => void handleSubmit()}>Carica {rows.length || ""} foto e attribuisci</button>
+      </>}
+    </div>
+  </ActionCard>;
 }
 
 type RouteStop = Delivery & { latitude: number; longitude: number };

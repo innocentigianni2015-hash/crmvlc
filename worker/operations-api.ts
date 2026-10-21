@@ -586,6 +586,7 @@ async function createDeliveryCheck(request: Request, env: RuntimeEnv, user: Oper
   const latitude = requiredCoordinate(form.get("latitude"), -90, 90);
   const longitude = requiredCoordinate(form.get("longitude"), -180, 180);
   const notes = cleanOptional(form.get("notes"), 500);
+  const reminderDays = Math.min(60, Math.max(1, nonNegativeInt(form.get("reminderDays"), 60) || 7));
 
   const point = await env.DB.prepare("SELECT id, island, latitude_e6, longitude_e6 FROM distribution_points WHERE id = ? LIMIT 1").bind(pointId).first<{ id: string; island: string; latitude_e6: number; longitude_e6: number }>();
   if (!point || !canAccessIsland(user, point.island)) throw new OperationsError(404, "point_not_found", "Punto di distribuzione non trovato.");
@@ -605,16 +606,17 @@ async function createDeliveryCheck(request: Request, env: RuntimeEnv, user: Oper
   const key = `distribution-checks/${point.island}/${nowIso.slice(0, 10)}/${id}.${extensionFor(photo.type)}`;
   const watermarkText = `CRMVLC | CONTROLLO | ${point.island} | ${nowIso} | ${latitude.toFixed(6)},${longitude.toFixed(6)} | ${digest.slice(0, 12)}`;
   await env.BUCKET.put(key, bytes, { httpMetadata: { contentType: photo.type, cacheControl: "private, no-store" }, customMetadata: { sha256: digest, watermark: watermarkText, pointId } });
+  const nextCheckDueAt = new Date(now.getTime() + reminderDays * 86_400_000).toISOString();
 
   await env.DB.batch([
     env.DB.prepare(
       "INSERT INTO delivery_checks (id, distribution_point_id, delivery_id, distributor_user_id, island, quantity_left, quantity_found, quantity_taken, r2_key, latitude_e6, longitude_e6, geofence_distance_m, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     ).bind(id, pointId, lastDelivery?.id ?? null, user.id, point.island, quantityLeft, quantityFound, quantityTaken, key, toE6(latitude), toE6(longitude), distanceM, notes, nowIso),
-    env.DB.prepare("UPDATE distribution_points SET next_check_due_at = NULL, updated_at = ? WHERE id = ?").bind(nowIso, pointId),
+    env.DB.prepare("UPDATE distribution_points SET stock = ?, next_check_due_at = ?, updated_at = ? WHERE id = ?").bind(quantityFound, nextCheckDueAt, nowIso, pointId),
   ]);
 
-  await appendOperationsAudit(env, request, user, "delivery_check.created", "delivery_check", id, { pointId, deliveryId: lastDelivery?.id ?? null, quantityLeft, quantityFound, quantityTaken, distanceM });
-  return json({ id, quantityLeft, quantityFound, quantityTaken, geofenceDistanceM: distanceM }, 201);
+  await appendOperationsAudit(env, request, user, "delivery_check.created", "delivery_check", id, { pointId, deliveryId: lastDelivery?.id ?? null, quantityLeft, quantityFound, quantityTaken, distanceM, reminderDays, nextCheckDueAt });
+  return json({ id, quantityLeft, quantityFound, quantityTaken, geofenceDistanceM: distanceM, nextCheckDueAt }, 201);
 }
 
 async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {

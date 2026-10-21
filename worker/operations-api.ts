@@ -25,6 +25,7 @@ const ISLANDS = ["Tenerife", "Gran Canaria", "Lanzarote", "Fuerteventura", "La P
 const MAX_JSON_BYTES = 512_000;
 const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
 const PHOTO_AI_MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct" as const;
+const MAX_GEOFENCE_REJECT_M = 500;
 
 const ISLAND_CENTERS: Record<string, { latitude: number; longitude: number }> = {
   Tenerife: { latitude: 28.2916, longitude: -16.6291 },
@@ -591,6 +592,11 @@ async function createDeliveryCheck(request: Request, env: RuntimeEnv, user: Oper
   const point = await env.DB.prepare("SELECT id, island, latitude_e6, longitude_e6 FROM distribution_points WHERE id = ? LIMIT 1").bind(pointId).first<{ id: string; island: string; latitude_e6: number; longitude_e6: number }>();
   if (!point || !canAccessIsland(user, point.island)) throw new OperationsError(404, "point_not_found", "Punto di distribuzione non trovato.");
 
+  const distanceM = Math.round(haversineMeters(latitude, longitude, point.latitude_e6 / 1_000_000, point.longitude_e6 / 1_000_000));
+  if (distanceM > MAX_GEOFENCE_REJECT_M) {
+    throw new OperationsError(422, "too_far_from_point", `Sei a ${distanceM} m dal punto: troppo lontano per registrare il controllo da qui. Torna sul posto e riprova.`);
+  }
+
   const lastDelivery = await env.DB.prepare(
     "SELECT id, quantity FROM deliveries WHERE distribution_point_id = ? ORDER BY created_at DESC LIMIT 1",
   ).bind(pointId).first<{ id: string; quantity: number }>();
@@ -599,7 +605,6 @@ async function createDeliveryCheck(request: Request, env: RuntimeEnv, user: Oper
 
   const bytes = await photo.arrayBuffer();
   const digest = await sha256(bytes);
-  const distanceM = Math.round(haversineMeters(latitude, longitude, point.latitude_e6 / 1_000_000, point.longitude_e6 / 1_000_000));
   const id = crypto.randomUUID();
   const now = new Date();
   const nowIso = now.toISOString();
@@ -698,6 +703,9 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
   const nearest = delivery.distribution_point_id && delivery.point_latitude_e6 !== null && delivery.point_longitude_e6 !== null
     ? { id: delivery.distribution_point_id, distanceM: Math.round(haversineMeters(latitude, longitude, delivery.point_latitude_e6 / 1_000_000, delivery.point_longitude_e6 / 1_000_000)) }
     : await nearestDistributionPoint(env, delivery.island, latitude, longitude);
+  if (delivery.distribution_point_id && nearest && nearest.distanceM > MAX_GEOFENCE_REJECT_M) {
+    throw new OperationsError(422, "too_far_from_point", `Sei a ${nearest.distanceM} m dal punto: troppo lontano per confermare la consegna da qui. Torna sul posto e riprova.`);
+  }
   const bytes = await photo.arrayBuffer();
   const digest = await sha256(bytes);
   const duplicate = await env.DB.prepare("SELECT id, delivery_id FROM photo_audits WHERE sha256 = ? ORDER BY created_at DESC LIMIT 1").bind(digest).first<{ id: string; delivery_id: string }>();

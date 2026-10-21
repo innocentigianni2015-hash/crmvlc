@@ -309,14 +309,16 @@ export function OperationsHub({ user, clients, users, deliveries, notify }: {
 
   return <section className="ops-page operations-hub">
     <div className="hub-heading">
-      <div><small>CRMVLC · infrastruttura completa</small><h1>Regia operativa</h1><p>Sei moduli con dati reali, audit e separazione per isola.</p></div>
+      {user.role === "distributor"
+        ? <div><small>CRMVLC</small><h1>Le tue consegne</h1><p>Punti vendita, consegne di oggi e rifornimenti.</p></div>
+        : <div><small>CRMVLC · infrastruttura completa</small><h1>Regia operativa</h1><p>Sei moduli con dati reali, audit e separazione per isola.</p></div>}
       <div className="hub-live"><span /> Dati sincronizzati</div>
     </div>
     <div className="hub-tabs" role="tablist" aria-label="Moduli CRMVLC">
-      {TABS.filter(([key]) => user.role !== "distributor" || ["overview", "distribution"].includes(key)).map(([key, label]) => <button key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>{label}</button>)}
+      {TABS.filter(([key]) => user.role !== "distributor" || key === "distribution").map(([key, label]) => <button key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>{label}</button>)}
     </div>
 
-    {tab === "overview" && <Overview data={data} user={user} />}
+    {tab === "overview" && user.role !== "distributor" && <Overview data={data} user={user} />}
     {tab === "vip" && user.role !== "distributor" && <VipPanel data={data} user={user} clients={clients} busy={busy} run={run} />}
     {tab === "finance" && user.role !== "distributor" && <FinancePanel data={data} user={user} busy={busy} run={run} />}
     {tab === "inventory" && user.role !== "distributor" && <InventoryPanel data={data} user={user} busy={busy} run={run} />}

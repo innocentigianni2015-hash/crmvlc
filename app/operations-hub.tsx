@@ -1,1043 +1,748 @@
-type RuntimeEnv = Env & {
-  AI?: Ai;
-  AUTH_SECRET?: string;
-  EMAIL_FROM?: string;
-  WHATSAPP_TOKEN?: string;
-  WHATSAPP_PHONE_NUMBER_ID?: string;
-  STRIPE_SECRET_KEY?: string;
-  MAPS_TOKEN?: string;
-  NEUTRINO_USER_ID?: string;
-  NEUTRINO_API_KEY?: string;
+"use client";
+
+import { FormEvent, useCallback, useEffect, useState } from "react";
+import { loadOfflineSnapshot, prepareDeliveryPhoto, queuePhotoAudit, saveOfflineSnapshot } from "./offline";
+import { localeTag } from "./i18n";
+import { buildGoogleMapsSegments, optimizeDeliveryRoute } from "./delivery-route";
+
+type Role = "super_admin" | "admin" | "sales_manager" | "sales" | "distributor";
+type User = { id: string; name: string; role: Role; island: string | null };
+type Client = { id: string; company_name: string; island: string };
+type Delivery = {
+  id: string; client_company?: string; island: string; status: string; distributor_user_id?: string; distributor_name?: string;
+  scheduled_for?: string | null; quantity?: number; unit?: string; distribution_point_id?: string | null; distribution_point_name?: string | null;
+  distribution_point_address?: string | null; distribution_point_latitude_e6?: number | null; distribution_point_longitude_e6?: number | null;
+};
+type RecordRow = Record<string, string | number | null>;
+
+type Snapshot = {
+  counts: { sponsors: number; vipMembers: number; couponsIssued: number; couponsRedeemed: number; distributionPoints: number; pendingPhotoAudits: number; openSalesTasks: number; availableWalletCents: number };
+  sponsors: RecordRow[];
+  vipMembers: RecordRow[];
+  coupons: RecordRow[];
+  commissionRules: RecordRow[];
+  walletEntries: RecordRow[];
+  payoutRequests: RecordRow[];
+  inventory: RecordRow[];
+  distributionPoints: RecordRow[];
+  photoAudits: RecordRow[];
+  deliveryChecks: RecordRow[];
+  salesCheckins: RecordRow[];
+  salesTasks: RecordRow[];
+  leaderboard: RecordRow[];
+  bundles: RecordRow[];
+  integrations: { email: boolean; whatsapp: boolean; payments: boolean; maps: boolean; photoAi: boolean };
 };
 
-export type OperationsUser = {
-  id: string;
-  email: string;
-  name: string;
-  role: "super_admin" | "admin" | "sales_manager" | "sales" | "distributor";
-  island: string | null;
-  active: number;
-  sessionActor?: { id: string; name: string; email: string; role: "super_admin" | "admin" | "sales_manager" | "sales" | "distributor" };
-  impersonation?: { startedAt: string; expiresAt: string } | null;
-};
+const ISLANDS = ["Tenerife", "Gran Canaria", "Lanzarote", "Fuerteventura", "La Palma"];
+const WHATSAPP_URL = "https://wa.me/34602576044?text=Buongiorno%2C%20contatto%20CRMVLC%20per%20un%27informazione.";
+const TABS = [
+  ["overview", "Regia"],
+  ["vip", "VIP & Sponsor"],
+  ["finance", "Finanza"],
+  ["inventory", "Spazi"],
+  ["distribution", "Geo audit"],
+  ["sales", "Sales Ops"],
+] as const;
 
-const ISLANDS = ["Tenerife", "Gran Canaria", "Lanzarote", "Fuerteventura", "La Palma"] as const;
-const MAX_JSON_BYTES = 512_000;
-const MAX_PHOTO_BYTES = 8 * 1024 * 1024;
-const PHOTO_AI_MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct" as const;
-
-const ISLAND_CENTERS: Record<string, { latitude: number; longitude: number }> = {
-  Tenerife: { latitude: 28.2916, longitude: -16.6291 },
-  "Gran Canaria": { latitude: 27.9202, longitude: -15.5474 },
-  Lanzarote: { latitude: 29.0469, longitude: -13.5899 },
-  Fuerteventura: { latitude: 28.3587, longitude: -14.0537 },
-  "La Palma": { latitude: 28.7134, longitude: -17.9058 },
-};
-
-class OperationsError extends Error {
-  constructor(readonly status: number, readonly code: string, message: string) {
-    super(message);
-  }
+class RequestError extends Error {
+  constructor(message: string, readonly status = 0) { super(message); }
 }
 
-export async function handlePublicOperationsApi(request: Request, env: RuntimeEnv): Promise<Response | null> {
-  const url = new URL(request.url);
-  if (url.pathname !== "/api/public/distribution-points") return null;
-  if (request.method !== "GET") return json({ error: { code: "method_not_allowed", message: "Metodo non consentito." } }, 405);
-  const island = clean(url.searchParams.get("island"), 40);
-  if (island && !isIsland(island)) return json({ error: { code: "invalid_island", message: "Isola non valida." } }, 400);
-  const points = (await env.DB.prepare(
-    `SELECT id, name, island, address, latitude_e6, longitude_e6 FROM distribution_points WHERE public_visible = 1${island ? " AND island = ?" : ""} ORDER BY island, name LIMIT 500`,
-  ).bind(...(island ? [island] : [])).all<{ id: string; name: string; island: string; address: string; latitude_e6: number; longitude_e6: number }>()).results;
-  return new Response(JSON.stringify({
-    points: points.map((point) => ({ ...point, latitude: point.latitude_e6 / 1_000_000, longitude: point.longitude_e6 / 1_000_000, latitude_e6: undefined, longitude_e6: undefined })),
-    islands: ISLANDS,
-  }), { headers: { "content-type": "application/json; charset=utf-8", "cache-control": "public, max-age=300, stale-while-revalidate=3600" } });
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, init);
+  const isJson = (response.headers.get("content-type") ?? "").includes("application/json");
+  const payload = isJson ? await response.json() as { error?: { message?: string } } & T : null;
+  if (!response.ok) throw new RequestError(payload?.error?.message ?? "Operazione non riuscita.", response.status);
+  return payload as T;
 }
 
-export async function handleOperationsApi(
-  request: Request,
-  env: RuntimeEnv,
-  user: OperationsUser,
-): Promise<Response | null> {
-  const url = new URL(request.url);
-  if (!url.pathname.startsWith("/api/operations")) return null;
-
-  try {
-    if (url.pathname === "/api/operations" && request.method === "GET") {
-      return operationsSnapshot(env, user);
-    }
-    if (url.pathname === "/api/operations/sponsors" && request.method === "POST") {
-      return createSponsor(request, env, user);
-    }
-    if (url.pathname === "/api/operations/vip-members" && request.method === "POST") {
-      return createVipMember(request, env, user);
-    }
-    if (url.pathname === "/api/operations/coupons" && request.method === "POST") {
-      return issueCoupon(request, env, user);
-    }
-    if (url.pathname === "/api/operations/coupons/redeem" && request.method === "POST") {
-      return redeemCoupon(request, env, user);
-    }
-    if (url.pathname === "/api/operations/commission-rules" && request.method === "POST") {
-      return createCommissionRule(request, env, user);
-    }
-    if (url.pathname === "/api/operations/payout-requests" && request.method === "POST") {
-      return createPayoutRequest(request, env, user);
-    }
-    if (url.pathname === "/api/operations/payout-requests/review" && request.method === "POST") {
-      return reviewPayoutRequest(request, env, user);
-    }
-    if (url.pathname === "/api/operations/inventory" && request.method === "POST") {
-      return createInventorySlot(request, env, user);
-    }
-    if (url.pathname === "/api/operations/inventory/status" && request.method === "POST") {
-      return updateInventoryStatus(request, env, user);
-    }
-    if (url.pathname === "/api/operations/distribution-points" && request.method === "POST") {
-      return createDistributionPoint(request, env, user);
-    }
-    if (url.pathname === "/api/operations/distribution-points/self-register" && request.method === "POST") {
-      return selfRegisterDistributionPoint(request, env, user);
-    }
-    if (url.pathname === "/api/operations/distribution-points/stock" && request.method === "POST") {
-      return updateDistributionStock(request, env, user);
-    }
-    if (url.pathname === "/api/operations/photo-audits" && request.method === "POST") {
-      return uploadPhotoAudit(request, env, user);
-    }
-    if (url.pathname === "/api/operations/delivery-checks" && request.method === "POST") {
-      return createDeliveryCheck(request, env, user);
-    }
-    if (url.pathname === "/api/operations/photo-audits/review" && request.method === "POST") {
-      return reviewPhotoAudit(request, env, user);
-    }
-    if (url.pathname === "/api/operations/sales-checkins" && request.method === "POST") {
-      return createSalesCheckin(request, env, user);
-    }
-    if (url.pathname === "/api/operations/sales-tasks" && request.method === "POST") {
-      return createSalesTask(request, env, user);
-    }
-    if (url.pathname === "/api/operations/sales-tasks/complete" && request.method === "POST") {
-      return completeSalesTask(request, env, user);
-    }
-    throw new OperationsError(404, "not_found", "Risorsa operativa non trovata.");
-  } catch (error) {
-    if (error instanceof OperationsError) return errorResponse(error);
-    const requestId = request.headers.get("cf-ray") ?? crypto.randomUUID();
-    console.error(JSON.stringify({ level: "error", event: "operations_api_failure", requestId, error: error instanceof Error ? error.message : "unknown" }));
-    return errorResponse(new OperationsError(500, "internal_error", `Errore operativo. Riferimento: ${requestId}`));
-  }
+async function post(path: string, value: Record<string, unknown>) {
+  return request(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
 }
 
-async function operationsSnapshot(env: RuntimeEnv, user: OperationsUser): Promise<Response> {
-  const sponsorScope = scopeFor(user, "s.island", "s.owner_user_id");
-  const islandScope = scopeFor(user, "x.island", null);
-  const couponScope = user.role === "sales"
-    ? { sql: " AND s.owner_user_id = ? AND m.created_by_user_id = ?", values: [user.id, user.id] }
-    : sponsorScope;
-  const financeScope = isGlobalOperator(user)
-    ? { sql: "", values: [] as string[] }
-    : user.role === "sales_manager"
-      ? { sql: " AND u.island = ?", values: [String(user.island)] }
-      : { sql: " AND u.id = ?", values: [user.id] };
-
-  const sponsors = user.role === "distributor"
-    ? (await env.DB.prepare("SELECT s.id, s.name, s.island, s.category, s.status, s.offer_title, s.discount_text, s.address, s.latitude_e6, s.longitude_e6, s.instagram_handle, s.client_id, s.updated_at FROM sponsors s WHERE s.client_id IN (SELECT d.client_id FROM deliveries d WHERE d.distributor_user_id = ?) ORDER BY s.updated_at DESC LIMIT 150").bind(user.id).all()).results
-    : (await env.DB.prepare(`SELECT s.id, s.name, s.island, s.category, s.status, s.offer_title, s.discount_text, s.address, s.latitude_e6, s.longitude_e6, s.instagram_handle, s.client_id, s.updated_at FROM sponsors s WHERE 1 = 1${sponsorScope.sql} ORDER BY s.updated_at DESC LIMIT 150`).bind(...sponsorScope.values).all()).results;
-
-  const vipMembers = user.role === "distributor"
-    ? []
-    : user.role === "sales"
-      ? (await env.DB.prepare(
-        "SELECT x.id, x.name, x.phone, x.island, x.tier, x.streak_months, x.consent_at, x.created_at FROM vip_members x WHERE x.created_by_user_id = ? ORDER BY x.created_at DESC LIMIT 150",
-      ).bind(user.id).all()).results
-      : (await env.DB.prepare(
-        `SELECT x.id, x.name, x.phone, x.island, x.tier, x.streak_months, x.consent_at, x.created_at FROM vip_members x WHERE 1 = 1${islandScope.sql} ORDER BY x.created_at DESC LIMIT 150`,
-      ).bind(...islandScope.values).all()).results;
-
-  const coupons = user.role === "distributor" ? [] : (await env.DB.prepare(
-    `SELECT c.id, c.code, c.status, c.issued_at, c.expires_at, c.redeemed_at, s.name AS sponsor_name, s.island, m.name AS member_name, m.phone AS member_phone FROM coupons c JOIN sponsors s ON s.id = c.sponsor_id JOIN vip_members m ON m.id = c.member_id WHERE 1 = 1${couponScope.sql} ORDER BY c.issued_at DESC LIMIT 200`,
-  ).bind(...couponScope.values).all()).results;
-
-  const commissionRules = user.role === "super_admin" ? (await env.DB.prepare(
-    "SELECT id, name, role, island, rate_bps, active, created_at, updated_at FROM commission_rules ORDER BY active DESC, role, island",
-  ).all()).results : [];
-
-  const walletEntries = (await env.DB.prepare(
-    `SELECT w.id, w.user_id, u.name AS user_name, u.island, w.source_type, w.description, w.amount_cents, w.status, w.available_at, w.created_at FROM wallet_entries w JOIN users u ON u.id = w.user_id WHERE 1 = 1${financeScope.sql} ORDER BY w.created_at DESC LIMIT 200`,
-  ).bind(...financeScope.values).all()).results;
-
-  const payoutRequests = (await env.DB.prepare(
-    `SELECT p.id, p.user_id, u.name AS user_name, u.island, p.amount_cents, p.status, p.note, p.created_at, p.updated_at FROM payout_requests p JOIN users u ON u.id = p.user_id WHERE 1 = 1${financeScope.sql} ORDER BY p.created_at DESC LIMIT 100`,
-  ).bind(...financeScope.values).all()).results;
-
-  const inventoryScope = scopeFor(user, "x.island", null);
-  const inventory = user.role === "distributor" ? [] : (await env.DB.prepare(
-    `SELECT x.id, x.issue_label, x.island, x.slot_code, x.slot_name, x.width_mm, x.height_mm, x.status, x.client_id, c.company_name AS client_company, x.contract_id, x.updated_at FROM ad_inventory x LEFT JOIN clients c ON c.id = x.client_id WHERE 1 = 1${inventoryScope.sql} ORDER BY x.issue_label DESC, x.island, x.slot_code LIMIT 250`,
-  ).bind(...inventoryScope.values).all()).results;
-
-  const nowIsoForDue = new Date().toISOString();
-  const distributionPoints = user.role === "distributor"
-    ? (await env.DB.prepare(
-      "SELECT x.id, x.client_id, c.company_name AS client_company, x.name, x.island, x.address, x.latitude_e6, x.longitude_e6, x.capacity, x.stock, x.public_visible, x.self_registered, x.created_by, x.next_check_due_at, x.updated_at FROM distribution_points x LEFT JOIN clients c ON c.id = x.client_id WHERE x.island = ? AND x.public_visible = 1 ORDER BY (x.next_check_due_at IS NOT NULL AND x.next_check_due_at <= ?) DESC, x.next_check_due_at IS NULL, x.next_check_due_at, x.name LIMIT 300",
-    ).bind(String(user.island ?? ""), nowIsoForDue).all()).results
-    : (await env.DB.prepare(
-      `SELECT x.id, x.client_id, c.company_name AS client_company, x.name, x.island, x.address, x.latitude_e6, x.longitude_e6, x.capacity, x.stock, x.public_visible, x.self_registered, x.created_by, x.next_check_due_at, x.updated_at FROM distribution_points x LEFT JOIN clients c ON c.id = x.client_id WHERE 1 = 1${islandScope.sql} ORDER BY x.island, x.stock, x.name LIMIT 300`,
-    ).bind(...islandScope.values).all()).results;
-
-  const checkScope = isGlobalOperator(user) ? { sql: "", values: [] as string[] }
-    : user.role === "sales_manager" ? { sql: " AND dc.island = ?", values: [String(user.island)] }
-      : { sql: " AND dc.distributor_user_id = ?", values: [user.id] };
-  const deliveryChecks = user.role === "sales" ? [] : (await env.DB.prepare(
-    `SELECT dc.id, dc.distribution_point_id, p.name AS point_name, dc.distributor_user_id, u.name AS distributor_name, dc.delivery_id, dc.island, dc.quantity_left, dc.quantity_found, dc.quantity_taken, dc.geofence_distance_m, dc.notes, dc.created_at FROM delivery_checks dc JOIN distribution_points p ON p.id = dc.distribution_point_id JOIN users u ON u.id = dc.distributor_user_id WHERE 1 = 1${checkScope.sql} ORDER BY dc.created_at DESC LIMIT 150`,
-  ).bind(...checkScope.values).all()).results;
-
-  const auditScope = isGlobalOperator(user) ? { sql: "", values: [] as string[] }
-    : user.role === "sales_manager" ? { sql: " AND p.island = ?", values: [String(user.island)] }
-      : { sql: " AND p.distributor_user_id = ?", values: [user.id] };
-  const photoAudits = user.role === "sales" ? [] : (await env.DB.prepare(
-    `SELECT p.id, p.delivery_id, p.distributor_user_id, u.name AS distributor_name, p.island, p.sha256, p.latitude_e6, p.longitude_e6, p.geofence_distance_m, p.status, p.quality_score, p.duplicate_of_audit_id, p.ai_model, p.ai_verdict, p.ai_result_json, p.watermark_text, p.created_at, p.reviewed_at FROM photo_audits p JOIN users u ON u.id = p.distributor_user_id WHERE 1 = 1${auditScope.sql} ORDER BY p.created_at DESC LIMIT 150`,
-  ).bind(...auditScope.values).all()).results;
-
-  const salesScope = isGlobalOperator(user) ? { sql: "", values: [] as string[] }
-    : user.role === "sales_manager" ? { sql: " AND x.island = ?", values: [String(user.island)] }
-      : { sql: " AND x.user_id = ?", values: [user.id] };
-  const salesCheckins = user.role === "distributor" ? [] : (await env.DB.prepare(
-    `SELECT x.id, x.user_id, u.name AS user_name, x.island, x.latitude_e6, x.longitude_e6, x.checked_in_at, x.status FROM sales_checkins x JOIN users u ON u.id = x.user_id WHERE 1 = 1${salesScope.sql} ORDER BY x.checked_in_at DESC LIMIT 120`,
-  ).bind(...salesScope.values).all()).results;
-  const salesTasks = user.role === "distributor" ? [] : (await env.DB.prepare(
-    `SELECT x.id, x.user_id, u.name AS user_name, x.client_id, c.company_name AS client_company, x.island, x.kind, x.title, x.status, x.scheduled_for, x.completed_at, x.updated_at FROM sales_tasks x JOIN users u ON u.id = x.user_id LEFT JOIN clients c ON c.id = x.client_id WHERE 1 = 1${salesScope.sql} ORDER BY CASE x.status WHEN 'open' THEN 0 ELSE 1 END, x.scheduled_for LIMIT 200`,
-  ).bind(...salesScope.values).all()).results;
-
-  const leaderboard = user.role === "distributor" ? [] : (await env.DB.prepare(
-    `SELECT u.id AS user_id, u.name AS user_name, u.island, COUNT(CASE WHEN c.stage = 'won' THEN 1 END) AS won_count, COALESCE(SUM(CASE WHEN c.stage = 'won' THEN c.value_cents ELSE 0 END), 0) AS won_value_cents FROM users u LEFT JOIN clients c ON c.owner_user_id = u.id AND c.archived_at IS NULL WHERE u.active = 1 AND u.role IN ('sales_manager','sales')${isGlobalOperator(user) ? "" : user.role === "sales_manager" ? " AND u.island = ?" : " AND u.id = ?"} GROUP BY u.id, u.name, u.island ORDER BY won_value_cents DESC, won_count DESC LIMIT 30`,
-  ).bind(...(isGlobalOperator(user) ? [] : user.role === "sales_manager" ? [String(user.island)] : [user.id])).all()).results;
-
-  const bundles = user.role === "distributor" ? [] : (await env.DB.prepare(
-    "SELECT id, code, name, description, monthly_price_cents, active FROM bundles WHERE active = 1 ORDER BY monthly_price_cents",
-  ).all()).results;
-
-  const counts = {
-    sponsors: sponsors.length,
-    vipMembers: vipMembers.length,
-    couponsIssued: coupons.filter((item) => String(item.status) === "issued").length,
-    couponsRedeemed: coupons.filter((item) => String(item.status) === "redeemed").length,
-    distributionPoints: distributionPoints.length,
-    pendingPhotoAudits: photoAudits.filter((item) => String(item.status) === "pending").length,
-    openSalesTasks: salesTasks.filter((item) => String(item.status) === "open").length,
-    availableWalletCents: walletEntries.filter((item) => String(item.status) === "available").reduce((sum, item) => sum + Number(item.amount_cents), 0),
-  };
-
-  return json({
-    counts,
-    sponsors,
-    vipMembers,
-    coupons,
-    commissionRules,
-    walletEntries,
-    payoutRequests,
-    inventory,
-    distributionPoints,
-    photoAudits,
-    deliveryChecks,
-    salesCheckins,
-    salesTasks,
-    leaderboard,
-    bundles,
-    integrations: {
-      email: Boolean(env.EMAIL && env.EMAIL_FROM),
-      whatsapp: true,
-      payments: Boolean(env.STRIPE_SECRET_KEY),
-      maps: true,
-      photoAi: Boolean(env.AI),
-    },
-  });
+function euros(cents: number) {
+  return new Intl.NumberFormat(localeTag(), { style: "currency", currency: "EUR" }).format(cents / 100);
 }
 
-async function createSponsor(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
-  requireManager(user);
-  if (!env.AUTH_SECRET) throw new OperationsError(503, "auth_secret_missing", "La chiave di sicurezza non è configurata.");
-  const body = await readJson<Record<string, unknown>>(request);
-  const name = clean(body.name, 120);
-  const requestedIsland = clean(body.island, 40);
-  const island = isGlobalOperator(user) ? requestedIsland : String(user.island ?? "");
-  const category = clean(body.category, 80);
-  const offerTitle = clean(body.offerTitle, 160);
-  const discountText = clean(body.discountText, 160);
-  const merchantPin = clean(body.merchantPin, 4);
-  if (!name || !isIsland(island) || !category || !offerTitle || !discountText || !/^\d{4}$/.test(merchantPin)) {
-    throw new OperationsError(400, "invalid_sponsor", "Compila sponsor, isola, categoria, offerta, vantaggio e PIN commerciante di 4 cifre.");
-  }
-  const ownerUserId = clean(body.ownerUserId, 80) || user.id;
-  const clientId = cleanOptional(body.clientId, 80);
-  if (clientId) await assertClientScope(env, user, clientId, island);
-  const id = crypto.randomUUID();
-  const now = new Date().toISOString();
-  const merchantPinHash = await sha256(`${env.AUTH_SECRET}\n${id}\n${merchantPin}`);
-  const latitude = optionalCoordinate(body.latitude, -90, 90);
-  const longitude = optionalCoordinate(body.longitude, -180, 180);
-  await env.DB.prepare("INSERT INTO sponsors (id, client_id, name, island, category, status, offer_title, discount_text, merchant_pin_hash, address, latitude_e6, longitude_e6, instagram_handle, owner_user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-    .bind(id, clientId, name, island, category, offerTitle, discountText, merchantPinHash, cleanOptional(body.address, 260), toE6(latitude), toE6(longitude), cleanOptional(body.instagramHandle, 80), ownerUserId, now, now).run();
-  await appendOperationsAudit(env, request, user, "sponsor.created", "sponsor", id, { name, island, category });
-  return json({ id }, 201);
+function when(value: unknown) {
+  if (!value) return "—";
+  return new Intl.DateTimeFormat(localeTag(), { dateStyle: "short", timeStyle: "short" }).format(new Date(String(value)));
 }
 
-async function createVipMember(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
-  if (user.role === "distributor") throw new OperationsError(403, "not_allowed", "Il Distributore non gestisce gli iscritti VIP.");
-  const body = await readJson<Record<string, unknown>>(request);
-  const name = clean(body.name, 120);
-  const phone = normalizePhone(body.phone);
-  const requestedIsland = clean(body.island, 40);
-  const island = isGlobalOperator(user) ? requestedIsland : String(user.island ?? "");
-  if (!name || phone.length < 8 || !isIsland(island) || body.consent !== true) {
-    throw new OperationsError(400, "invalid_member", "Nome, WhatsApp, isola e consenso sono obbligatori.");
-  }
-  const id = crypto.randomUUID();
-  const now = new Date().toISOString();
-  try {
-    await env.DB.prepare("INSERT INTO vip_members (id, name, phone, island, tier, streak_months, consent_at, created_by_user_id, created_at) VALUES (?, ?, ?, ?, 'standard', 0, ?, ?, ?)")
-      .bind(id, name, phone, island, now, user.id, now).run();
-  } catch (error) {
-    if (String(error).includes("UNIQUE")) throw new OperationsError(409, "member_exists", "Questo numero WhatsApp è già registrato.");
-    throw error;
-  }
-  await appendOperationsAudit(env, request, user, "vip_member.created", "vip_member", id, { island, phoneSuffix: phone.slice(-4) });
-  return json({ id }, 201);
-}
+export function OperationsHub({ user, clients, users, deliveries, notify }: {
+  user: User;
+  clients: Client[];
+  users: User[];
+  deliveries: Delivery[];
+  notify: (text: string, tone?: "ok" | "error") => void;
+}) {
+  const [data, setData] = useState<Snapshot | null>(null);
+  const [tab, setTab] = useState<(typeof TABS)[number][0]>(user.role === "distributor" ? "distribution" : "overview");
+  const [busy, setBusy] = useState(false);
 
-async function issueCoupon(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
-  if (user.role === "distributor") throw new OperationsError(403, "not_allowed", "Il Distributore non può emettere coupon.");
-  const body = await readJson<Record<string, unknown>>(request);
-  const sponsorId = clean(body.sponsorId, 80);
-  const memberId = clean(body.memberId, 80);
-  const sponsor = await getSponsor(env, sponsorId);
-  const member = await env.DB.prepare("SELECT id, island, created_by_user_id FROM vip_members WHERE id = ? LIMIT 1").bind(memberId).first<{ id: string; island: string; created_by_user_id: string | null }>();
-  if (!sponsor || !member || !canAccessIsland(user, sponsor.island) || !canAccessIsland(user, member.island)) {
-    throw new OperationsError(404, "coupon_subject_not_found", "Sponsor o membro VIP non disponibile nel tuo perimetro.");
-  }
-  if (user.role === "sales" && (sponsor.owner_user_id !== user.id || member.created_by_user_id !== user.id)) {
-    throw new OperationsError(404, "coupon_subject_not_found", "Sponsor o membro VIP non disponibile nel tuo perimetro.");
-  }
-  const id = crypto.randomUUID();
-  const code = secureCode();
-  const now = new Date();
-  const expiresAt = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
-  await env.DB.prepare("INSERT INTO coupons (id, member_id, sponsor_id, code, status, issued_at, expires_at) VALUES (?, ?, ?, ?, 'issued', ?, ?)")
-    .bind(id, member.id, sponsor.id, code, now.toISOString(), expiresAt).run();
-  await appendOperationsAudit(env, request, user, "coupon.issued", "coupon", id, { sponsorId, memberId, code });
-  return json({ id, code, expiresAt }, 201);
-}
-
-async function redeemCoupon(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
-  if (!env.AUTH_SECRET) throw new OperationsError(503, "auth_secret_missing", "La chiave di sicurezza non è configurata.");
-  const body = await readJson<Record<string, unknown>>(request);
-  const code = clean(body.code, 20).toUpperCase();
-  const merchantPin = clean(body.merchantPin, 4);
-  const row = await env.DB.prepare("SELECT c.id, c.status, c.expires_at, c.sponsor_id, s.island, s.client_id, s.merchant_pin_hash FROM coupons c JOIN sponsors s ON s.id = c.sponsor_id WHERE c.code = ? LIMIT 1")
-    .bind(code).first<{ id: string; status: string; expires_at: string; sponsor_id: string; island: string; client_id: string | null; merchant_pin_hash: string }>();
-  if (!row || !canAccessIsland(user, row.island)) throw new OperationsError(404, "coupon_not_found", "Coupon non trovato.");
-  if (row.status !== "issued" || Date.parse(row.expires_at) <= Date.now()) throw new OperationsError(409, "coupon_not_redeemable", "Coupon già usato o scaduto.");
-  if (user.role === "distributor" && row.client_id) {
-    const linked = await env.DB.prepare("SELECT 1 AS ok FROM deliveries WHERE distributor_user_id = ? AND client_id = ? LIMIT 1").bind(user.id, row.client_id).first();
-    if (!linked) throw new OperationsError(403, "not_allowed", "Sponsor non collegato alle tue consegne.");
-  }
-  const candidate = await sha256(`${env.AUTH_SECRET}\n${row.sponsor_id}\n${merchantPin}`);
-  if (!timingSafeHex(candidate, row.merchant_pin_hash)) throw new OperationsError(403, "invalid_merchant_pin", "PIN commerciante non valido.");
-  const now = new Date().toISOString();
-  const latitude = optionalCoordinate(body.latitude, -90, 90);
-  const longitude = optionalCoordinate(body.longitude, -180, 180);
-  const result = await env.DB.prepare("UPDATE coupons SET status = 'redeemed', redeemed_at = ?, redeemed_by_user_id = ?, latitude_e6 = ?, longitude_e6 = ? WHERE id = ? AND status = 'issued'")
-    .bind(now, user.id, toE6(latitude), toE6(longitude), row.id).run();
-  if (Number(result.meta.changes ?? 0) !== 1) throw new OperationsError(409, "coupon_race", "Coupon già utilizzato.");
-  await appendOperationsAudit(env, request, user, "coupon.redeemed", "coupon", row.id, { sponsorId: row.sponsor_id, latitude, longitude });
-  return json({ ok: true, redeemedAt: now });
-}
-
-async function createCommissionRule(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
-  requireSuperAdmin(user);
-  const body = await readJson<Record<string, unknown>>(request);
-  const name = clean(body.name, 120);
-  const role = clean(body.role, 30);
-  const island = cleanOptional(body.island, 40);
-  const ratePercent = Number(body.ratePercent);
-  if (!name || !["sales_manager", "sales", "distributor"].includes(role) || (island && !isIsland(island)) || !Number.isFinite(ratePercent) || ratePercent < 0 || ratePercent > 100) {
-    throw new OperationsError(400, "invalid_commission", "Regola commissione non valida.");
-  }
-  const id = crypto.randomUUID();
-  const now = new Date().toISOString();
-  await env.DB.prepare("INSERT INTO commission_rules (id, name, role, island, rate_bps, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)")
-    .bind(id, name, role, island, Math.round(ratePercent * 100), now, now).run();
-  await appendOperationsAudit(env, request, user, "commission_rule.created", "commission_rule", id, { name, role, island, ratePercent });
-  return json({ id }, 201);
-}
-
-async function createPayoutRequest(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
-  const body = await readJson<Record<string, unknown>>(request);
-  const amountCents = Math.round(Number(body.amountEuros) * 100);
-  if (!Number.isInteger(amountCents) || amountCents < 1000 || amountCents > 10_000_000) throw new OperationsError(400, "invalid_amount", "Richiedi almeno 10 € con un importo valido.");
-  const balance = await env.DB.prepare("SELECT COALESCE(SUM(amount_cents), 0) AS cents FROM wallet_entries WHERE user_id = ? AND status = 'available'").bind(user.id).first<{ cents: number }>();
-  const reserved = await env.DB.prepare("SELECT COALESCE(SUM(amount_cents), 0) AS cents FROM payout_requests WHERE user_id = ? AND status IN ('requested','approved')").bind(user.id).first<{ cents: number }>();
-  if (amountCents > Number(balance?.cents ?? 0) - Number(reserved?.cents ?? 0)) throw new OperationsError(409, "insufficient_wallet", "Saldo disponibile insufficiente.");
-  const id = crypto.randomUUID();
-  const now = new Date().toISOString();
-  await env.DB.prepare("INSERT INTO payout_requests (id, user_id, amount_cents, status, note, created_at, updated_at) VALUES (?, ?, ?, 'requested', ?, ?, ?)")
-    .bind(id, user.id, amountCents, cleanOptional(body.note, 300), now, now).run();
-  await appendOperationsAudit(env, request, user, "payout.requested", "payout_request", id, { amountCents });
-  return json({ id }, 201);
-}
-
-async function reviewPayoutRequest(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
-  requireSuperAdmin(user);
-  const body = await readJson<Record<string, unknown>>(request);
-  const id = clean(body.id, 80);
-  const status = clean(body.status, 20);
-  if (!["approved", "paid", "rejected"].includes(status)) throw new OperationsError(400, "invalid_status", "Stato pagamento non valido.");
-  const current = await env.DB.prepare("SELECT id, user_id, amount_cents, status FROM payout_requests WHERE id = ? LIMIT 1").bind(id).first<{ id: string; user_id: string; amount_cents: number; status: string }>();
-  if (!current || !["requested", "approved"].includes(current.status)) throw new OperationsError(409, "payout_not_reviewable", "Richiesta non disponibile.");
-  const now = new Date().toISOString();
-  const statements = [env.DB.prepare("UPDATE payout_requests SET status = ?, reviewed_by = ?, updated_at = ? WHERE id = ? AND status = ?").bind(status, user.id, now, id, current.status)];
-  if (status === "paid") {
-    statements.push(env.DB.prepare("INSERT INTO wallet_entries (id, user_id, source_type, source_id, description, amount_cents, status, available_at, created_at) VALUES (?, ?, 'payout', ?, 'Liquidazione commissioni', ?, 'paid', ?, ?)")
-      .bind(crypto.randomUUID(), current.user_id, current.id, -current.amount_cents, now, now));
-  }
-  await env.DB.batch(statements);
-  await appendOperationsAudit(env, request, user, `payout.${status}`, "payout_request", id, { amountCents: current.amount_cents });
-  return json({ ok: true });
-}
-
-async function createInventorySlot(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
-  requireManager(user);
-  const body = await readJson<Record<string, unknown>>(request);
-  const requestedIsland = clean(body.island, 40);
-  const island = isGlobalOperator(user) ? requestedIsland : String(user.island ?? "");
-  const issueLabel = clean(body.issueLabel, 80);
-  const slotCode = clean(body.slotCode, 40).toUpperCase();
-  const slotName = clean(body.slotName, 120);
-  const widthMm = positiveInt(body.widthMm, 1000);
-  const heightMm = positiveInt(body.heightMm, 1000);
-  if (!isIsland(island) || !issueLabel || !slotCode || !slotName) throw new OperationsError(400, "invalid_inventory", "Dati dello spazio pubblicitario incompleti.");
-  const id = crypto.randomUUID();
-  const now = new Date().toISOString();
-  await env.DB.prepare("INSERT INTO ad_inventory (id, issue_label, island, slot_code, slot_name, width_mm, height_mm, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'available', ?, ?)")
-    .bind(id, issueLabel, island, slotCode, slotName, widthMm, heightMm, now, now).run();
-  await appendOperationsAudit(env, request, user, "inventory.created", "ad_inventory", id, { issueLabel, island, slotCode });
-  return json({ id }, 201);
-}
-
-async function updateInventoryStatus(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
-  requireManager(user);
-  const body = await readJson<Record<string, unknown>>(request);
-  const id = clean(body.id, 80);
-  const status = clean(body.status, 20);
-  if (!["available", "held", "sold"].includes(status)) throw new OperationsError(400, "invalid_status", "Stato spazio non valido.");
-  const row = await env.DB.prepare("SELECT id, island FROM ad_inventory WHERE id = ? LIMIT 1").bind(id).first<{ id: string; island: string }>();
-  if (!row || !canAccessIsland(user, row.island)) throw new OperationsError(404, "inventory_not_found", "Spazio non trovato.");
-  const now = new Date().toISOString();
-  await env.DB.prepare("UPDATE ad_inventory SET status = ?, client_id = ?, contract_id = ?, updated_at = ? WHERE id = ?")
-    .bind(status, cleanOptional(body.clientId, 80), cleanOptional(body.contractId, 80), now, id).run();
-  await appendOperationsAudit(env, request, user, "inventory.updated", "ad_inventory", id, { status });
-  return json({ ok: true });
-}
-
-async function createDistributionPoint(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
-  requireManager(user);
-  const body = await readJson<Record<string, unknown>>(request);
-  const requestedIsland = clean(body.island, 40);
-  const island = isGlobalOperator(user) ? requestedIsland : String(user.island ?? "");
-  const name = clean(body.name, 120);
-  const address = clean(body.address, 260);
-  const latitude = requiredCoordinate(body.latitude, -90, 90);
-  const longitude = requiredCoordinate(body.longitude, -180, 180);
-  const capacity = nonNegativeInt(body.capacity, 1_000_000);
-  const stock = nonNegativeInt(body.stock, 1_000_000);
-  if (!isIsland(island) || !name || !address) throw new OperationsError(400, "invalid_point", "Nome, isola, indirizzo e coordinate sono obbligatori.");
-  const clientId = cleanOptional(body.clientId, 80);
-  if (clientId) await assertClientScope(env, user, clientId, island);
-  const id = crypto.randomUUID();
-  const now = new Date().toISOString();
-  await env.DB.prepare("INSERT INTO distribution_points (id, client_id, name, island, address, latitude_e6, longitude_e6, capacity, stock, public_visible, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-    .bind(id, clientId, name, island, address, toE6(latitude), toE6(longitude), capacity, stock, body.publicVisible === false ? 0 : 1, now, now).run();
-  await appendOperationsAudit(env, request, user, "distribution_point.created", "distribution_point", id, { name, island, stock });
-  return json({ id }, 201);
-}
-
-async function updateDistributionStock(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
-  if (!["super_admin", "admin", "sales_manager", "distributor"].includes(user.role)) throw new OperationsError(403, "not_allowed", "Non puoi modificare le giacenze.");
-  const body = await readJson<Record<string, unknown>>(request);
-  const id = clean(body.id, 80);
-  const stock = nonNegativeInt(body.stock, 1_000_000);
-  const row = await env.DB.prepare("SELECT id, island FROM distribution_points WHERE id = ? LIMIT 1").bind(id).first<{ id: string; island: string }>();
-  if (!row || !canAccessIsland(user, row.island)) throw new OperationsError(404, "point_not_found", "Punto distribuzione non trovato.");
-  if (user.role === "distributor") {
-    const assigned = await env.DB.prepare(
-      "SELECT 1 AS ok FROM deliveries WHERE distributor_user_id = ? AND distribution_point_id = ? LIMIT 1",
-    ).bind(user.id, row.id).first();
-    if (!assigned) throw new OperationsError(404, "point_not_found", "Punto distribuzione non trovato.");
-  }
-  const now = new Date().toISOString();
-  await env.DB.prepare("UPDATE distribution_points SET stock = ?, updated_at = ? WHERE id = ?").bind(stock, now, id).run();
-  await appendOperationsAudit(env, request, user, "distribution_point.stock_updated", "distribution_point", id, { stock });
-  return json({ ok: true });
-}
-
-async function geocodeAddress(env: RuntimeEnv, address: string, island: string): Promise<{ latitude: number; longitude: number; formattedAddress: string; locationType: string } | null> {
-  if (!env.NEUTRINO_USER_ID || !env.NEUTRINO_API_KEY) return null;
-  try {
-    const query = `${address}, ${island}, Islas Canarias, España`;
-    const response = await fetch("https://neutrinoapi.net/geocode-address", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "User-ID": env.NEUTRINO_USER_ID,
-        "API-Key": env.NEUTRINO_API_KEY,
-      },
-      body: new URLSearchParams({ address: query, "country-code": "ES", "fuzzy-search": "true" }).toString(),
-    });
-    if (!response.ok) return null;
-    const payload = await response.json<{ found: number; locations: Array<{ latitude: number; longitude: number; address: string; "location-type": string }> }>();
-    if (!payload.found || !payload.locations?.length) return null;
-    const best = payload.locations[0];
-    return { latitude: best.latitude, longitude: best.longitude, formattedAddress: best.address, locationType: best["location-type"] };
-  } catch (error) {
-    console.error(JSON.stringify({ level: "error", event: "geocode_failed", error: error instanceof Error ? error.message : "unknown" }));
-    return null;
-  }
-}
-
-async function selfRegisterDistributionPoint(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
-  if (!env.BUCKET) throw new OperationsError(503, "storage_missing", "Archivio fotografico non configurato.");
-  if (user.role !== "distributor" || !user.island) throw new OperationsError(403, "not_allowed", "La registrazione di un nuovo punto è riservata ai Distributori.");
-  const length = Number(request.headers.get("content-length") ?? 0);
-  if (length > MAX_PHOTO_BYTES + 256_000) throw new OperationsError(413, "photo_too_large", "La foto supera 8 MB.");
-  if (!(request.headers.get("content-type") ?? "").includes("multipart/form-data")) throw new OperationsError(415, "form_required", "Invia nome, foto e coordinate del punto.");
-  const form = await request.formData();
-  const photo = form.get("photo");
-  if (!(photo instanceof File) || photo.size === 0 || photo.size > MAX_PHOTO_BYTES || !["image/jpeg", "image/png", "image/webp"].includes(photo.type)) {
-    throw new OperationsError(400, "invalid_photo", "Carica una foto JPG, PNG o WebP fino a 8 MB.");
-  }
-  const name = clean(form.get("name"), 120);
-  const address = clean(form.get("address"), 260);
-  const latitude = requiredCoordinate(form.get("latitude"), -90, 90);
-  const longitude = requiredCoordinate(form.get("longitude"), -180, 180);
-  const quantity = positiveInt(form.get("quantity"), 1_000_000);
-  const unit = clean(form.get("unit"), 30) || "copie";
-  const reminderDays = Math.min(60, Math.max(1, nonNegativeInt(form.get("reminderDays"), 60) || 7));
-  if (!name || !address) throw new OperationsError(400, "invalid_point", "Nome e indirizzo del punto sono obbligatori.");
-
-  const geocode = await geocodeAddress(env, address, user.island);
-  const addressVerified = geocode !== null;
-  const addressDistanceM = geocode ? Math.round(haversineMeters(latitude, longitude, geocode.latitude, geocode.longitude)) : null;
-  const addressMismatch = addressDistanceM !== null && addressDistanceM > 600;
-
-  const bytes = await photo.arrayBuffer();
-  const digest = await sha256(bytes);
-  const duplicate = await env.DB.prepare("SELECT id, delivery_id FROM photo_audits WHERE sha256 = ? ORDER BY created_at DESC LIMIT 1").bind(digest).first<{ id: string; delivery_id: string }>();
-  const pointId = crypto.randomUUID();
-  const deliveryId = crypto.randomUUID();
-  const auditId = crypto.randomUUID();
-  const now = new Date();
-  const nowIso = now.toISOString();
-  const key = `distribution-points/${user.island}/${nowIso.slice(0, 10)}/${pointId}.${extensionFor(photo.type)}`;
-  const watermarkText = `CRMVLC | NUOVO PUNTO | ${user.island} | ${nowIso} | ${latitude.toFixed(6)},${longitude.toFixed(6)} | ${digest.slice(0, 12)}`;
-  const aiAnalysis = await analyzeDeliveryPhoto(env, bytes, photo.type, {
-    quantity,
-    unit,
-    pointName: name,
-    pointAddress: address,
-    geofenceDistanceM: 0,
-    exactDuplicate: Boolean(duplicate),
-  }, null);
-  if (addressMismatch || !addressVerified) aiAnalysis.verdict = "review_required";
-  if (addressMismatch) aiAnalysis.reasons = [`Indirizzo digitato a ${addressDistanceM} m dalla posizione GPS rilevata dal geocoding.`, ...aiAnalysis.reasons].slice(0, 4);
-  else if (!addressVerified) aiAnalysis.reasons = ["Indirizzo non verificabile tramite geocoding: revisione manuale consigliata.", ...aiAnalysis.reasons].slice(0, 4);
-  await env.BUCKET.put(key, bytes, { httpMetadata: { contentType: photo.type, cacheControl: "private, no-store" }, customMetadata: { sha256: digest, watermark: watermarkText, pointId, deliveryId } });
-  const nextCheckDueAt = new Date(now.getTime() + reminderDays * 86_400_000).toISOString();
-
-  await env.DB.batch([
-    env.DB.prepare(
-      "INSERT INTO distribution_points (id, client_id, name, island, address, latitude_e6, longitude_e6, capacity, stock, public_visible, created_at, updated_at, created_by, self_registered, point_photo_r2_key, next_check_due_at) VALUES (?, NULL, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?, ?, 1, ?, ?)",
-    ).bind(pointId, name, user.island, address, toE6(latitude), toE6(longitude), quantity, nowIso, nowIso, user.id, key, nextCheckDueAt),
-    env.DB.prepare(
-      "INSERT INTO deliveries (id, client_id, distributor_user_id, distribution_point_id, island, status, quantity, unit, scheduled_for, delivery_contact_name, delivery_contact_email, delivery_contact_phone, delivery_address, notes, version, created_by, completed_at, created_at, updated_at) VALUES (?, NULL, ?, ?, ?, 'delivered', ?, ?, ?, NULL, NULL, NULL, ?, ?, 1, ?, ?, ?, ?)",
-    ).bind(deliveryId, user.id, pointId, user.island, quantity, unit, canaryDateKey(now), address, "Punto registrato e prima consegna dal Distributore.", user.id, nowIso, nowIso, nowIso),
-    env.DB.prepare(
-      "INSERT INTO photo_audits (id, delivery_id, distributor_user_id, island, r2_key, sha256, latitude_e6, longitude_e6, geofence_distance_m, status, quality_score, duplicate_of_audit_id, ai_model, ai_verdict, ai_result_json, watermark_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', ?, ?, ?, ?, ?, ?, ?)",
-    ).bind(auditId, deliveryId, user.id, user.island, key, digest, toE6(latitude), toE6(longitude), aiAnalysis.qualityScore, duplicate?.id ?? null, aiAnalysis.model, aiAnalysis.verdict, JSON.stringify(aiAnalysis), watermarkText, nowIso),
-  ]);
-
-  await appendOperationsAudit(env, request, user, "distribution_point.self_registered", "distribution_point", pointId, { name, address, quantity, unit, reminderDays, deliveryId, duplicateOfAuditId: duplicate?.id ?? null, addressVerified, addressDistanceM, geocodedAddress: geocode?.formattedAddress ?? null });
-  return json({ id: pointId, deliveryId, auditId, nextCheckDueAt, addressVerified, addressDistanceM, geocodedAddress: geocode?.formattedAddress ?? null, addressMismatch }, 201);
-}
-
-async function createDeliveryCheck(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
-  if (!env.BUCKET) throw new OperationsError(503, "storage_missing", "Archivio fotografico non configurato.");
-  if (user.role !== "distributor" || !user.island) throw new OperationsError(403, "not_allowed", "Il controllo di un punto è riservato ai Distributori.");
-  const length = Number(request.headers.get("content-length") ?? 0);
-  if (length > MAX_PHOTO_BYTES + 256_000) throw new OperationsError(413, "photo_too_large", "La foto supera 8 MB.");
-  if (!(request.headers.get("content-type") ?? "").includes("multipart/form-data")) throw new OperationsError(415, "form_required", "Invia foto e coordinate del controllo.");
-  const form = await request.formData();
-  const photo = form.get("photo");
-  if (!(photo instanceof File) || photo.size === 0 || photo.size > MAX_PHOTO_BYTES || !["image/jpeg", "image/png", "image/webp"].includes(photo.type)) {
-    throw new OperationsError(400, "invalid_photo", "Carica una foto JPG, PNG o WebP fino a 8 MB.");
-  }
-  const pointId = clean(form.get("distributionPointId"), 80);
-  const quantityFound = nonNegativeInt(form.get("quantityFound"), 1_000_000);
-  const latitude = requiredCoordinate(form.get("latitude"), -90, 90);
-  const longitude = requiredCoordinate(form.get("longitude"), -180, 180);
-  const notes = cleanOptional(form.get("notes"), 500);
-  const reminderDays = Math.min(60, Math.max(1, nonNegativeInt(form.get("reminderDays"), 60) || 7));
-
-  const point = await env.DB.prepare("SELECT id, island, latitude_e6, longitude_e6 FROM distribution_points WHERE id = ? LIMIT 1").bind(pointId).first<{ id: string; island: string; latitude_e6: number; longitude_e6: number }>();
-  if (!point || !canAccessIsland(user, point.island)) throw new OperationsError(404, "point_not_found", "Punto di distribuzione non trovato.");
-
-  const lastDelivery = await env.DB.prepare(
-    "SELECT id, quantity FROM deliveries WHERE distribution_point_id = ? ORDER BY created_at DESC LIMIT 1",
-  ).bind(pointId).first<{ id: string; quantity: number }>();
-  const quantityLeft = lastDelivery?.quantity ?? 0;
-  const quantityTaken = Math.max(0, quantityLeft - quantityFound);
-
-  const bytes = await photo.arrayBuffer();
-  const digest = await sha256(bytes);
-  const distanceM = Math.round(haversineMeters(latitude, longitude, point.latitude_e6 / 1_000_000, point.longitude_e6 / 1_000_000));
-  const id = crypto.randomUUID();
-  const now = new Date();
-  const nowIso = now.toISOString();
-  const key = `distribution-checks/${point.island}/${nowIso.slice(0, 10)}/${id}.${extensionFor(photo.type)}`;
-  const watermarkText = `CRMVLC | CONTROLLO | ${point.island} | ${nowIso} | ${latitude.toFixed(6)},${longitude.toFixed(6)} | ${digest.slice(0, 12)}`;
-  await env.BUCKET.put(key, bytes, { httpMetadata: { contentType: photo.type, cacheControl: "private, no-store" }, customMetadata: { sha256: digest, watermark: watermarkText, pointId } });
-  const nextCheckDueAt = new Date(now.getTime() + reminderDays * 86_400_000).toISOString();
-
-  await env.DB.batch([
-    env.DB.prepare(
-      "INSERT INTO delivery_checks (id, distribution_point_id, delivery_id, distributor_user_id, island, quantity_left, quantity_found, quantity_taken, r2_key, latitude_e6, longitude_e6, geofence_distance_m, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    ).bind(id, pointId, lastDelivery?.id ?? null, user.id, point.island, quantityLeft, quantityFound, quantityTaken, key, toE6(latitude), toE6(longitude), distanceM, notes, nowIso),
-    env.DB.prepare("UPDATE distribution_points SET stock = ?, next_check_due_at = ?, updated_at = ? WHERE id = ?").bind(quantityFound, nextCheckDueAt, nowIso, pointId),
-  ]);
-
-  await appendOperationsAudit(env, request, user, "delivery_check.created", "delivery_check", id, { pointId, deliveryId: lastDelivery?.id ?? null, quantityLeft, quantityFound, quantityTaken, distanceM, reminderDays, nextCheckDueAt });
-  return json({ id, quantityLeft, quantityFound, quantityTaken, geofenceDistanceM: distanceM, nextCheckDueAt }, 201);
-}
-
-async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
-  if (!env.BUCKET) throw new OperationsError(503, "storage_missing", "Archivio fotografico non configurato.");
-  if (!["super_admin", "admin", "sales_manager", "distributor"].includes(user.role)) throw new OperationsError(403, "not_allowed", "Non puoi caricare verifiche fotografiche.");
-  const length = Number(request.headers.get("content-length") ?? 0);
-  if (length > MAX_PHOTO_BYTES + 256_000) throw new OperationsError(413, "photo_too_large", "La foto supera 8 MB.");
-  if (!(request.headers.get("content-type") ?? "").includes("multipart/form-data")) throw new OperationsError(415, "form_required", "Invia una foto con coordinate.");
-  const form = await request.formData();
-  const photo = form.get("photo");
-  if (!(photo instanceof File) || photo.size === 0 || photo.size > MAX_PHOTO_BYTES || !["image/jpeg", "image/png", "image/webp"].includes(photo.type)) {
-    throw new OperationsError(400, "invalid_photo", "Carica una foto JPG, PNG o WebP fino a 8 MB.");
-  }
-  let deliveryId = clean(form.get("deliveryId"), 80);
-  const onBehalfOfDistributorId = ["super_admin", "admin", "sales_manager"].includes(user.role)
-    ? cleanOptional(form.get("distributorId"), 80)
-    : null;
-  let selfReported = false;
-  let adminBulkUpload = false;
-  let latitude: number;
-  let longitude: number;
-  if (!deliveryId && onBehalfOfDistributorId) {
-    adminBulkUpload = true;
-    const distributor = await env.DB.prepare("SELECT id, island FROM users WHERE id = ? AND role = 'distributor' AND active = 1 LIMIT 1")
-      .bind(onBehalfOfDistributorId).first<{ id: string; island: string | null }>();
-    if (!distributor || !distributor.island || !canAccessIsland(user, distributor.island)) {
-      throw new OperationsError(400, "invalid_distributor", "Distributore non disponibile nel tuo perimetro.");
-    }
-    const distributionPointId = clean(form.get("distributionPointId"), 80);
-    const quantity = positiveInt(form.get("quantity"), 1_000_000);
-    const unit = clean(form.get("unit"), 30);
-    const reminderDays = Math.min(60, Math.max(1, nonNegativeInt(form.get("reminderDays"), 60) || 7));
-    const point = await env.DB.prepare(
-      "SELECT p.id, p.client_id, p.island, p.address, p.latitude_e6, p.longitude_e6, c.contact_name, c.email, c.phone FROM distribution_points p LEFT JOIN clients c ON c.id = p.client_id WHERE p.id = ? AND p.island = ? LIMIT 1",
-    ).bind(distributionPointId, distributor.island).first<{ id: string; client_id: string | null; island: string; address: string; latitude_e6: number; longitude_e6: number; contact_name: string | null; email: string | null; phone: string | null }>();
-    if (!point || !unit) throw new OperationsError(404, "point_not_found", "Scegli un punto di distribuzione valido per l'isola del distributore.");
-    latitude = point.latitude_e6 / 1_000_000;
-    longitude = point.longitude_e6 / 1_000_000;
-    deliveryId = crypto.randomUUID();
-    const createdAt = new Date().toISOString();
-    const nextCheckDueAt = new Date(Date.now() + reminderDays * 86_400_000).toISOString();
-    await env.DB.batch([
-      env.DB.prepare(
-        "INSERT INTO deliveries (id, client_id, distributor_user_id, distribution_point_id, island, status, quantity, unit, scheduled_for, delivery_contact_name, delivery_contact_email, delivery_contact_phone, delivery_address, notes, version, created_by, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'delivered', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
-      ).bind(deliveryId, point.client_id, distributor.id, point.id, point.island, quantity, unit, canaryDateKey(new Date()), point.contact_name, point.email, point.phone, point.address, "Carico multiplo registrato dall'amministrazione per conto del Distributore.", user.id, createdAt, createdAt, createdAt),
-      env.DB.prepare("UPDATE distribution_points SET next_check_due_at = ?, updated_at = ? WHERE id = ?").bind(nextCheckDueAt, createdAt, point.id),
-    ]);
-    selfReported = true;
-  } else if (!deliveryId) {
-    latitude = requiredCoordinate(form.get("latitude"), -90, 90);
-    longitude = requiredCoordinate(form.get("longitude"), -180, 180);
-    if (user.role !== "distributor" || !user.island) throw new OperationsError(400, "delivery_required", "Seleziona una consegna.");
-    const distributionPointId = clean(form.get("distributionPointId"), 80);
-    const quantity = positiveInt(form.get("quantity"), 1_000_000);
-    const unit = clean(form.get("unit"), 30);
-    const reminderDays = Math.min(60, Math.max(1, nonNegativeInt(form.get("reminderDays"), 60) || 7));
-    const point = await env.DB.prepare(
-      "SELECT p.id, p.client_id, p.island, p.address, c.contact_name, c.email, c.phone FROM distribution_points p LEFT JOIN clients c ON c.id = p.client_id WHERE p.id = ? AND p.island = ? AND p.public_visible = 1 LIMIT 1",
-    ).bind(distributionPointId, user.island).first<{ id: string; client_id: string | null; island: string; address: string; contact_name: string | null; email: string | null; phone: string | null }>();
-    if (!point || !unit) throw new OperationsError(404, "point_not_found", "Scegli un punto di distribuzione valido per la tua isola.");
-    deliveryId = crypto.randomUUID();
-    const createdAt = new Date().toISOString();
-    const nextCheckDueAt = new Date(Date.now() + reminderDays * 86_400_000).toISOString();
-    await env.DB.batch([
-      env.DB.prepare(
-        "INSERT INTO deliveries (id, client_id, distributor_user_id, distribution_point_id, island, status, quantity, unit, scheduled_for, delivery_contact_name, delivery_contact_email, delivery_contact_phone, delivery_address, notes, version, created_by, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'delivered', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
-      ).bind(deliveryId, point.client_id, user.id, point.id, point.island, quantity, unit, canaryDateKey(new Date()), point.contact_name, point.email, point.phone, point.address, "Conferma libera registrata dal Distributore.", user.id, createdAt, createdAt, createdAt),
-      env.DB.prepare("UPDATE distribution_points SET next_check_due_at = ?, updated_at = ? WHERE id = ?").bind(nextCheckDueAt, createdAt, point.id),
-    ]);
-    selfReported = true;
-  } else {
-    latitude = requiredCoordinate(form.get("latitude"), -90, 90);
-    longitude = requiredCoordinate(form.get("longitude"), -180, 180);
-  }
-  const delivery = await env.DB.prepare("SELECT d.id, d.distributor_user_id, d.island, d.quantity, d.unit, d.distribution_point_id, p.name AS point_name, p.address AS point_address, p.latitude_e6 AS point_latitude_e6, p.longitude_e6 AS point_longitude_e6 FROM deliveries d LEFT JOIN distribution_points p ON p.id = d.distribution_point_id WHERE d.id = ? LIMIT 1").bind(deliveryId).first<{ id: string; distributor_user_id: string; island: string; quantity: number; unit: string; distribution_point_id: string | null; point_name: string | null; point_address: string | null; point_latitude_e6: number | null; point_longitude_e6: number | null }>();
-  if (!delivery || !canAccessIsland(user, delivery.island) || (user.role === "distributor" && delivery.distributor_user_id !== user.id)) {
-    throw new OperationsError(404, "delivery_not_found", "Consegna non disponibile nel tuo perimetro.");
-  }
-  const nearest = delivery.distribution_point_id && delivery.point_latitude_e6 !== null && delivery.point_longitude_e6 !== null
-    ? { id: delivery.distribution_point_id, distanceM: Math.round(haversineMeters(latitude, longitude, delivery.point_latitude_e6 / 1_000_000, delivery.point_longitude_e6 / 1_000_000)) }
-    : await nearestDistributionPoint(env, delivery.island, latitude, longitude);
-  const bytes = await photo.arrayBuffer();
-  const digest = await sha256(bytes);
-  const duplicate = await env.DB.prepare("SELECT id, delivery_id FROM photo_audits WHERE sha256 = ? ORDER BY created_at DESC LIMIT 1").bind(digest).first<{ id: string; delivery_id: string }>();
-  const previous = await env.DB.prepare("SELECT id, r2_key FROM photo_audits WHERE delivery_id = ? ORDER BY created_at DESC LIMIT 1").bind(delivery.id).first<{ id: string; r2_key: string }>();
-  const id = crypto.randomUUID();
-  const now = new Date().toISOString();
-  const watermarkText = `CRMVLC | ${delivery.island} | ${now} | ${latitude.toFixed(6)},${longitude.toFixed(6)} | ${digest.slice(0, 12)}`;
-  const aiAnalysis = await analyzeDeliveryPhoto(env, bytes, photo.type, {
-    quantity: delivery.quantity,
-    unit: delivery.unit,
-    pointName: delivery.point_name,
-    pointAddress: delivery.point_address,
-    geofenceDistanceM: nearest?.distanceM ?? null,
-    exactDuplicate: Boolean(duplicate),
-  }, previous?.r2_key ?? null);
-  const qualityScore = aiAnalysis.qualityScore;
-  const key = `distribution-audit/${delivery.island}/${now.slice(0, 10)}/${id}.${extensionFor(photo.type)}`;
-  await env.BUCKET.put(key, bytes, { httpMetadata: { contentType: photo.type, cacheControl: "private, no-store" }, customMetadata: { sha256: digest, watermark: watermarkText, deliveryId } });
-  const mutations = [
-    env.DB.prepare("INSERT INTO photo_audits (id, delivery_id, distributor_user_id, island, r2_key, sha256, latitude_e6, longitude_e6, geofence_distance_m, status, quality_score, duplicate_of_audit_id, ai_model, ai_verdict, ai_result_json, watermark_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)")
-      .bind(id, delivery.id, delivery.distributor_user_id, delivery.island, key, digest, toE6(latitude), toE6(longitude), nearest?.distanceM ?? null, qualityScore, duplicate?.id ?? null, aiAnalysis.model, aiAnalysis.verdict, JSON.stringify(aiAnalysis), watermarkText, now),
-  ];
-  if (user.role === "distributor" && !selfReported) {
-    mutations.push(env.DB.prepare("UPDATE deliveries SET status = 'delivered', completed_at = ?, version = version + 1, updated_at = ? WHERE id = ? AND distributor_user_id = ? AND status IN ('assigned','in_progress','issue')").bind(now, now, delivery.id, user.id));
-  }
-  await env.DB.batch(mutations);
-  await appendOperationsAudit(env, request, user, "photo_audit.created", "photo_audit", id, { deliveryId, selfReported, digest, distanceM: nearest?.distanceM ?? null, qualityScore, duplicateOfAuditId: duplicate?.id ?? null, aiVerdict: aiAnalysis.verdict, adminBulkUpload, onBehalfOfDistributorId: adminBulkUpload ? delivery.distributor_user_id : null });
-  return json({ id, deliveryId, selfReported, adminBulkUpload, distributorUserId: delivery.distributor_user_id, status: "pending", qualityScore, geofenceDistanceM: nearest?.distanceM ?? null, watermarkText, aiVerdict: aiAnalysis.verdict, duplicate: Boolean(duplicate) }, 201);
-}
-
-type PhotoAiResult = {
-  model: string | null;
-  verdict: "compliant_candidate" | "review_required";
-  qualityScore: number;
-  magazinesDetected: boolean;
-  displayDetected: boolean;
-  deliveryConsistent: boolean;
-  possibleDuplicate: boolean;
-  confidence: number;
-  reasons: string[];
-};
-
-async function analyzeDeliveryPhoto(
-  env: RuntimeEnv,
-  bytes: ArrayBuffer,
-  mimeType: string,
-  expected: { quantity: number; unit: string; pointName: string | null; pointAddress: string | null; geofenceDistanceM: number | null; exactDuplicate: boolean },
-  previousR2Key: string | null,
-): Promise<PhotoAiResult> {
-  const fallback: PhotoAiResult = {
-    model: null,
-    verdict: "review_required",
-    qualityScore: 0,
-    magazinesDetected: false,
-    displayDetected: false,
-    deliveryConsistent: false,
-    possibleDuplicate: expected.exactDuplicate,
-    confidence: 0,
-    reasons: [env.AI ? "Analisi AI temporaneamente non disponibile." : "Workers AI non configurata."],
-  };
-  if (!env.AI) return fallback;
-  try {
-    const content: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
-      { type: "text", text: `Controlla questa prova di consegna CRMVLC. Atteso: ${expected.quantity} ${expected.unit}; punto: ${expected.pointName ?? "non indicato"}, ${expected.pointAddress ?? "indirizzo non indicato"}; distanza GPS dal punto: ${expected.geofenceDistanceM ?? "non disponibile"} metri. Valuta presenza visibile di riviste Vivi Le Canarie o di un espositore, qualità tecnica, coerenza generale con una consegna e possibile riuso della fotografia. Non affermare quantità esatte se non leggibili. Rispondi solo JSON con: qualityScore 0-100, magazinesDetected boolean, displayDetected boolean, deliveryConsistent boolean, possibleDuplicate boolean, confidence 0-100, reasons array di massimo 4 stringhe brevi in italiano.` },
-      { type: "image_url", image_url: { url: dataUrl(bytes, mimeType) } },
-    ];
-    if (previousR2Key && env.BUCKET) {
-      const previous = await env.BUCKET.get(previousR2Key);
-      if (previous) {
-        const previousBytes = await previous.arrayBuffer();
-        if (previousBytes.byteLength <= MAX_PHOTO_BYTES) {
-          content.push({ type: "text", text: "Foto precedente della stessa consegna: confrontala con quella attuale per individuare un possibile duplicato." });
-          content.push({ type: "image_url", image_url: { url: dataUrl(previousBytes, previous.httpMetadata?.contentType ?? "image/jpeg") } });
+  const refresh = useCallback(async () => {
+    try {
+      const result = await request<Snapshot>("/api/operations");
+      setData(result);
+      await saveOfflineSnapshot(`operations:${user.id}`, user.id, result);
+    } catch (error) {
+      if (!(error instanceof RequestError)) {
+        const cached = await loadOfflineSnapshot<Snapshot>(`operations:${user.id}`).catch(() => null);
+        if (cached?.userId === user.id) {
+          setData(cached.value);
+          notify("Moduli operativi disponibili in sola lettura offline.");
+          return;
         }
       }
+      notify(error instanceof Error ? error.message : "Moduli non disponibili.", "error");
     }
-    const output = await env.AI.run(PHOTO_AI_MODEL, {
-      messages: [{ role: "system", content: "Sei un revisore prudente di prove fotografiche. Non approvi né rifiuti: produci indicatori verificabili per un revisore umano." }, { role: "user", content }],
-      response_format: { type: "json_object" },
-      max_tokens: 350,
-      temperature: 0,
-    });
-    const parsed = JSON.parse(output.response) as Record<string, unknown>;
-    const score = clampScore(parsed.qualityScore);
-    const magazinesDetected = parsed.magazinesDetected === true;
-    const displayDetected = parsed.displayDetected === true;
-    const deliveryConsistent = parsed.deliveryConsistent === true;
-    const possibleDuplicate = expected.exactDuplicate || parsed.possibleDuplicate === true;
-    const confidence = clampScore(parsed.confidence);
-    const reasons = Array.isArray(parsed.reasons) ? parsed.reasons.map((item) => clean(item, 180)).filter(Boolean).slice(0, 4) : [];
-    const reviewRequired = possibleDuplicate || (!magazinesDetected && !displayDetected) || !deliveryConsistent || score < 60 || confidence < 55 || (expected.geofenceDistanceM !== null && expected.geofenceDistanceM > 250);
-    return { model: PHOTO_AI_MODEL, verdict: reviewRequired ? "review_required" : "compliant_candidate", qualityScore: score, magazinesDetected, displayDetected, deliveryConsistent, possibleDuplicate, confidence, reasons };
-  } catch (error) {
-    console.error(JSON.stringify({ level: "error", event: "photo_ai_failed", error: error instanceof Error ? error.message : "unknown" }));
-    return fallback;
+  }, [notify, user.id]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => { void refresh(); }, 0);
+    const online = () => { void refresh(); };
+    window.addEventListener("online", online);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("online", online);
+    };
+  }, [refresh]);
+
+  useEffect(() => {
+    if (user.role === "distributor") return;
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible" && navigator.onLine) void refresh();
+    }, 45_000);
+    return () => window.clearInterval(interval);
+  }, [refresh, user.role]);
+
+  async function run(action: () => Promise<unknown>, success: string, form?: HTMLFormElement) {
+    setBusy(true);
+    try {
+      await action();
+      form?.reset();
+      notify(success);
+      await refresh();
+    } catch (error) { notify(error instanceof Error ? error.message : "Operazione non riuscita.", "error"); }
+    finally { setBusy(false); }
   }
-}
 
-function dataUrl(bytes: ArrayBuffer, mimeType: string): string {
-  const array = new Uint8Array(bytes);
-  let binary = "";
-  const chunk = 0x8000;
-  for (let offset = 0; offset < array.length; offset += chunk) binary += String.fromCharCode(...array.subarray(offset, offset + chunk));
-  return `data:${mimeType};base64,${btoa(binary)}`;
-}
+  async function submitPhotoAudit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    setBusy(true);
+    try {
+      const location = await currentLocation();
+      const formData = new FormData(form);
+      const deliveryId = String(formData.get("deliveryId") ?? "");
+      const distributionPointId = String(formData.get("distributionPointId") ?? "");
+      const quantity = String(formData.get("quantity") ?? "");
+      const unit = String(formData.get("unit") ?? "copie");
+      const reminderDays = String(formData.get("reminderDays") ?? "7");
+      const selected = formData.get("photo");
+      if (!(selected instanceof File) || selected.size === 0) {
+        throw new Error("Scatta la fotografia della consegna.");
+      }
+      if (!deliveryId && (user.role !== "distributor" || !distributionPointId || Number(quantity) < 1)) {
+        throw new Error("Seleziona una consegna oppure un punto e indica la quantità consegnata.");
+      }
+      if (!deliveryId && !navigator.onLine) {
+        throw new Error("La conferma libera richiede la rete. Riprova quando il telefono è online.");
+      }
 
-function clampScore(value: unknown): number {
-  const score = Number(value);
-  return Number.isFinite(score) ? Math.max(0, Math.min(100, Math.round(score))) : 0;
-}
+      const photo = await prepareDeliveryPhoto(selected);
+      let queued = !navigator.onLine;
+      if (!queued) {
+        const upload = new FormData();
+        upload.set("deliveryId", deliveryId);
+        if (!deliveryId) {
+          upload.set("distributionPointId", distributionPointId);
+          upload.set("quantity", quantity);
+          upload.set("unit", unit);
+          upload.set("reminderDays", reminderDays);
+        }
+        upload.set("latitude", String(location.latitude));
+        upload.set("longitude", String(location.longitude));
+        upload.set("photo", photo, photo.name);
+        try {
+          await request("/api/operations/photo-audits", { method: "POST", body: upload });
+        } catch (error) {
+          if (error instanceof RequestError) throw error;
+          if (!deliveryId) throw new Error("Connessione persa: la conferma libera non è stata registrata. Riprova quando sei online.");
+          queued = true;
+        }
+      }
+      if (queued) {
+        await queuePhotoAudit({
+          userId: user.id,
+          deliveryId,
+          photo,
+          filename: photo.name,
+          latitude: location.latitude,
+          longitude: location.longitude,
+        });
+      }
 
-async function reviewPhotoAudit(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
-  requireManager(user);
-  const body = await readJson<Record<string, unknown>>(request);
-  const id = clean(body.id, 80);
-  const status = clean(body.status, 20);
-  if (!["approved", "rejected"].includes(status)) throw new OperationsError(400, "invalid_status", "Esito verifica non valido.");
-  const row = await env.DB.prepare("SELECT id, island, status FROM photo_audits WHERE id = ? LIMIT 1").bind(id).first<{ id: string; island: string; status: string }>();
-  if (!row || !canAccessIsland(user, row.island)) throw new OperationsError(404, "audit_not_found", "Verifica fotografica non trovata.");
-  const now = new Date().toISOString();
-  await env.DB.prepare("UPDATE photo_audits SET status = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ? AND status = 'pending'").bind(status, user.id, now, id).run();
-  await appendOperationsAudit(env, request, user, `photo_audit.${status}`, "photo_audit", id, {});
-  return json({ ok: true });
-}
-
-async function createSalesCheckin(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
-  if (!["sales", "sales_manager"].includes(user.role) || !user.island) throw new OperationsError(403, "not_allowed", "Check-in riservato alla rete commerciale.");
-  const body = await readJson<Record<string, unknown>>(request);
-  const latitude = requiredCoordinate(body.latitude, -90, 90);
-  const longitude = requiredCoordinate(body.longitude, -180, 180);
-  const center = ISLAND_CENTERS[user.island];
-  const distanceM = center ? haversineMeters(latitude, longitude, center.latitude, center.longitude) : Number.POSITIVE_INFINITY;
-  const now = new Date();
-  const canaryTime = new Intl.DateTimeFormat("en-GB", { timeZone: "Atlantic/Canary", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(now);
-  const hour = Number(canaryTime.find((part) => part.type === "hour")?.value ?? 99);
-  const minute = Number(canaryTime.find((part) => part.type === "minute")?.value ?? 99);
-  const status = distanceM > 80_000 ? "outside_geofence" : (hour < 9 || (hour === 9 && minute <= 15)) ? "on_time" : "late";
-  const id = crypto.randomUUID();
-  await env.DB.prepare("INSERT INTO sales_checkins (id, user_id, island, latitude_e6, longitude_e6, checked_in_at, status) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .bind(id, user.id, user.island, toE6(latitude), toE6(longitude), now.toISOString(), status).run();
-  await appendOperationsAudit(env, request, user, "sales.checkin", "sales_checkin", id, { status, distanceM: Math.round(distanceM) });
-  return json({ id, status, distanceM: Math.round(distanceM) }, 201);
-}
-
-async function createSalesTask(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
-  requireManager(user);
-  const body = await readJson<Record<string, unknown>>(request);
-  const targetUserId = clean(body.userId, 80);
-  const target = await env.DB.prepare("SELECT id, island, role FROM users WHERE id = ? AND active = 1 LIMIT 1").bind(targetUserId).first<{ id: string; island: string | null; role: string }>();
-  if (!target || !target.island || !["sales", "sales_manager"].includes(target.role) || !canAccessIsland(user, target.island)) throw new OperationsError(400, "invalid_assignee", "Commerciale non disponibile nel tuo perimetro.");
-  const kind = clean(body.kind, 30);
-  const title = clean(body.title, 160);
-  const scheduledFor = clean(body.scheduledFor, 30);
-  if (!['visit', 'display_check'].includes(kind) || !title || Number.isNaN(Date.parse(scheduledFor))) throw new OperationsError(400, "invalid_task", "Attività commerciale non valida.");
-  const id = crypto.randomUUID();
-  const now = new Date().toISOString();
-  await env.DB.prepare("INSERT INTO sales_tasks (id, user_id, client_id, island, kind, title, status, scheduled_for, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)")
-    .bind(id, target.id, cleanOptional(body.clientId, 80), target.island, kind, title, new Date(scheduledFor).toISOString(), now, now).run();
-  await appendOperationsAudit(env, request, user, "sales_task.created", "sales_task", id, { targetUserId, kind, targetIsland: target.island });
-  return json({ id }, 201);
-}
-
-async function completeSalesTask(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
-  const body = await readJson<Record<string, unknown>>(request);
-  const id = clean(body.id, 80);
-  const task = await env.DB.prepare("SELECT id, user_id, island, status FROM sales_tasks WHERE id = ? LIMIT 1").bind(id).first<{ id: string; user_id: string; island: string; status: string }>();
-  if (!task || task.status !== "open" || (task.user_id !== user.id && !(["super_admin", "admin", "sales_manager"].includes(user.role) && canAccessIsland(user, task.island)))) {
-    throw new OperationsError(404, "task_not_found", "Attività non disponibile.");
+      form.reset();
+      notify(queued
+        ? "Foto di consegna salvata sul dispositivo. Verrà inviata appena torna la rete."
+        : "Verifica fotografica inviata.");
+      if (!queued) await refresh();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Acquisizione non riuscita.", "error");
+    } finally {
+      setBusy(false);
+    }
   }
-  const now = new Date().toISOString();
-  await env.DB.prepare("UPDATE sales_tasks SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ? AND status = 'open'").bind(now, now, id).run();
-  await appendOperationsAudit(env, request, user, "sales_task.completed", "sales_task", id, {});
-  return json({ ok: true });
-}
 
-function scopeFor(user: OperationsUser, islandColumn: string, ownerColumn: string | null): { sql: string; values: string[] } {
-  if (isGlobalOperator(user)) return { sql: "", values: [] };
-  if (user.role === "sales_manager" || user.role === "distributor" || !ownerColumn) return { sql: ` AND ${islandColumn} = ?`, values: [String(user.island)] };
-  return { sql: ` AND ${ownerColumn} = ?`, values: [user.id] };
-}
+  async function submitPointRegistration(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    setBusy(true);
+    try {
+      if (!navigator.onLine) throw new Error("La registrazione di un nuovo punto richiede la rete.");
+      const location = await currentLocation();
+      const formData = new FormData(form);
+      const name = String(formData.get("name") ?? "");
+      const address = String(formData.get("address") ?? "");
+      const quantity = String(formData.get("quantity") ?? "1");
+      const unit = String(formData.get("unit") ?? "copie");
+      const reminderDays = String(formData.get("reminderDays") ?? "7");
+      const selected = formData.get("photo");
+      if (!name || !address) throw new Error("Indica nome e indirizzo del punto vendita.");
+      if (!(selected instanceof File) || selected.size === 0) throw new Error("Scatta la foto del punto vendita.");
 
-function requireSuperAdmin(user: OperationsUser): void {
-  if (user.role !== "super_admin") throw new OperationsError(403, "super_admin_required", "Operazione riservata al Super Admin.");
-}
+      const photo = await prepareDeliveryPhoto(selected);
+      const upload = new FormData();
+      upload.set("name", name);
+      upload.set("address", address);
+      upload.set("quantity", quantity);
+      upload.set("unit", unit);
+      upload.set("reminderDays", reminderDays);
+      upload.set("latitude", String(location.latitude));
+      upload.set("longitude", String(location.longitude));
+      upload.set("photo", photo, photo.name);
+      await request("/api/operations/distribution-points/self-register", { method: "POST", body: upload });
 
-function requireManager(user: OperationsUser): void {
-  if (!["super_admin", "admin", "sales_manager"].includes(user.role)) throw new OperationsError(403, "manager_required", "Operazione riservata alla gestione operativa.");
-}
-
-function canAccessIsland(user: OperationsUser, island: string): boolean {
-  return isGlobalOperator(user) || Boolean(user.island && user.island === island);
-}
-
-function isGlobalOperator(user: OperationsUser): boolean {
-  return user.role === "super_admin" || user.role === "admin";
-}
-
-async function assertClientScope(env: RuntimeEnv, user: OperationsUser, clientId: string, island: string): Promise<void> {
-  const client = await env.DB.prepare("SELECT id, island, owner_user_id FROM clients WHERE id = ? AND archived_at IS NULL LIMIT 1").bind(clientId).first<{ id: string; island: string; owner_user_id: string }>();
-  if (!client || client.island !== island || !canAccessIsland(user, client.island) || (user.role === "sales" && client.owner_user_id !== user.id)) {
-    throw new OperationsError(404, "client_not_found", "Cliente non disponibile nel tuo perimetro.");
+      form.reset();
+      notify("Punto vendita registrato e prima consegna inviata.");
+      await refresh();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Registrazione non riuscita.", "error");
+    } finally {
+      setBusy(false);
+    }
   }
-}
 
-async function getSponsor(env: RuntimeEnv, id: string): Promise<{ id: string; island: string; owner_user_id: string; client_id: string | null } | null> {
-  return env.DB.prepare("SELECT id, island, owner_user_id, client_id FROM sponsors WHERE id = ? AND status = 'active' LIMIT 1").bind(id).first();
-}
+  async function submitDeliveryCheck(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    setBusy(true);
+    try {
+      if (!navigator.onLine) throw new Error("Il controllo del punto richiede la rete.");
+      const location = await currentLocation();
+      const formData = new FormData(form);
+      const distributionPointId = String(formData.get("distributionPointId") ?? "");
+      const quantityFound = String(formData.get("quantityFound") ?? "0");
+      const notes = String(formData.get("notes") ?? "");
+      const reminderDays = String(formData.get("reminderDays") ?? "7");
+      const selected = formData.get("photo");
+      if (!distributionPointId) throw new Error("Seleziona il punto da controllare.");
+      if (!(selected instanceof File) || selected.size === 0) throw new Error("Scatta la foto del punto al ritiro.");
 
-async function nearestDistributionPoint(env: RuntimeEnv, island: string, latitude: number, longitude: number): Promise<{ id: string; distanceM: number } | null> {
-  const points = (await env.DB.prepare("SELECT id, latitude_e6, longitude_e6 FROM distribution_points WHERE island = ? LIMIT 300").bind(island).all<{ id: string; latitude_e6: number; longitude_e6: number }>()).results;
-  let nearest: { id: string; distanceM: number } | null = null;
-  for (const point of points) {
-    const distanceM = Math.round(haversineMeters(latitude, longitude, point.latitude_e6 / 1_000_000, point.longitude_e6 / 1_000_000));
-    if (!nearest || distanceM < nearest.distanceM) nearest = { id: point.id, distanceM };
+      const photo = await prepareDeliveryPhoto(selected);
+      const upload = new FormData();
+      upload.set("distributionPointId", distributionPointId);
+      upload.set("quantityFound", quantityFound);
+      upload.set("notes", notes);
+      upload.set("reminderDays", reminderDays);
+      upload.set("latitude", String(location.latitude));
+      upload.set("longitude", String(location.longitude));
+      upload.set("photo", photo, photo.name);
+      await request("/api/operations/delivery-checks", { method: "POST", body: upload });
+
+      form.reset();
+      notify("Controllo registrato.");
+      await refresh();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Controllo non riuscito.", "error");
+    } finally {
+      setBusy(false);
+    }
   }
-  return nearest;
+
+  async function submitBulkPhotoAudit(
+    distributorId: string,
+    items: Array<{ distributionPointId: string; quantity: string; unit: string; file: File }>,
+    onProgress: (index: number, status: "ok" | "error", message?: string) => void,
+  ) {
+    if (!distributorId) { notify("Seleziona il distributore.", "error"); return; }
+    if (!items.length) { notify("Aggiungi almeno una foto.", "error"); return; }
+    setBusy(true);
+    let okCount = 0;
+    for (let index = 0; index < items.length; index += 1) {
+      const item = items[index];
+      try {
+        if (!item.distributionPointId) throw new Error("Seleziona il punto di distribuzione per questa foto.");
+        if (!(item.file instanceof File) || item.file.size === 0) throw new Error("Foto mancante.");
+        const upload = new FormData();
+        upload.set("distributorId", distributorId);
+        upload.set("distributionPointId", item.distributionPointId);
+        upload.set("quantity", item.quantity || "1");
+        upload.set("unit", item.unit || "copie");
+        upload.set("reminderDays", "7");
+        upload.set("photo", item.file, item.file.name);
+        await request("/api/operations/photo-audits", { method: "POST", body: upload });
+        okCount += 1;
+        onProgress(index, "ok");
+      } catch (error) {
+        onProgress(index, "error", error instanceof Error ? error.message : "Caricamento non riuscito.");
+      }
+    }
+    notify(`${okCount}/${items.length} foto caricate e attribuite al distributore.`, okCount === items.length ? "ok" : "error");
+    await refresh();
+    setBusy(false);
+  }
+
+  if (!data) return <section className="ops-page"><div className="module-loading"><span /><p>Caricamento moduli operativi…</p></div></section>;
+
+  return <section className="ops-page operations-hub">
+    <div className="hub-heading">
+      <div><small>CRMVLC · infrastruttura completa</small><h1>Regia operativa</h1><p>Sei moduli con dati reali, audit e separazione per isola.</p></div>
+      <div className="hub-live"><span /> Dati sincronizzati</div>
+    </div>
+    <div className="hub-tabs" role="tablist" aria-label="Moduli CRMVLC">
+      {TABS.filter(([key]) => user.role !== "distributor" || ["overview", "distribution"].includes(key)).map(([key, label]) => <button key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>{label}</button>)}
+    </div>
+
+    {tab === "overview" && <Overview data={data} user={user} />}
+    {tab === "vip" && user.role !== "distributor" && <VipPanel data={data} user={user} clients={clients} busy={busy} run={run} />}
+    {tab === "finance" && user.role !== "distributor" && <FinancePanel data={data} user={user} busy={busy} run={run} />}
+    {tab === "inventory" && user.role !== "distributor" && <InventoryPanel data={data} user={user} busy={busy} run={run} />}
+    {tab === "distribution" && <GeoAuditPanel data={data} user={user} users={users} clients={clients} deliveries={deliveries} busy={busy} run={run} submitPhotoAudit={submitPhotoAudit} submitPointRegistration={submitPointRegistration} submitDeliveryCheck={submitDeliveryCheck} submitBulkPhotoAudit={submitBulkPhotoAudit} />}
+    {tab === "sales" && user.role !== "distributor" && <SalesPanel data={data} user={user} users={users} clients={clients} busy={busy} run={run} />}
+  </section>;
 }
 
-async function appendOperationsAudit(env: RuntimeEnv, request: Request, user: OperationsUser, action: string, entityType: string, entityId: string, payload: unknown): Promise<void> {
-  const auditedPayload = user.impersonation
-    ? {
-      ...(payload !== null && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : { value: payload }),
-      impersonation: {
-        actorUserId: user.sessionActor?.id ?? user.id,
-        actorName: user.sessionActor?.name ?? user.name,
-        effectiveUserId: user.id,
-        effectiveUserName: user.name,
-        effectiveRole: user.role,
-        startedAt: user.impersonation.startedAt,
+function Overview({ data, user }: { data: Snapshot; user: User }) {
+  const integrations = [
+    ["Email OTP", data.integrations.email, "Identità e ricevute"],
+    ["WhatsApp", data.integrations.whatsapp, "Chat diretta · +34 602 576 044"],
+    ["Stripe / SEPA", data.integrations.payments, "Incassi ricorrenti"],
+    ["Mappe", data.integrations.maps, "Percorsi e mappe pubbliche"],
+    ["AI fotografica", data.integrations.photoAi, "Controllo qualità immagini"],
+  ] as const;
+  return <>
+    <div className="hub-metrics">
+      <HubMetric label="Sponsor attivi" value={data.counts.sponsors} note="directory VIP" />
+      <HubMetric label="Membri VIP" value={data.counts.vipMembers} note="consenso registrato" />
+      <HubMetric label="Coupon usati" value={data.counts.couponsRedeemed} note={`${data.counts.couponsIssued} ancora validi`} />
+      <HubMetric label="Punti distribuzione" value={data.counts.distributionPoints} note="sulle cinque isole" />
+      <HubMetric label="Foto da verificare" value={data.counts.pendingPhotoAudits} note="audit geolocalizzato" />
+      <HubMetric label="Task commerciali" value={data.counts.openSalesTasks} note="ancora aperti" />
+    </div>
+    <div className="hub-two">
+      <div className="module-card">
+        <header><div><span className="module-index">01</span><h2>Stato piattaforma</h2></div><small>Perimetro: {user.island ?? "tutte le isole"}</small></header>
+        <div className="integration-list">{integrations.map(([label, connected, note]) => <div key={label}><span className={`integration-dot ${connected ? "connected" : "pending"}`} /><div><strong>{label}</strong><small>{note}</small></div>{label === "WhatsApp" ? <a href={WHATSAPP_URL} target="_blank" rel="noopener noreferrer">Apri chat</a> : <b>{connected ? "Collegato" : "Da collegare"}</b>}</div>)}</div>
+      </div>
+      <div className="module-card readiness-card">
+        <header><div><span className="module-index">02</span><h2>Copertura moduli</h2></div></header>
+        <div className="readiness-list">
+          <Progress label="CRM, preventivi e contratti" value={90} />
+          <Progress label="VIP Pass e sponsor" value={55} />
+          <Progress label="Finanza e commissioni" value={45} />
+          <Progress label="Distribuzione e foto" value={55} />
+          <Progress label="Sales workflow" value={60} />
+        </div>
+        <p className="truth-note"><strong>Nota operativa:</strong> “Da collegare” significa che il modulo conserva già i dati, ma non comunica ancora con il servizio esterno.</p>
+      </div>
+    </div>
+  </>;
+}
+
+function VipPanel({ data, user, clients, busy, run }: PanelProps & { clients: Client[] }) {
+  const canManage = ["super_admin", "admin", "sales_manager"].includes(user.role);
+  return <div className="hub-stack">
+    <div className="hub-three">
+      {canManage && <ActionCard index="01" title="Nuovo sponsor" text="Directory, vantaggio e PIN di redemption.">
+        <form onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const fd = new FormData(form); void run(() => post("/api/operations/sponsors", { name: fd.get("name"), island: fd.get("island"), category: fd.get("category"), offerTitle: fd.get("offerTitle"), discountText: fd.get("discountText"), merchantPin: fd.get("merchantPin"), clientId: fd.get("clientId") }), "Sponsor creato.", form); }}>
+          <input name="name" placeholder="Nome sponsor" required />
+          <select name="clientId"><option value="">Nessun cliente collegato</option>{clients.map((client) => <option key={client.id} value={client.id}>{client.company_name}</option>)}</select>
+          <IslandSelect user={user} />
+          <input name="category" placeholder="Categoria (es. Ristorante)" required />
+          <input name="offerTitle" placeholder="Titolo offerta" required />
+          <input name="discountText" placeholder="Vantaggio (es. -15%)" required />
+          <input name="merchantPin" inputMode="numeric" pattern="[0-9]{4}" maxLength={4} placeholder="PIN negozio · 4 cifre" required />
+          <button className="primary" disabled={busy}>Crea sponsor</button>
+        </form>
+      </ActionCard>}
+      <ActionCard index="02" title="Nuovo membro VIP" text="Registrazione 1-click con consenso.">
+        <form onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const fd = new FormData(form); void run(() => post("/api/operations/vip-members", { name: fd.get("name"), phone: fd.get("phone"), island: fd.get("island"), consent: fd.get("consent") === "on" }), "Membro VIP registrato.", form); }}>
+          <input name="name" placeholder="Nome e cognome" required />
+          <input name="phone" placeholder="WhatsApp +34…" required />
+          <IslandSelect user={user} />
+          <label className="check-line"><input name="consent" type="checkbox" required /> Consenso contatto e regolamento</label>
+          <button className="primary" disabled={busy}>Registra</button>
+        </form>
+      </ActionCard>
+      <ActionCard index="03" title="Emetti coupon" text="Codice unico, tracciato e valido 30 giorni.">
+        <form onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const fd = new FormData(form); void run(() => post("/api/operations/coupons", { sponsorId: fd.get("sponsorId"), memberId: fd.get("memberId") }), "Coupon emesso.", form); }}>
+          <select name="sponsorId" required><option value="">Seleziona sponsor</option>{data.sponsors.map((row) => <option key={String(row.id)} value={String(row.id)}>{row.name} · {row.island}</option>)}</select>
+          <select name="memberId" required><option value="">Seleziona membro VIP</option>{data.vipMembers.map((row) => <option key={String(row.id)} value={String(row.id)}>{row.name} · {row.phone}</option>)}</select>
+          <button className="primary" disabled={busy || !data.sponsors.length || !data.vipMembers.length}>Genera codice</button>
+        </form>
+      </ActionCard>
+    </div>
+    <div className="hub-two">
+      <DataCard title="Sponsor e offerte" count={data.sponsors.length}>{data.sponsors.length ? data.sponsors.map((row) => <ListRow key={String(row.id)} title={String(row.name)} subtitle={`${row.category} · ${row.island}`} meta={String(row.discount_text)} status={String(row.status)} />) : <MiniEmpty text="Nessuno sponsor registrato." />}</DataCard>
+      <DataCard title="Coupon e redemption" count={data.coupons.length}>{data.coupons.length ? data.coupons.map((row) => <ListRow key={String(row.id)} title={String(row.code)} subtitle={`${row.member_name} → ${row.sponsor_name}`} meta={row.redeemed_at ? `Usato ${when(row.redeemed_at)}` : `Scade ${when(row.expires_at)}`} status={String(row.status)} />) : <MiniEmpty text="Nessun coupon emesso." />}</DataCard>
+    </div>
+  </div>;
+}
+
+function FinancePanel({ data, user, busy, run }: PanelProps) {
+  return <div className="hub-stack">
+    <div className="hub-metrics compact"><HubMetric label="Disponibile" value={euros(data.counts.availableWalletCents)} note="wallet nel tuo perimetro" /><HubMetric label="Richieste" value={data.payoutRequests.filter((row) => row.status === "requested").length} note="da processare" /><HubMetric label="Regole attive" value={data.commissionRules.filter((row) => Number(row.active) === 1).length} note="commissioni" /></div>
+    <div className="hub-two">
+      <ActionCard index="01" title="Richiedi liquidazione" text="Il sistema blocca richieste oltre il saldo disponibile.">
+        <form onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const fd = new FormData(form); void run(() => post("/api/operations/payout-requests", { amountEuros: fd.get("amountEuros"), note: fd.get("note") }), "Richiesta inviata.", form); }}>
+          <input name="amountEuros" type="number" min="10" step="0.01" placeholder="Importo €" required />
+          <input name="note" placeholder="Nota facoltativa" />
+          <button className="primary" disabled={busy}>Richiedi pagamento</button>
+        </form>
+      </ActionCard>
+      {user.role === "super_admin" && <ActionCard index="02" title="Regola commissione" text="Percentuale globale o specifica per isola.">
+        <form onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const fd = new FormData(form); void run(() => post("/api/operations/commission-rules", { name: fd.get("name"), role: fd.get("role"), island: fd.get("island") || null, ratePercent: fd.get("ratePercent") }), "Regola commissione creata.", form); }}>
+          <input name="name" placeholder="Nome regola" required />
+          <select name="role" required><option value="sales">Sales</option><option value="sales_manager">Sales Manager</option><option value="distributor">Distributore</option></select>
+          <select name="island"><option value="">Tutte le isole</option>{ISLANDS.map((island) => <option key={island}>{island}</option>)}</select>
+          <input name="ratePercent" type="number" min="0" max="100" step="0.01" placeholder="Percentuale" required />
+          <button className="primary" disabled={busy}>Salva regola</button>
+        </form>
+      </ActionCard>}
+    </div>
+    <div className="hub-two">
+      <DataCard title="Movimenti wallet" count={data.walletEntries.length}>{data.walletEntries.length ? data.walletEntries.map((row) => <ListRow key={String(row.id)} title={String(row.description)} subtitle={`${row.user_name} · ${when(row.created_at)}`} meta={euros(Number(row.amount_cents))} status={String(row.status)} />) : <MiniEmpty text="I movimenti nasceranno da contratti e consegne approvate." />}</DataCard>
+      <DataCard title="Richieste pagamento" count={data.payoutRequests.length}>{data.payoutRequests.length ? data.payoutRequests.map((row) => <div className="hub-list-row" key={String(row.id)}><div><strong>{row.user_name}</strong><small>{when(row.created_at)}</small></div><b>{euros(Number(row.amount_cents))}</b><span className={`module-status ${row.status}`}>{row.status}</span>{user.role === "super_admin" && row.status === "requested" && <div className="inline-actions"><button disabled={busy} onClick={() => void run(() => post("/api/operations/payout-requests/review", { id: row.id, status: "approved" }), "Pagamento approvato.")}>Approva</button><button disabled={busy} onClick={() => void run(() => post("/api/operations/payout-requests/review", { id: row.id, status: "rejected" }), "Pagamento rifiutato.")}>Rifiuta</button></div>}</div>) : <MiniEmpty text="Nessuna richiesta di pagamento." />}</DataCard>
+    </div>
+  </div>;
+}
+
+function InventoryPanel({ data, user, busy, run }: PanelProps) {
+  const canManage = ["super_admin", "admin", "sales_manager"].includes(user.role);
+  return <div className="hub-stack">
+    {canManage && <ActionCard index="01" title="Nuovo spazio editoriale" text="Inventario per numero, isola e formato.">
+      <form className="wide-form" onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const fd = new FormData(form); void run(() => post("/api/operations/inventory", Object.fromEntries(fd)), "Spazio creato.", form); }}>
+        <input name="issueLabel" placeholder="Numero (es. Settembre 2026)" required /><IslandSelect user={user} /><input name="slotCode" placeholder="Codice (es. P04-A)" required /><input name="slotName" placeholder="Nome spazio" required /><input name="widthMm" type="number" min="1" placeholder="Larghezza mm" required /><input name="heightMm" type="number" min="1" placeholder="Altezza mm" required /><button className="primary" disabled={busy}>Aggiungi spazio</button>
+      </form>
+    </ActionCard>}
+    <div className="inventory-grid">{data.inventory.length ? data.inventory.map((row) => <article key={String(row.id)} className={`inventory-slot ${row.status}`}><header><span>{row.slot_code}</span><b>{row.status}</b></header><h3>{row.slot_name}</h3><p>{row.issue_label} · {row.island}</p><small>{row.width_mm} × {row.height_mm} mm</small>{canManage && <div className="inline-actions"><button disabled={busy} onClick={() => void run(() => post("/api/operations/inventory/status", { id: row.id, status: "held" }), "Spazio bloccato.")}>Blocca</button><button disabled={busy} onClick={() => void run(() => post("/api/operations/inventory/status", { id: row.id, status: "available" }), "Spazio liberato.")}>Libera</button></div>}</article>) : <MiniEmpty text="Crea il primo menabò commerciale." />}</div>
+    <div className="bundle-strip"><div><small>Pacchetti preset</small><h2>Entry · Business · VIP</h2></div>{data.bundles.map((row) => <div key={String(row.id)}><strong>{row.name}</strong><span>{euros(Number(row.monthly_price_cents))}/mese</span><small>{row.description}</small></div>)}</div>
+  </div>;
+}
+
+function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, submitPhotoAudit, submitPointRegistration, submitDeliveryCheck, submitBulkPhotoAudit }: PanelProps & {
+  users: User[];
+  clients: Client[];
+  deliveries: Delivery[];
+  submitPhotoAudit: (event: FormEvent<HTMLFormElement>) => void;
+  submitPointRegistration: (event: FormEvent<HTMLFormElement>) => void;
+  submitDeliveryCheck: (event: FormEvent<HTMLFormElement>) => void;
+  submitBulkPhotoAudit: (
+    distributorId: string,
+    items: Array<{ distributionPointId: string; quantity: string; unit: string; file: File }>,
+    onProgress: (index: number, status: "ok" | "error", message?: string) => void,
+  ) => Promise<void>;
+}) {
+  const canManage = ["super_admin", "admin", "sales_manager"].includes(user.role);
+  const freeConfirmationPoints = data.distributionPoints;
+  const nowMs = Date.now();
+  const isOverdue = (row: RecordRow) => Boolean(row.next_check_due_at) && new Date(String(row.next_check_due_at)).getTime() <= nowMs;
+  return <div className="hub-stack">
+    <DailyRouteCard deliveries={deliveries} user={user} />
+    {user.role === "distributor" && <DistributorPointsBoard points={freeConfirmationPoints} deliveries={deliveries} busy={busy} submitPointRegistration={submitPointRegistration} submitRefill={submitPhotoAudit} submitDeliveryCheck={submitDeliveryCheck} submitAssignedDelivery={submitPhotoAudit} />}
+    <div className="hub-two">
+      {canManage && <ActionCard index="01" title="Punto distribuzione" text="Coordinate, capacità, stock e visibilità pubblica.">
+        <form onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const fd = new FormData(form); void run(() => post("/api/operations/distribution-points", { ...Object.fromEntries(fd), publicVisible: fd.get("publicVisible") === "on" }), "Punto distribuzione creato.", form); }}>
+          <input name="name" placeholder="Nome punto" required /><select name="clientId"><option value="">Nessun cliente collegato</option>{clients.map((client) => <option key={client.id} value={client.id}>{client.company_name}</option>)}</select><IslandSelect user={user} /><input name="address" placeholder="Indirizzo" required /><div className="field-pair"><input name="latitude" type="number" step="0.000001" placeholder="Latitudine" required /><input name="longitude" type="number" step="0.000001" placeholder="Longitudine" required /></div><div className="field-pair"><input name="capacity" type="number" min="0" placeholder="Capacità" required /><input name="stock" type="number" min="0" placeholder="Stock" required /></div><label className="check-line"><input type="checkbox" name="publicVisible" defaultChecked /> Visibile nella mappa pubblica</label><button className="primary" disabled={busy}>Salva punto</button>
+        </form>
+      </ActionCard>}
+      {user.role !== "distributor" && <ActionCard index="02" title="Foto di consegna" text="Conferma una consegna già assegnata con foto, posizione e controllo geofence.">
+        <form onSubmit={submitPhotoAudit}>
+          <select name="deliveryId" required><option value="">Seleziona consegna</option>{deliveries.map((delivery) => <option key={delivery.id} value={delivery.id}>{delivery.client_company ?? delivery.id} · {delivery.island}</option>)}</select>
+          <input name="photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" required />
+          <p className="form-microcopy">Foto, coordinate e orario vengono acquisiti insieme.</p>
+          <button className="primary" disabled={busy || !deliveries.length}>Scatta foto e registra consegna</button>
+        </form>
+      </ActionCard>}
+      {canManage && <BulkPhotoUploadCard user={user} users={users} distributionPoints={data.distributionPoints} busy={busy} onSubmit={submitBulkPhotoAudit} />}
+    </div>
+    <div className="hub-two">
+      <DataCard title="Punti e stock" count={data.distributionPoints.length}><a className="public-map-link" href="/mappe" target="_blank" rel="noopener noreferrer">Apri mappa pubblica ↗</a>{data.distributionPoints.length ? data.distributionPoints.map((row) => <div className="hub-list-row" key={String(row.id)}><div><strong>{row.name}</strong><small>{row.address} · {row.island}{Number(row.self_registered) === 1 ? " · registrato da distributore" : ""}</small>{row.next_check_due_at && <small className={isOverdue(row) ? "ai-review" : ""}>{isOverdue(row) ? "Da controllare" : `Controllo entro ${when(row.next_check_due_at)}`}</small>}</div><b className={Number(row.stock) <= Math.max(5, Number(row.capacity) * .15) ? "low-stock" : ""}>{row.stock}/{row.capacity}</b></div>) : <MiniEmpty text="Nessun punto geolocalizzato." />}</DataCard>
+      <DataCard title="Audit fotografici" count={data.photoAudits.length}>{data.photoAudits.length ? data.photoAudits.map((row) => { const ai = photoAiSummary(row); return <div className="hub-list-row audit-row" key={String(row.id)}><div><strong>{row.distributor_name}</strong><small>{row.island} · {when(row.created_at)} · distanza {row.geofence_distance_m ?? "—"} m</small>{ai && <small className={ai.verdict === "compliant_candidate" ? "ai-pass" : "ai-review"}>AI: {ai.magazinesDetected || ai.displayDetected ? "riviste/espositore rilevati" : "contenuto da verificare"} · {ai.possibleDuplicate ? "possibile duplicato" : "nessun duplicato rilevato"} · confidenza {ai.confidence}%</small>}{row.duplicate_of_audit_id && <small className="ai-review">Hash identico a una foto già registrata.</small>}</div><b>Qualità {row.quality_score}%</b><span className={`module-status ${row.status}`}>{row.status}</span>{canManage && row.status === "pending" && <div className="inline-actions"><button disabled={busy} onClick={() => void run(() => post("/api/operations/photo-audits/review", { id: row.id, status: "approved" }), "Foto approvata.")}>Approva</button><button disabled={busy} onClick={() => void run(() => post("/api/operations/photo-audits/review", { id: row.id, status: "rejected" }), "Foto rifiutata.")}>Rifiuta</button></div>}</div>; }) : <MiniEmpty text="Nessuna foto da verificare." />}</DataCard>
+    </div>
+    <DataCard title="Controlli ritiro" count={data.deliveryChecks.length}>{data.deliveryChecks.length ? data.deliveryChecks.map((row) => <div className="hub-list-row" key={String(row.id)}><div><strong>{row.point_name}</strong><small>{row.distributor_name ? `${row.distributor_name} · ` : ""}{when(row.created_at)} · distanza {row.geofence_distance_m ?? "—"} m</small></div><b>{row.quantity_found}/{row.quantity_left}</b><span className="module-status">prese {row.quantity_taken}</span></div>) : <MiniEmpty text="Nessun controllo di ritiro registrato." />}</DataCard>
+  </div>;
+}
+
+function DistributorPointsBoard({ points, deliveries, busy, submitPointRegistration, submitRefill, submitDeliveryCheck, submitAssignedDelivery }: {
+  points: RecordRow[];
+  deliveries: Delivery[];
+  busy: boolean;
+  submitPointRegistration: (event: FormEvent<HTMLFormElement>) => void;
+  submitRefill: (event: FormEvent<HTMLFormElement>) => void;
+  submitDeliveryCheck: (event: FormEvent<HTMLFormElement>) => void;
+  submitAssignedDelivery: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  const nowMs = Date.now();
+  const isOverdue = (row: RecordRow) => Boolean(row.next_check_due_at) && new Date(String(row.next_check_due_at)).getTime() <= nowMs;
+  const [showNewPoint, setShowNewPoint] = useState(points.length === 0);
+  const [expanded, setExpanded] = useState<{ id: string; mode: "refill" | "check" } | null>(null);
+  const overdueCount = points.filter(isOverdue).length;
+  const sorted = [...points].sort((a, b) => {
+    const aOverdue = isOverdue(a) ? 0 : 1;
+    const bOverdue = isOverdue(b) ? 0 : 1;
+    if (aOverdue !== bOverdue) return aOverdue - bOverdue;
+    const aDue = a.next_check_due_at ? new Date(String(a.next_check_due_at)).getTime() : Number.POSITIVE_INFINITY;
+    const bDue = b.next_check_due_at ? new Date(String(b.next_check_due_at)).getTime() : Number.POSITIVE_INFINITY;
+    if (aDue !== bDue) return aDue - bDue;
+    return String(a.name).localeCompare(String(b.name));
+  });
+
+  function toggle(id: string, mode: "refill" | "check") {
+    setExpanded((current) => (current && current.id === id && current.mode === mode ? null : { id, mode }));
+  }
+
+  return <div className="hub-stack">
+    {deliveries.length > 0 && <ActionCard index="00" title="Consegne assegnate da oggi" text="Hai consegne già pianificate dall'amministrazione: fotografa e confermale qui.">
+      <form onSubmit={submitAssignedDelivery}>
+        <select name="deliveryId" required><option value="">Seleziona consegna assegnata</option>{deliveries.map((delivery) => <option key={delivery.id} value={delivery.id}>{delivery.client_company ?? delivery.id}</option>)}</select>
+        <input name="photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" required />
+        <button className="primary" disabled={busy}>Scatta foto e registra consegna</button>
+      </form>
+    </ActionCard>}
+    <ActionCard index="01" title={points.length ? "Nuovo punto vendita" : "Comincia da qui"} text="Negozio mai visitato prima: nome, indirizzo, foto, quante copie lasci e quando torni a controllare.">
+      {!showNewPoint
+        ? <button type="button" className="primary" onClick={() => setShowNewPoint(true)}>+ Registra un nuovo punto vendita</button>
+        : <form onSubmit={(event) => { submitPointRegistration(event); setShowNewPoint(false); }}>
+          <input name="name" placeholder="Nome punto (es. Bar/Negozio)" required maxLength={120} />
+          <input name="address" placeholder="Indirizzo o riferimento" required maxLength={260} />
+          <div className="field-pair"><input name="quantity" type="number" min="1" max="1000000" defaultValue="1" placeholder="Quante copie lasci" /><input name="unit" defaultValue="copie" maxLength={30} placeholder="Unità" /></div>
+          <input name="reminderDays" type="number" min="1" max="60" defaultValue="7" placeholder="Torna a controllare dopo (giorni)" />
+          <input name="photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" required />
+          <p className="form-microcopy">Foto del negozio/espositore al momento della consegna. Posizione GPS acquisita automaticamente.</p>
+          <div className="inline-actions">
+            <button className="primary" disabled={busy}>Registra punto e prima consegna</button>
+            {points.length > 0 && <button type="button" disabled={busy} onClick={() => setShowNewPoint(false)}>Annulla</button>}
+          </div>
+        </form>}
+    </ActionCard>
+    <ActionCard index="02" title="I tuoi punti vendita" text={points.length ? `${overdueCount} da controllare su ${points.length} punti totali.` : "Appariranno qui dopo la prima registrazione."}>
+      {!points.length
+        ? <MiniEmpty text="Nessun punto ancora: registra il primo qui sopra." />
+        : sorted.map((row) => {
+          const overdue = isOverdue(row);
+          const rowId = String(row.id);
+          return <div className="hub-list-row distributor-point-row" key={rowId} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-start", padding: "8px 0", borderTop: "1px solid rgba(0,0,0,.08)" }}>
+            <div style={{ flex: "1 1 200px" }}>
+              <strong>{row.name}</strong>
+              <small style={{ display: "block" }}>{row.address}</small>
+              <small className={overdue ? "ai-review" : ""}>{overdue ? "DA CONTROLLARE" : row.next_check_due_at ? `Controllo entro ${when(row.next_check_due_at)}` : "Nessun controllo programmato"}</small>
+            </div>
+            <b>{row.stock}/{row.capacity}</b>
+            <div className="inline-actions">
+              <button type="button" disabled={busy} onClick={() => toggle(rowId, "refill")}>Rifornisci</button>
+              <button type="button" disabled={busy} onClick={() => toggle(rowId, "check")}>{overdue ? "Fai il controllo" : "Controlla ora"}</button>
+            </div>
+            {expanded?.id === rowId && expanded.mode === "refill" && <form style={{ flexBasis: "100%" }} onSubmit={(event) => { submitRefill(event); setExpanded(null); }}>
+              <input type="hidden" name="distributionPointId" value={rowId} />
+              <div className="field-pair"><input name="quantity" type="number" min="1" max="1000000" defaultValue="1" placeholder="Quante copie lasci" /><input name="unit" defaultValue="copie" maxLength={30} placeholder="Unità" /></div>
+              <input name="reminderDays" type="number" min="1" max="60" defaultValue="7" placeholder="Torna a controllare dopo (giorni)" />
+              <input name="photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" required />
+              <button className="primary" disabled={busy}>Scatta foto e registra rifornimento</button>
+            </form>}
+            {expanded?.id === rowId && expanded.mode === "check" && <form style={{ flexBasis: "100%" }} onSubmit={(event) => { submitDeliveryCheck(event); setExpanded(null); }}>
+              <input type="hidden" name="distributionPointId" value={rowId} />
+              <input name="quantityFound" type="number" min="0" max="1000000" placeholder="Quante copie trovi ancora" required />
+              <input name="reminderDays" type="number" min="1" max="60" defaultValue="7" placeholder="Torna a controllare dopo (giorni)" />
+              <input name="notes" placeholder="Nota facoltativa" maxLength={500} />
+              <input name="photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" required />
+              <p className="form-microcopy">Il CRM calcola quante copie sono state prese e fissa da solo il prossimo controllo.</p>
+              <button className="primary" disabled={busy}>Registra controllo</button>
+            </form>}
+          </div>;
+        })}
+    </ActionCard>
+  </div>;
+}
+
+type BulkPhotoRow = { key: string; distributionPointId: string; quantity: string; unit: string; file: File | null; status: "idle" | "ok" | "error"; error?: string };
+
+function BulkPhotoUploadCard({ user, users, distributionPoints, busy, onSubmit }: {
+  user: User;
+  users: User[];
+  distributionPoints: RecordRow[];
+  busy: boolean;
+  onSubmit: (
+    distributorId: string,
+    items: Array<{ distributionPointId: string; quantity: string; unit: string; file: File }>,
+    onProgress: (index: number, status: "ok" | "error", message?: string) => void,
+  ) => Promise<void>;
+}) {
+  const distributors = users.filter((item) => item.role === "distributor");
+  const [distributorId, setDistributorId] = useState("");
+  const [rows, setRows] = useState<BulkPhotoRow[]>([]);
+  const selectedDistributor = distributors.find((item) => item.id === distributorId) ?? null;
+  const points = selectedDistributor ? distributionPoints.filter((row) => row.island === selectedDistributor.island) : distributionPoints;
+
+  function addFiles(files: FileList | null) {
+    if (!files || !files.length) return;
+    setRows((current) => [
+      ...current,
+      ...Array.from(files).map((file) => ({ key: crypto.randomUUID(), distributionPointId: "", quantity: "1", unit: "copie", file, status: "idle" as const })),
+    ]);
+  }
+
+  function updateRow(key: string, patch: Partial<BulkPhotoRow>) {
+    setRows((current) => current.map((row) => (row.key === key ? { ...row, ...patch } : row)));
+  }
+
+  function removeRow(key: string) {
+    setRows((current) => current.filter((row) => row.key !== key));
+  }
+
+  async function handleSubmit() {
+    setRows((current) => current.map((row) => ({ ...row, status: "idle", error: undefined })));
+    await onSubmit(
+      distributorId,
+      rows.map((row) => ({ distributionPointId: row.distributionPointId, quantity: row.quantity, unit: row.unit, file: row.file as File })),
+      (index, status, message) => {
+        setRows((current) => current.map((row, rowIndex) => (rowIndex === index ? { ...row, status, error: message } : row)));
       },
-    }
-    : payload;
-  const payloadJson = stableJson(auditedPayload);
-  const rawIp = request.headers.get("cf-connecting-ip");
-  const ipHash = rawIp ? await sha256(`${env.AUTH_SECRET ?? "vlc"}:${rawIp}`) : null;
-  await env.DB.prepare("INSERT INTO audit_events (id, actor_user_id, action, entity_type, entity_id, payload_json, payload_sha256, ip_hash, user_agent, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-    .bind(crypto.randomUUID(), user.sessionActor?.id ?? user.id, action, entityType, entityId, payloadJson, await sha256(payloadJson), ipHash, cleanOptional(request.headers.get("user-agent"), 300), new Date().toISOString()).run();
+    );
+  }
+
+  const ready = rows.length > 0 && rows.every((row) => row.distributionPointId && row.file instanceof File);
+
+  return <ActionCard index="05" title="Carico multiplo" text="Seleziona un distributore e carica più foto di consegna in un'unica operazione, senza impersonazione.">
+    <div className="bulk-upload-form">
+      <select value={distributorId} onChange={(event) => { setDistributorId(event.target.value); setRows([]); }}>
+        <option value="">Seleziona distributore</option>
+        {distributors.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.island}</option>)}
+      </select>
+      {distributorId && <>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+          <span className="primary" style={{ display: "inline-block" }}>+ Aggiungi foto</span>
+          <input type="file" accept="image/jpeg,image/png,image/webp" multiple style={{ display: "none" }} onChange={(event) => { addFiles(event.target.files); event.target.value = ""; }} />
+        </label>
+        {rows.map((row, index) => <div key={row.key} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, padding: "6px 0", borderTop: "1px solid rgba(0,0,0,.08)" }}>
+          <span style={{ minWidth: 18 }}>{index + 1}</span>
+          <small style={{ maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis" }}>{row.file?.name ?? "—"}</small>
+          <select value={row.distributionPointId} onChange={(event) => updateRow(row.key, { distributionPointId: event.target.value })}>
+            <option value="">Punto di distribuzione</option>
+            {points.map((point) => <option key={String(point.id)} value={String(point.id)}>{point.name} · {point.address}</option>)}
+          </select>
+          <input type="number" min="1" max="1000000" value={row.quantity} style={{ width: 70 }} onChange={(event) => updateRow(row.key, { quantity: event.target.value })} placeholder="Quantità" />
+          <input value={row.unit} maxLength={30} style={{ width: 80 }} onChange={(event) => updateRow(row.key, { unit: event.target.value })} placeholder="Unità" />
+          <button type="button" onClick={() => removeRow(row.key)} disabled={busy}>✕</button>
+          {row.status === "ok" && <span style={{ color: "seagreen" }}>✓ caricata</span>}
+          {row.status === "error" && <span style={{ color: "crimson" }} title={row.error}>⚠ {row.error ?? "errore"}</span>}
+        </div>)}
+        <p className="form-microcopy">Ogni foto crea una conferma di consegna attribuita al distributore selezionato, con le coordinate del punto scelto: non serve il GPS di chi carica, perché non è sul posto.</p>
+        <button type="button" className="primary" disabled={busy || !ready} onClick={() => void handleSubmit()}>Carica {rows.length || ""} foto e attribuisci</button>
+      </>}
+    </div>
+  </ActionCard>;
 }
 
-async function readJson<T>(request: Request): Promise<T> {
-  const length = Number(request.headers.get("content-length") ?? 0);
-  if (length > MAX_JSON_BYTES) throw new OperationsError(413, "payload_too_large", "Richiesta troppo grande.");
-  if (!(request.headers.get("content-type") ?? "").includes("application/json")) throw new OperationsError(415, "json_required", "Invia dati JSON.");
-  try { return await request.json<T>(); } catch { throw new OperationsError(400, "invalid_json", "Dati JSON non validi."); }
+type RouteStop = Delivery & { latitude: number; longitude: number };
+
+function DailyRouteCard({ deliveries, user }: { deliveries: Delivery[]; user: User }) {
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Atlantic/Canary", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  const distributors = Array.from(new Map(deliveries.filter((item) => item.distributor_user_id).map((item) => [item.distributor_user_id!, item.distributor_name ?? "Distributore"])).entries());
+  const [distributorId, setDistributorId] = useState(user.role === "distributor" ? user.id : distributors[0]?.[0] ?? "");
+  const [route, setRoute] = useState<RouteStop[]>([]);
+  const [origin, setOrigin] = useState<{ latitude: number; longitude: number } | null>(null);
+  const candidates = deliveries.filter((item) => item.distributor_user_id === distributorId && item.scheduled_for === today && item.status !== "delivered" && item.distribution_point_latitude_e6 != null && item.distribution_point_longitude_e6 != null);
+
+  async function calculate() {
+    const current = await currentLocation();
+    const stops = candidates.map((item) => ({ ...item, latitude: Number(item.distribution_point_latitude_e6) / 1_000_000, longitude: Number(item.distribution_point_longitude_e6) / 1_000_000 }));
+    setOrigin(current);
+    setRoute(optimizeDeliveryRoute(current, stops));
+  }
+
+  const segments = origin ? buildGoogleMapsSegments(origin, route) : [];
+  return <article className="module-card daily-route-card"><header><div><span className="module-index">00</span><div><h2>Percorso consegne di oggi</h2><p>{today} · ordinamento dalla posizione attuale</p></div></div><span className="route-count">{candidates.length} tappe</span></header>{user.role !== "distributor" && <select value={distributorId} onChange={(event) => { setDistributorId(event.target.value); setRoute([]); setOrigin(null); }}><option value="">Seleziona Distributore</option>{distributors.map(([id, name]) => <option value={id} key={id}>{name}</option>)}</select>}<button className="primary location-button" disabled={!candidates.length} onClick={() => void calculate()}>Ordina dalla mia posizione</button>{!candidates.length && <p className="form-microcopy">Nessuna consegna di oggi collegata a un punto autorizzato.</p>}{route.length > 0 && <><ol className="route-stop-list">{route.map((stop, index) => <li key={stop.id}><span>{index + 1}</span><div><strong>{stop.distribution_point_name ?? stop.client_company}</strong><small>{stop.distribution_point_address} · {stop.quantity} {stop.unit}</small></div><a href={pointNavigationUrl(stop)} target="_blank" rel="noopener noreferrer">Apri ↗</a></li>)}</ol><div className="route-segments">{segments.map((url, index) => <a href={url} target="_blank" rel="noopener noreferrer" key={url}>Avvia tratta {index + 1} ↗</a>)}</div><p className="form-microcopy">Le tratte sono divise in gruppi compatibili con la navigazione mobile; insieme coprono tutte le consegne ordinate.</p></>}</article>;
 }
 
-function json(value: unknown, status = 200): Response {
-  return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
+function pointNavigationUrl(stop: RouteStop) { return `https://www.google.com/maps/search/?api=1&query=${stop.latitude},${stop.longitude}`; }
+
+function photoAiSummary(row: RecordRow): { verdict: string; magazinesDetected: boolean; displayDetected: boolean; possibleDuplicate: boolean; confidence: number } | null {
+  if (!row.ai_result_json) return null;
+  try { return JSON.parse(String(row.ai_result_json)); } catch { return null; }
 }
 
-function errorResponse(error: OperationsError): Response {
-  return json({ error: { code: error.code, message: error.message } }, error.status);
+function SalesPanel({ data, user, users, clients, busy, run }: PanelProps & { users: User[]; clients: Client[] }) {
+  const canManage = ["super_admin", "admin", "sales_manager"].includes(user.role);
+  const salesUsers = users.filter((item) => ["sales", "sales_manager"].includes(item.role));
+  return <div className="hub-stack">
+    <div className="hub-two">
+      {["sales", "sales_manager"].includes(user.role) && <ActionCard index="01" title="Check-in commerciale" text="Obiettivo ore 09:00, tolleranza fino alle 09:15.">
+        <button className="primary location-button" disabled={busy} onClick={() => void run(async () => { const location = await currentLocation(); await post("/api/operations/sales-checkins", location); }, "Check-in registrato.")}>Registra posizione adesso</button>
+        <p className="form-microcopy">Fuori dall’area dell’isola il check-in viene marcato per verifica.</p>
+      </ActionCard>}
+      {canManage && <ActionCard index="02" title="Assegna doppio task" text="Visita commerciale o controllo display.">
+        <form onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const fd = new FormData(form); void run(() => post("/api/operations/sales-tasks", Object.fromEntries(fd)), "Attività assegnata.", form); }}>
+          <select name="userId" required><option value="">Commerciale</option>{salesUsers.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.island}</option>)}</select><select name="clientId"><option value="">Nessun cliente collegato</option>{clients.map((client) => <option key={client.id} value={client.id}>{client.company_name}</option>)}</select><select name="kind"><option value="visit">Visita</option><option value="display_check">Controllo display</option></select><input name="title" placeholder="Obiettivo attività" required /><input name="scheduledFor" type="datetime-local" required /><button className="primary" disabled={busy}>Assegna</button>
+        </form>
+      </ActionCard>}
+    </div>
+    <div className="hub-two">
+      <DataCard title="Attività aperte" count={data.salesTasks.filter((row) => row.status === "open").length}>{data.salesTasks.length ? data.salesTasks.map((row) => <div className="hub-list-row" key={String(row.id)}><div><strong>{row.title}</strong><small>{row.user_name} · {row.kind === "visit" ? "Visita" : "Display"} · {when(row.scheduled_for)}</small></div><span className={`module-status ${row.status}`}>{row.status}</span>{row.status === "open" && (row.user_id === user.id || canManage) && <button className="mini-complete" disabled={busy} onClick={() => void run(() => post("/api/operations/sales-tasks/complete", { id: row.id }), "Attività completata.")}>Completa</button>}</div>) : <MiniEmpty text="Nessuna attività commerciale." />}</DataCard>
+      <DataCard title="Leaderboard" count={data.leaderboard.length}>{data.leaderboard.length ? data.leaderboard.map((row, index) => <div className="leader-row" key={String(row.user_id)}><span>{index + 1}</span><div><strong>{row.user_name}</strong><small>{row.island} · {row.won_count} chiusi</small></div><b>{euros(Number(row.won_value_cents))}</b></div>) : <MiniEmpty text="La classifica si alimenta con le opportunità chiuse." />}</DataCard>
+    </div>
+    <div className="bundle-strip"><div><small>Bundle live</small><h2>Offerta commerciale pronta</h2></div>{data.bundles.map((row) => <div key={String(row.id)}><strong>{row.name}</strong><span>{euros(Number(row.monthly_price_cents))}/mese</span><small>{row.description}</small></div>)}</div>
+  </div>;
 }
 
-function clean(value: unknown, maxLength: number): string {
-  return String(value ?? "").trim().replace(/\s+/g, " ").slice(0, maxLength);
+type PanelProps = { data: Snapshot; user: User; busy: boolean; run: (action: () => Promise<unknown>, success: string, form?: HTMLFormElement) => Promise<void> };
+
+function ActionCard({ index, title, text, children }: { index: string; title: string; text: string; children: React.ReactNode }) {
+  return <article className="module-card action-card"><header><div><span className="module-index">{index}</span><div><h2>{title}</h2><p>{text}</p></div></div></header><div className="action-body">{children}</div></article>;
 }
 
-function cleanOptional(value: unknown, maxLength: number): string | null {
-  return clean(value, maxLength) || null;
+function DataCard({ title, count, children }: { title: string; count: number; children: React.ReactNode }) {
+  return <article className="module-card data-module"><header><div><h2>{title}</h2></div><small>{count} record</small></header><div className="hub-list">{children}</div></article>;
 }
 
-function normalizePhone(value: unknown): string {
-  const raw = String(value ?? "").trim();
-  const plus = raw.startsWith("+") ? "+" : "";
-  return `${plus}${raw.replace(/\D/g, "")}`.slice(0, 20);
+function ListRow({ title, subtitle, meta, status }: { title: string; subtitle: string; meta: string; status: string }) {
+  return <div className="hub-list-row"><div><strong>{title}</strong><small>{subtitle}</small></div><b>{meta}</b><span className={`module-status ${status}`}>{status}</span></div>;
 }
 
-function isIsland(value: string): value is typeof ISLANDS[number] {
-  return ISLANDS.includes(value as typeof ISLANDS[number]);
+function HubMetric({ label, value, note }: { label: string; value: string | number; note: string }) {
+  return <div className="hub-metric"><small>{label}</small><strong>{value}</strong><span>{note}</span></div>;
 }
 
-function positiveInt(value: unknown, max: number): number {
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 1 || parsed > max) throw new OperationsError(400, "invalid_number", `Inserisci un intero tra 1 e ${max}.`);
-  return parsed;
+function Progress({ label, value }: { label: string; value: number }) {
+  return <div><header><strong>{label}</strong><span>{value}%</span></header><div className="progress-track"><i style={{ width: `${value}%` }} /></div></div>;
 }
 
-function nonNegativeInt(value: unknown, max: number): number {
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 0 || parsed > max) throw new OperationsError(400, "invalid_number", `Inserisci un intero tra 0 e ${max}.`);
-  return parsed;
+function IslandSelect({ user }: { user: User }) {
+  if (!["super_admin", "admin"].includes(user.role)) return <input type="hidden" name="island" value={user.island ?? ""} />;
+  return <select name="island" required><option value="">Seleziona isola</option>{ISLANDS.map((island) => <option key={island}>{island}</option>)}</select>;
 }
 
-function canaryDateKey(value: Date): string {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "Atlantic/Canary", year: "numeric", month: "2-digit", day: "2-digit" }).format(value);
+function MiniEmpty({ text }: { text: string }) { return <div className="mini-empty"><span>◇</span><p>{text}</p></div>; }
+
+async function currentLocation(): Promise<{ latitude: number; longitude: number }> {
+  if (!("geolocation" in navigator)) throw new RequestError("Geolocalizzazione non disponibile sul dispositivo.");
+  return new Promise((resolve, reject) => navigator.geolocation.getCurrentPosition(
+    (position) => resolve({ latitude: position.coords.latitude, longitude: position.coords.longitude }),
+    () => reject(new RequestError("Consenti l’accesso alla posizione per completare l’operazione.")),
+    { enableHighAccuracy: true, timeout: 15_000, maximumAge: 0 },
+  ));
 }
 
-function requiredCoordinate(value: unknown, min: number, max: number): number {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < min || parsed > max) throw new OperationsError(400, "invalid_coordinates", "Coordinate geografiche non valide.");
-  return parsed;
-}
-
-function optionalCoordinate(value: unknown, min: number, max: number): number | null {
-  if (value === null || value === undefined || String(value).trim() === "") return null;
-  return requiredCoordinate(value, min, max);
-}
-
-function toE6(value: number | null): number | null {
-  return value === null ? null : Math.round(value * 1_000_000);
-}
-
-function secureCode(): string {
-  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  const bytes = crypto.getRandomValues(new Uint8Array(10));
-  return [...bytes].map((byte) => alphabet[byte % alphabet.length]).join("");
-}
-
-async function sha256(value: string | ArrayBuffer): Promise<string> {
-  const bytes = typeof value === "string" ? new TextEncoder().encode(value) : new Uint8Array(value);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-function timingSafeHex(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let difference = 0;
-  for (let index = 0; index < a.length; index += 1) difference |= a.charCodeAt(index) ^ b.charCodeAt(index);
-  return difference === 0;
-}
-
-function stableJson(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  const record = value as Record<string, unknown>;
-  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
-}
-
-function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const radius = 6_371_000;
-  const toRadians = (value: number) => value * Math.PI / 180;
-  const dLat = toRadians(lat2 - lat1);
-  const dLon = toRadians(lon2 - lon1);
-  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(dLon / 2) ** 2;
-  return radius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-function extensionFor(contentType: string): string {
-  if (contentType === "image/png") return "png";
-  if (contentType === "image/webp") return "webp";
-  return "jpg";
-}

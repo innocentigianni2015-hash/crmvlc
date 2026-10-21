@@ -629,10 +629,43 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
     throw new OperationsError(400, "invalid_photo", "Carica una foto JPG, PNG o WebP fino a 8 MB.");
   }
   let deliveryId = clean(form.get("deliveryId"), 80);
-  const latitude = requiredCoordinate(form.get("latitude"), -90, 90);
-  const longitude = requiredCoordinate(form.get("longitude"), -180, 180);
+  const onBehalfOfDistributorId = ["super_admin", "admin", "sales_manager"].includes(user.role)
+    ? cleanOptional(form.get("distributorId"), 80)
+    : null;
   let selfReported = false;
-  if (!deliveryId) {
+  let adminBulkUpload = false;
+  let latitude: number;
+  let longitude: number;
+  if (!deliveryId && onBehalfOfDistributorId) {
+    adminBulkUpload = true;
+    const distributor = await env.DB.prepare("SELECT id, island FROM users WHERE id = ? AND role = 'distributor' AND active = 1 LIMIT 1")
+      .bind(onBehalfOfDistributorId).first<{ id: string; island: string | null }>();
+    if (!distributor || !distributor.island || !canAccessIsland(user, distributor.island)) {
+      throw new OperationsError(400, "invalid_distributor", "Distributore non disponibile nel tuo perimetro.");
+    }
+    const distributionPointId = clean(form.get("distributionPointId"), 80);
+    const quantity = positiveInt(form.get("quantity"), 1_000_000);
+    const unit = clean(form.get("unit"), 30);
+    const reminderDays = Math.min(60, Math.max(1, nonNegativeInt(form.get("reminderDays"), 60) || 7));
+    const point = await env.DB.prepare(
+      "SELECT p.id, p.client_id, p.island, p.address, p.latitude_e6, p.longitude_e6, c.contact_name, c.email, c.phone FROM distribution_points p LEFT JOIN clients c ON c.id = p.client_id WHERE p.id = ? AND p.island = ? LIMIT 1",
+    ).bind(distributionPointId, distributor.island).first<{ id: string; client_id: string | null; island: string; address: string; latitude_e6: number; longitude_e6: number; contact_name: string | null; email: string | null; phone: string | null }>();
+    if (!point || !unit) throw new OperationsError(404, "point_not_found", "Scegli un punto di distribuzione valido per l'isola del distributore.");
+    latitude = point.latitude_e6 / 1_000_000;
+    longitude = point.longitude_e6 / 1_000_000;
+    deliveryId = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    const nextCheckDueAt = new Date(Date.now() + reminderDays * 86_400_000).toISOString();
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO deliveries (id, client_id, distributor_user_id, distribution_point_id, island, status, quantity, unit, scheduled_for, delivery_contact_name, delivery_contact_email, delivery_contact_phone, delivery_address, notes, version, created_by, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'delivered', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
+      ).bind(deliveryId, point.client_id, distributor.id, point.id, point.island, quantity, unit, canaryDateKey(new Date()), point.contact_name, point.email, point.phone, point.address, "Carico multiplo registrato dall'amministrazione per conto del Distributore.", user.id, createdAt, createdAt, createdAt),
+      env.DB.prepare("UPDATE distribution_points SET next_check_due_at = ?, updated_at = ? WHERE id = ?").bind(nextCheckDueAt, createdAt, point.id),
+    ]);
+    selfReported = true;
+  } else if (!deliveryId) {
+    latitude = requiredCoordinate(form.get("latitude"), -90, 90);
+    longitude = requiredCoordinate(form.get("longitude"), -180, 180);
     if (user.role !== "distributor" || !user.island) throw new OperationsError(400, "delivery_required", "Seleziona una consegna.");
     const distributionPointId = clean(form.get("distributionPointId"), 80);
     const quantity = positiveInt(form.get("quantity"), 1_000_000);
@@ -652,6 +685,9 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
       env.DB.prepare("UPDATE distribution_points SET next_check_due_at = ?, updated_at = ? WHERE id = ?").bind(nextCheckDueAt, createdAt, point.id),
     ]);
     selfReported = true;
+  } else {
+    latitude = requiredCoordinate(form.get("latitude"), -90, 90);
+    longitude = requiredCoordinate(form.get("longitude"), -180, 180);
   }
   const delivery = await env.DB.prepare("SELECT d.id, d.distributor_user_id, d.island, d.quantity, d.unit, d.distribution_point_id, p.name AS point_name, p.address AS point_address, p.latitude_e6 AS point_latitude_e6, p.longitude_e6 AS point_longitude_e6 FROM deliveries d LEFT JOIN distribution_points p ON p.id = d.distribution_point_id WHERE d.id = ? LIMIT 1").bind(deliveryId).first<{ id: string; distributor_user_id: string; island: string; quantity: number; unit: string; distribution_point_id: string | null; point_name: string | null; point_address: string | null; point_latitude_e6: number | null; point_longitude_e6: number | null }>();
   if (!delivery || !canAccessIsland(user, delivery.island) || (user.role === "distributor" && delivery.distributor_user_id !== user.id)) {
@@ -686,8 +722,8 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
     mutations.push(env.DB.prepare("UPDATE deliveries SET status = 'delivered', completed_at = ?, version = version + 1, updated_at = ? WHERE id = ? AND distributor_user_id = ? AND status IN ('assigned','in_progress','issue')").bind(now, now, delivery.id, user.id));
   }
   await env.DB.batch(mutations);
-  await appendOperationsAudit(env, request, user, "photo_audit.created", "photo_audit", id, { deliveryId, selfReported, digest, distanceM: nearest?.distanceM ?? null, qualityScore, duplicateOfAuditId: duplicate?.id ?? null, aiVerdict: aiAnalysis.verdict });
-  return json({ id, deliveryId, selfReported, status: "pending", qualityScore, geofenceDistanceM: nearest?.distanceM ?? null, watermarkText, aiVerdict: aiAnalysis.verdict, duplicate: Boolean(duplicate) }, 201);
+  await appendOperationsAudit(env, request, user, "photo_audit.created", "photo_audit", id, { deliveryId, selfReported, digest, distanceM: nearest?.distanceM ?? null, qualityScore, duplicateOfAuditId: duplicate?.id ?? null, aiVerdict: aiAnalysis.verdict, adminBulkUpload, onBehalfOfDistributorId: adminBulkUpload ? delivery.distributor_user_id : null });
+  return json({ id, deliveryId, selfReported, adminBulkUpload, distributorUserId: delivery.distributor_user_id, status: "pending", qualityScore, geofenceDistanceM: nearest?.distanceM ?? null, watermarkText, aiVerdict: aiAnalysis.verdict, duplicate: Boolean(duplicate) }, 201);
 }
 
 type PhotoAiResult = {

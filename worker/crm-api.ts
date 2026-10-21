@@ -84,6 +84,7 @@ type ClientRow = {
   owner_sales_manager_id?: string | null;
   notes: string | null;
   version: number;
+  archived_at?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -417,6 +418,10 @@ export async function handleCrmApi(
     const clientMatch = url.pathname.match(/^\/api\/clients\/([^/]+)$/);
     if (clientMatch && request.method === "PATCH") {
       return updateClient(request, clientMatch[1], user, env);
+    }
+    const clientArchiveMatch = url.pathname.match(/^\/api\/clients\/([^/]+)\/archive$/);
+    if (clientArchiveMatch && request.method === "PATCH") {
+      return setClientArchived(request, clientArchiveMatch[1], user, env);
     }
 
     if (url.pathname === "/api/deliveries" && request.method === "POST") {
@@ -1567,6 +1572,20 @@ async function updateClient(request: Request, clientId: string, user: UserRow, e
     version: version + 1,
   });
   return json({ ok: true });
+}
+
+async function setClientArchived(request: Request, clientId: string, user: UserRow, env: RuntimeEnv): Promise<Response> {
+  if (user.role !== "super_admin") throw new ApiError(403, "super_admin_required", "Solo il Super Admin può archiviare o ripristinare un cliente.");
+  const body = await readJson<{ archived?: boolean }>(request);
+  const archived = Boolean(body.archived);
+  const current = await env.DB.prepare("SELECT id, archived_at FROM clients WHERE id = ?").bind(clientId).first<{ id: string; archived_at: string | null }>();
+  if (!current) throw new ApiError(404, "client_not_found", "Cliente non trovato.");
+  const now = new Date().toISOString();
+  await env.DB.prepare("UPDATE clients SET archived_at = ?, updated_at = ? WHERE id = ?")
+    .bind(archived ? now : null, now, clientId)
+    .run();
+  await appendAudit(env, request, user, archived ? "client.archived" : "client.restored", "client", clientId, { archived });
+  return json({ ok: true, archived });
 }
 
 async function createDelivery(request: Request, user: UserRow, env: RuntimeEnv): Promise<Response> {

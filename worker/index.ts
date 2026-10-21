@@ -11,10 +11,18 @@ const worker = {
       if (apiResponse) return withSecurityHeaders(apiResponse);
     }
 
-    if (request.method === "GET" && url.pathname === "/") {
+    const hasAuthFlowToken = url.searchParams.has("reset") || url.searchParams.has("email-change") || url.searchParams.has("invite");
+
+    if (request.method === "GET" && url.pathname === "/" && !hasAuthFlowToken) {
       const landingUrl = new URL(request.url);
       landingUrl.pathname = "/landing";
       return withSecurityHeaders(await handler.fetch(new Request(landingUrl, request), env, ctx));
+    }
+
+    if (request.method === "GET" && url.pathname === "/" && hasAuthFlowToken) {
+      const loginUrl = new URL(request.url);
+      loginUrl.pathname = "/login";
+      return withSecurityHeaders(await handler.fetch(new Request(loginUrl, request), env, ctx));
     }
 
     if (url.pathname === "/_vinext/image") {
@@ -51,4 +59,3 @@ function withSecurityHeaders(response: Response): Response {
 }
 
 export default worker;
-

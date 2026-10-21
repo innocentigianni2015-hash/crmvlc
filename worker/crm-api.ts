@@ -643,7 +643,7 @@ async function updateProfile(request: Request, user: UserRow, env: RuntimeEnv): 
       env.DB.prepare("INSERT INTO auth_flow_tokens (id, token_hash, user_id, purpose, data_json, expires_at, consumed_at, created_at) VALUES (?, ?, ?, 'email_change', ?, ?, NULL, ?)")
         .bind(flowId, tokenHash, user.id, JSON.stringify({ newEmail: requestedEmail, language }), expiresAt, now.toISOString()),
     ]);
-    const verificationUrl = new URL("/", request.url);
+    const verificationUrl = new URL("/login", request.url);
     verificationUrl.searchParams.set("email-change", token);
     const verificationMessage = profileVerificationEmail(language, verificationUrl.toString());
     try {

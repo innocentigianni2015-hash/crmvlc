@@ -93,7 +93,7 @@ export async function sendUserInvitation(
     "UPDATE auth_flow_tokens SET consumed_at = ? WHERE user_id = ? AND purpose = 'password_reset' AND consumed_at IS NULL",
   ).bind(now, user.id).run();
   const token = await createFlow(env, user.id, "password_reset", 48 * 60);
-  const link = `${new URL(request.url).origin}/?reset=${encodeURIComponent(token)}`;
+  const link = `${new URL(request.url).origin}/login?reset=${encodeURIComponent(token)}`;
   const message = userInvitationMessage(user.language ?? "es", user.name, link);
 
   try {
@@ -224,7 +224,7 @@ async function forgotPassword(request: Request, env: AuthEnv): Promise<Response>
       if (!recent) {
         const token = await createFlow(env, user.id, "password_reset", 30);
         const origin = new URL(request.url).origin;
-        const link = `${origin}/?reset=${encodeURIComponent(token)}`;
+        const link = `${origin}/login?reset=${encodeURIComponent(token)}`;
         if (!env.EMAIL_FROM) throw new AuthError(503, "email_not_configured", "Mittente email non configurato.");
         const message = passwordResetMessage(user.language ?? "es", link);
         await env.EMAIL.send({

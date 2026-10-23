@@ -6,7 +6,7 @@ import { localeTag } from "./i18n";
 import { buildGoogleMapsSegments, optimizeDeliveryRoute } from "./delivery-route";
 
 type Role = "super_admin" | "admin" | "sales_manager" | "sales" | "distributor";
-type User = { id: string; name: string; role: Role; island: string | null };
+type User = { id: string; email?: string; name: string; role: Role; island: string | null };
 type Client = { id: string; company_name: string; island: string };
 type Delivery = {
   id: string; client_company?: string; island: string; status: string; distributor_user_id?: string; distributor_name?: string;
@@ -14,6 +14,8 @@ type Delivery = {
   distribution_point_address?: string | null; distribution_point_latitude_e6?: number | null; distribution_point_longitude_e6?: number | null;
 };
 type RecordRow = Record<string, string | number | null>;
+type BulkUploadMode = "existing" | "pending";
+type BulkUploadItem = { distributionPointId: string; name: string; area: string; quantity: string; unit: string; file: File };
 
 type Snapshot = {
   counts: { sponsors: number; vipMembers: number; couponsIssued: number; couponsRedeemed: number; distributionPoints: number; pendingPhotoAudits: number; openSalesTasks: number; availableWalletCents: number };
@@ -36,6 +38,31 @@ type Snapshot = {
 
 const ISLANDS = ["Tenerife", "Gran Canaria", "Lanzarote", "Fuerteventura", "La Palma"];
 const WHATSAPP_URL = "https://wa.me/34602576044?text=Buongiorno%2C%20contatto%20CRMVLC%20per%20un%27informazione.";
+const ARCHIVE_IMPORT_METADATA: Record<string, { name: string; area: string; quantity: string }> = {
+  "WhatsApp Image 2026-10-20 at 20.49.16 (1).jpeg": { name: "Royal Kookaburra", area: "El Matorral", quantity: "5" },
+  "WhatsApp Image 2026-10-20 at 20.49.16 (2).jpeg": { name: "Cafeteria Matoburger", area: "El Matorral", quantity: "5" },
+  "WhatsApp Image 2026-10-20 at 20.49.16.jpeg": { name: "Restaurante O’Fado", area: "Caleta de Fuste", quantity: "5" },
+  "WhatsApp Image 2026-10-20 at 20.49.17 (1).jpeg": { name: "Restaurante Mar Dorado", area: "Caleta de Fuste", quantity: "5" },
+  "WhatsApp Image 2026-10-20 at 20.49.17 (2).jpeg": { name: "Tourist Experience Fuerteventura", area: "Caleta de Fuste", quantity: "5" },
+  "WhatsApp Image 2026-10-20 at 20.49.17 (3).jpeg": { name: "Bar Claudia", area: "Caleta de Fuste", quantity: "5" },
+  "WhatsApp Image 2026-10-20 at 20.49.17.jpeg": { name: "Loveliness Estetica", area: "Caleta de Fuste", quantity: "10" },
+  "WhatsApp Image 2026-10-20 at 20.49.18 (1).jpeg": { name: "Arena Rock", area: "Caleta de Fuste", quantity: "5" },
+  "WhatsApp Image 2026-10-20 at 20.49.18 (2).jpeg": { name: "Barceló Fuerteventura Mar", area: "Caleta de Fuste", quantity: "10" },
+  "WhatsApp Image 2026-10-20 at 20.49.18 (3).jpeg": { name: "Fund Grube", area: "Caleta de Fuste", quantity: "5" },
+  "WhatsApp Image 2026-10-20 at 20.49.18.jpeg": { name: "My Tapas 66", area: "Caleta de Fuste", quantity: "10" },
+  "WhatsApp Image 2026-10-20 at 20.49.19.jpeg": { name: "La Bodeguita", area: "Caleta de Fuste", quantity: "5" },
+  "WhatsApp Image 2026-10-20 at 20.49.20 (1).jpeg": { name: "Baku Burger", area: "Caleta de Fuste", quantity: "5" },
+  "WhatsApp Image 2026-10-20 at 20.49.20 (2).jpeg": { name: "Café La Gallega", area: "Caleta de Fuste", quantity: "5" },
+  "WhatsApp Image 2026-10-20 at 20.49.20 (3).jpeg": { name: "Café Dulce de Leche", area: "Caleta de Fuste", quantity: "5" },
+  "WhatsApp Image 2026-10-20 at 20.49.20 (4).jpeg": { name: "Restaurante El Patio", area: "Caleta de Fuste", quantity: "5" },
+  "WhatsApp Image 2026-10-20 at 20.49.20.jpeg": { name: "Restaurante S75", area: "Caleta de Fuste", quantity: "5" },
+  "WhatsApp Image 2026-10-20 at 20.49.21 (1).jpeg": { name: "Café Mirante", area: "Caleta de Fuste", quantity: "5" },
+  "WhatsApp Image 2026-10-20 at 20.49.21 (2).jpeg": { name: "Restaurante Venice in the Sun", area: "Caleta de Fuste", quantity: "5" },
+  "WhatsApp Image 2026-10-20 at 20.49.21.jpeg": { name: "Kobe Steak House", area: "Caleta de Fuste", quantity: "10" },
+  "WhatsApp Image 2026-10-20 at 20.49.22 (1).jpeg": { name: "Restaurante Café del Mar", area: "Ajuy", quantity: "5" },
+  "WhatsApp Image 2026-10-20 at 20.49.22 (2).jpeg": { name: "Restaurante Fado Rock", area: "Caleta de Fuste", quantity: "10" },
+  "WhatsApp Image 2026-10-20 at 20.49.22.jpeg": { name: "Nur Bistrot", area: "Caleta de Fuste", quantity: "5" },
+};
 const TABS = [
   ["overview", "Regia"],
   ["vip", "VIP & Sponsor"],
@@ -273,8 +300,9 @@ export function OperationsHub({ user, clients, users, deliveries, notify }: {
   }
 
   async function submitBulkPhotoAudit(
+    mode: BulkUploadMode,
     distributorId: string,
-    items: Array<{ distributionPointId: string; quantity: string; unit: string; file: File }>,
+    items: BulkUploadItem[],
     onProgress: (index: number, status: "ok" | "error", message?: string) => void,
   ) {
     if (!distributorId) { notify("Seleziona il distributore.", "error"); return; }
@@ -284,25 +312,61 @@ export function OperationsHub({ user, clients, users, deliveries, notify }: {
     for (let index = 0; index < items.length; index += 1) {
       const item = items[index];
       try {
-        if (!item.distributionPointId) throw new Error("Seleziona il punto di distribuzione per questa foto.");
+        if (mode === "existing" && !item.distributionPointId) throw new Error("Seleziona il punto di distribuzione per questa foto.");
+        if (mode === "pending" && (!item.name.trim() || !item.area.trim())) throw new Error("Inserisci nome del locale e zona.");
         if (!(item.file instanceof File) || item.file.size === 0) throw new Error("Foto mancante.");
+        const photo = await prepareDeliveryPhoto(item.file);
         const upload = new FormData();
         upload.set("distributorId", distributorId);
-        upload.set("distributionPointId", item.distributionPointId);
+        if (mode === "existing") upload.set("distributionPointId", item.distributionPointId);
+        else {
+          upload.set("name", item.name);
+          upload.set("area", item.area);
+        }
         upload.set("quantity", item.quantity || "1");
         upload.set("unit", item.unit || "copie");
         upload.set("reminderDays", "7");
-        upload.set("photo", item.file, item.file.name);
-        await request("/api/operations/photo-audits", { method: "POST", body: upload });
+        upload.set("photo", photo, photo.name);
+        await request(mode === "pending" ? "/api/operations/distribution-points/import-draft" : "/api/operations/photo-audits", { method: "POST", body: upload });
         okCount += 1;
         onProgress(index, "ok");
       } catch (error) {
         onProgress(index, "error", error instanceof Error ? error.message : "Caricamento non riuscito.");
       }
     }
-    notify(`${okCount}/${items.length} foto caricate e attribuite al distributore.`, okCount === items.length ? "ok" : "error");
+    notify(mode === "pending"
+      ? `${okCount}/${items.length} nuovi locali caricati, attribuiti e segnati da completare.`
+      : `${okCount}/${items.length} foto caricate e attribuite al distributore.`, okCount === items.length ? "ok" : "error");
     await refresh();
     setBusy(false);
+  }
+
+  async function submitPointLocation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    setBusy(true);
+    try {
+      const formData = new FormData(form);
+      let latitude = String(formData.get("latitude") ?? "").trim();
+      let longitude = String(formData.get("longitude") ?? "").trim();
+      if (formData.get("captureCurrentLocation") === "1") {
+        const location = await currentLocation();
+        latitude = String(location.latitude);
+        longitude = String(location.longitude);
+      }
+      await post("/api/operations/distribution-points/complete-location", {
+        id: formData.get("id"),
+        address: formData.get("address"),
+        latitude,
+        longitude,
+      });
+      notify("Indirizzo e posizione del locale completati.");
+      await refresh();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Posizione non salvata.", "error");
+    } finally {
+      setBusy(false);
+    }
   }
 
   if (!data) return <section className="ops-page"><div className="module-loading"><span /><p>Caricamento moduli operativi…</p></div></section>;
@@ -322,7 +386,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify }: {
     {tab === "vip" && user.role !== "distributor" && <VipPanel data={data} user={user} clients={clients} busy={busy} run={run} />}
     {tab === "finance" && user.role !== "distributor" && <FinancePanel data={data} user={user} busy={busy} run={run} />}
     {tab === "inventory" && user.role !== "distributor" && <InventoryPanel data={data} user={user} busy={busy} run={run} />}
-    {tab === "distribution" && <GeoAuditPanel data={data} user={user} users={users} clients={clients} deliveries={deliveries} busy={busy} run={run} submitPhotoAudit={submitPhotoAudit} submitPointRegistration={submitPointRegistration} submitDeliveryCheck={submitDeliveryCheck} submitBulkPhotoAudit={submitBulkPhotoAudit} />}
+    {tab === "distribution" && <GeoAuditPanel data={data} user={user} users={users} clients={clients} deliveries={deliveries} busy={busy} run={run} submitPhotoAudit={submitPhotoAudit} submitPointRegistration={submitPointRegistration} submitDeliveryCheck={submitDeliveryCheck} submitBulkPhotoAudit={submitBulkPhotoAudit} submitPointLocation={submitPointLocation} />}
     {tab === "sales" && user.role !== "distributor" && <SalesPanel data={data} user={user} users={users} clients={clients} busy={busy} run={run} />}
   </section>;
 }
@@ -445,7 +509,7 @@ function InventoryPanel({ data, user, busy, run }: PanelProps) {
   </div>;
 }
 
-function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, submitPhotoAudit, submitPointRegistration, submitDeliveryCheck, submitBulkPhotoAudit }: PanelProps & {
+function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, submitPhotoAudit, submitPointRegistration, submitDeliveryCheck, submitBulkPhotoAudit, submitPointLocation }: PanelProps & {
   users: User[];
   clients: Client[];
   deliveries: Delivery[];
@@ -453,10 +517,12 @@ function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, subm
   submitPointRegistration: (event: FormEvent<HTMLFormElement>) => void;
   submitDeliveryCheck: (event: FormEvent<HTMLFormElement>) => void;
   submitBulkPhotoAudit: (
+    mode: BulkUploadMode,
     distributorId: string,
-    items: Array<{ distributionPointId: string; quantity: string; unit: string; file: File }>,
+    items: BulkUploadItem[],
     onProgress: (index: number, status: "ok" | "error", message?: string) => void,
   ) => Promise<void>;
+  submitPointLocation: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   const canManage = ["super_admin", "admin", "sales_manager"].includes(user.role);
   const freeConfirmationPoints = data.distributionPoints;
@@ -464,7 +530,7 @@ function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, subm
   const isOverdue = (row: RecordRow) => Boolean(row.next_check_due_at) && new Date(String(row.next_check_due_at)).getTime() <= nowMs;
   return <div className="hub-stack">
     <DailyRouteCard deliveries={deliveries} user={user} />
-    {user.role === "distributor" && <DistributorPointsBoard points={freeConfirmationPoints} deliveries={deliveries} busy={busy} submitPointRegistration={submitPointRegistration} submitRefill={submitPhotoAudit} submitDeliveryCheck={submitDeliveryCheck} submitAssignedDelivery={submitPhotoAudit} />}
+    {user.role === "distributor" && <DistributorPointsBoard points={freeConfirmationPoints} deliveries={deliveries} busy={busy} submitPointRegistration={submitPointRegistration} submitRefill={submitPhotoAudit} submitDeliveryCheck={submitDeliveryCheck} submitAssignedDelivery={submitPhotoAudit} submitPointLocation={submitPointLocation} />}
     <div className="hub-two">
       {canManage && <ActionCard index="01" title="Punto distribuzione" text="Coordinate, capacità, stock e visibilità pubblica.">
         <form onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const fd = new FormData(form); void run(() => post("/api/operations/distribution-points", { ...Object.fromEntries(fd), publicVisible: fd.get("publicVisible") === "on" }), "Punto distribuzione creato.", form); }}>
@@ -479,17 +545,39 @@ function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, subm
           <button className="primary" disabled={busy || !deliveries.length}>Scatta foto e registra consegna</button>
         </form>
       </ActionCard>}
-      {canManage && <BulkPhotoUploadCard user={user} users={users} distributionPoints={data.distributionPoints} busy={busy} onSubmit={submitBulkPhotoAudit} />}
+      {canManage && <BulkPhotoUploadCard users={users} distributionPoints={data.distributionPoints} busy={busy} onSubmit={submitBulkPhotoAudit} />}
     </div>
     <div className="hub-two">
-      <DataCard title="Punti e stock" count={data.distributionPoints.length}><a className="public-map-link" href="/mappe" target="_blank" rel="noopener noreferrer">Apri mappa pubblica ↗</a>{data.distributionPoints.length ? data.distributionPoints.map((row) => <div className="hub-list-row" key={String(row.id)}><div><strong>{row.name}</strong><small>{row.address} · {row.island}{Number(row.self_registered) === 1 ? " · registrato da distributore" : ""}</small>{row.next_check_due_at && <small className={isOverdue(row) ? "ai-review" : ""}>{isOverdue(row) ? "Da controllare" : `Controllo entro ${when(row.next_check_due_at)}`}</small>}</div><b className={Number(row.stock) <= Math.max(5, Number(row.capacity) * .15) ? "low-stock" : ""}>{row.stock}/{row.capacity}</b></div>) : <MiniEmpty text="Nessun punto geolocalizzato." />}</DataCard>
+      <DataCard title="Punti e stock" count={data.distributionPoints.length}>
+        <a className="public-map-link" href="/mappe" target="_blank" rel="noopener noreferrer">Apri mappa pubblica ↗</a>
+        {data.distributionPoints.length ? data.distributionPoints.map((row) => {
+          const pending = row.location_status === "pending";
+          return <div className="hub-list-row" key={String(row.id)} style={{ flexWrap: "wrap" }}>
+            <div style={{ flex: "1 1 220px" }}>
+              <strong>{row.name}</strong>
+              <small>{pending ? `${row.area ?? "Zona non indicata"} · ${row.island}` : `${row.address} · ${row.island}`}{Number(row.self_registered) === 1 ? " · registrato da distributore" : ""}</small>
+              {pending
+                ? <small className="ai-review">POSIZIONE DA COMPLETARE · assegnato a {row.assigned_distributor_name ?? row.assigned_distributor_email ?? "distributore"}</small>
+                : row.next_check_due_at && <small className={isOverdue(row) ? "ai-review" : ""}>{isOverdue(row) ? "Da controllare" : `Controllo entro ${when(row.next_check_due_at)}`}</small>}
+            </div>
+            <b className={!pending && Number(row.stock) <= Math.max(5, Number(row.capacity) * .15) ? "low-stock" : ""}>{row.stock}/{row.capacity}</b>
+            {pending && <form style={{ flexBasis: "100%" }} onSubmit={submitPointLocation}>
+              <input type="hidden" name="id" value={String(row.id)} />
+              <input name="address" placeholder="Indirizzo completo" required maxLength={260} />
+              <div className="field-pair"><input name="latitude" type="number" step="0.000001" placeholder="Latitudine (oppure lascia vuoto)" /><input name="longitude" type="number" step="0.000001" placeholder="Longitudine (oppure lascia vuoto)" /></div>
+              <p className="form-microcopy">Se lasci vuote le coordinate, il CRM prova a ricavarle dall’indirizzo.</p>
+              <button className="primary" disabled={busy}>Completa indirizzo e posizione</button>
+            </form>}
+          </div>;
+        }) : <MiniEmpty text="Nessun punto geolocalizzato." />}
+      </DataCard>
       <DataCard title="Audit fotografici" count={data.photoAudits.length}>{data.photoAudits.length ? data.photoAudits.map((row) => { const ai = photoAiSummary(row); return <div className="hub-list-row audit-row" key={String(row.id)}><div><strong>{row.distributor_name}</strong><small>{row.island} · {when(row.created_at)} · distanza {row.geofence_distance_m ?? "—"} m</small>{ai && <small className={ai.verdict === "compliant_candidate" ? "ai-pass" : "ai-review"}>AI: {ai.magazinesDetected || ai.displayDetected ? "riviste/espositore rilevati" : "contenuto da verificare"} · {ai.possibleDuplicate ? "possibile duplicato" : "nessun duplicato rilevato"} · confidenza {ai.confidence}%</small>}{row.duplicate_of_audit_id && <small className="ai-review">Hash identico a una foto già registrata.</small>}</div><b>Qualità {row.quality_score}%</b><span className={`module-status ${row.status}`}>{row.status}</span>{canManage && row.status === "pending" && <div className="inline-actions"><button disabled={busy} onClick={() => void run(() => post("/api/operations/photo-audits/review", { id: row.id, status: "approved" }), "Foto approvata.")}>Approva</button><button disabled={busy} onClick={() => void run(() => post("/api/operations/photo-audits/review", { id: row.id, status: "rejected" }), "Foto rifiutata.")}>Rifiuta</button></div>}</div>; }) : <MiniEmpty text="Nessuna foto da verificare." />}</DataCard>
     </div>
     <DataCard title="Controlli ritiro" count={data.deliveryChecks.length}>{data.deliveryChecks.length ? data.deliveryChecks.map((row) => <div className="hub-list-row" key={String(row.id)}><div><strong>{row.point_name}</strong><small>{row.distributor_name ? `${row.distributor_name} · ` : ""}{when(row.created_at)} · distanza {row.geofence_distance_m ?? "—"} m</small></div><b>{row.quantity_found}/{row.quantity_left}</b><span className="module-status">prese {row.quantity_taken}</span></div>) : <MiniEmpty text="Nessun controllo di ritiro registrato." />}</DataCard>
   </div>;
 }
 
-function DistributorPointsBoard({ points, deliveries, busy, submitPointRegistration, submitRefill, submitDeliveryCheck, submitAssignedDelivery }: {
+function DistributorPointsBoard({ points, deliveries, busy, submitPointRegistration, submitRefill, submitDeliveryCheck, submitAssignedDelivery, submitPointLocation }: {
   points: RecordRow[];
   deliveries: Delivery[];
   busy: boolean;
@@ -497,13 +585,17 @@ function DistributorPointsBoard({ points, deliveries, busy, submitPointRegistrat
   submitRefill: (event: FormEvent<HTMLFormElement>) => void;
   submitDeliveryCheck: (event: FormEvent<HTMLFormElement>) => void;
   submitAssignedDelivery: (event: FormEvent<HTMLFormElement>) => void;
+  submitPointLocation: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   const nowMs = Date.now();
   const isOverdue = (row: RecordRow) => Boolean(row.next_check_due_at) && new Date(String(row.next_check_due_at)).getTime() <= nowMs;
   const [showNewPoint, setShowNewPoint] = useState(points.length === 0);
   const [expanded, setExpanded] = useState<{ id: string; mode: "refill" | "check" } | null>(null);
-  const overdueCount = points.filter(isOverdue).length;
+  const overdueCount = points.filter((row) => row.location_status !== "pending" && isOverdue(row)).length;
   const sorted = [...points].sort((a, b) => {
+    const aPending = a.location_status === "pending" ? 0 : 1;
+    const bPending = b.location_status === "pending" ? 0 : 1;
+    if (aPending !== bPending) return aPending - bPending;
     const aOverdue = isOverdue(a) ? 0 : 1;
     const bOverdue = isOverdue(b) ? 0 : 1;
     if (aOverdue !== bOverdue) return aOverdue - bOverdue;
@@ -545,27 +637,37 @@ function DistributorPointsBoard({ points, deliveries, busy, submitPointRegistrat
       {!points.length
         ? <MiniEmpty text="Nessun punto ancora: registra il primo qui sopra." />
         : sorted.map((row) => {
+          const pending = row.location_status === "pending";
           const overdue = isOverdue(row);
           const rowId = String(row.id);
           return <div className="hub-list-row distributor-point-row" key={rowId} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-start", padding: "8px 0", borderTop: "1px solid rgba(0,0,0,.08)" }}>
             <div style={{ flex: "1 1 200px" }}>
               <strong>{row.name}</strong>
-              <small style={{ display: "block" }}>{row.address}</small>
-              <small className={overdue ? "ai-review" : ""}>{overdue ? "DA CONTROLLARE" : row.next_check_due_at ? `Controllo entro ${when(row.next_check_due_at)}` : "Nessun controllo programmato"}</small>
+              <small style={{ display: "block" }}>{pending ? row.area ?? "Zona da completare" : row.address}</small>
+              {pending
+                ? <small className="ai-review">POSIZIONE DA COMPLETARE · foto e consegna già assegnate a te</small>
+                : <small className={overdue ? "ai-review" : ""}>{overdue ? "DA CONTROLLARE" : row.next_check_due_at ? `Controllo entro ${when(row.next_check_due_at)}` : "Nessun controllo programmato"}</small>}
             </div>
             <b>{row.stock}/{row.capacity}</b>
-            <div className="inline-actions">
+            {!pending && <div className="inline-actions">
               <button type="button" disabled={busy} onClick={() => toggle(rowId, "refill")}>Rifornisci</button>
               <button type="button" disabled={busy} onClick={() => toggle(rowId, "check")}>{overdue ? "Fai il controllo" : "Controlla ora"}</button>
-            </div>
-            {expanded?.id === rowId && expanded.mode === "refill" && <form style={{ flexBasis: "100%" }} onSubmit={(event) => { submitRefill(event); setExpanded(null); }}>
+            </div>}
+            {pending && <form style={{ flexBasis: "100%" }} onSubmit={submitPointLocation}>
+              <input type="hidden" name="id" value={rowId} />
+              <input type="hidden" name="captureCurrentLocation" value="1" />
+              <input name="address" placeholder="Indirizzo o riferimento del locale" required maxLength={260} />
+              <p className="form-microcopy">Quando sei davanti al locale, premi il pulsante: il CRM userà la posizione GPS attuale.</p>
+              <button className="primary" disabled={busy}>Sono sul posto · completa posizione</button>
+            </form>}
+            {!pending && expanded?.id === rowId && expanded.mode === "refill" && <form style={{ flexBasis: "100%" }} onSubmit={(event) => { submitRefill(event); setExpanded(null); }}>
               <input type="hidden" name="distributionPointId" value={rowId} />
               <div className="field-pair"><input name="quantity" type="number" min="1" max="1000000" defaultValue="1" placeholder="Quante copie lasci" /><input name="unit" defaultValue="copie" maxLength={30} placeholder="Unità" /></div>
               <input name="reminderDays" type="number" min="1" max="60" defaultValue="7" placeholder="Torna a controllare dopo (giorni)" />
               <input name="photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" required />
               <button className="primary" disabled={busy}>Scatta foto e registra rifornimento</button>
             </form>}
-            {expanded?.id === rowId && expanded.mode === "check" && <form style={{ flexBasis: "100%" }} onSubmit={(event) => { submitDeliveryCheck(event); setExpanded(null); }}>
+            {!pending && expanded?.id === rowId && expanded.mode === "check" && <form style={{ flexBasis: "100%" }} onSubmit={(event) => { submitDeliveryCheck(event); setExpanded(null); }}>
               <input type="hidden" name="distributionPointId" value={rowId} />
               <input name="quantityFound" type="number" min="0" max="1000000" placeholder="Quante copie trovi ancora" required />
               <input name="reminderDays" type="number" min="1" max="60" defaultValue="7" placeholder="Torna a controllare dopo (giorni)" />
@@ -580,30 +682,45 @@ function DistributorPointsBoard({ points, deliveries, busy, submitPointRegistrat
   </div>;
 }
 
-type BulkPhotoRow = { key: string; distributionPointId: string; quantity: string; unit: string; file: File | null; status: "idle" | "ok" | "error"; error?: string };
+type BulkPhotoRow = { key: string; distributionPointId: string; name: string; area: string; quantity: string; unit: string; file: File | null; status: "idle" | "ok" | "error"; error?: string };
 
-function BulkPhotoUploadCard({ user, users, distributionPoints, busy, onSubmit }: {
-  user: User;
+function BulkPhotoUploadCard({ users, distributionPoints, busy, onSubmit }: {
   users: User[];
   distributionPoints: RecordRow[];
   busy: boolean;
   onSubmit: (
+    mode: BulkUploadMode,
     distributorId: string,
-    items: Array<{ distributionPointId: string; quantity: string; unit: string; file: File }>,
+    items: BulkUploadItem[],
     onProgress: (index: number, status: "ok" | "error", message?: string) => void,
   ) => Promise<void>;
 }) {
   const distributors = users.filter((item) => item.role === "distributor");
-  const [distributorId, setDistributorId] = useState("");
+  const preferredDistributor = distributors.find((item) => item.email?.toLowerCase() === "clercomo@gmail.com" || item.name.toLowerCase() === "carlo clerici");
+  const [mode, setMode] = useState<BulkUploadMode>("pending");
+  const [distributorId, setDistributorId] = useState(preferredDistributor?.id ?? "");
   const [rows, setRows] = useState<BulkPhotoRow[]>([]);
   const selectedDistributor = distributors.find((item) => item.id === distributorId) ?? null;
-  const points = selectedDistributor ? distributionPoints.filter((row) => row.island === selectedDistributor.island) : distributionPoints;
+  const points = (selectedDistributor ? distributionPoints.filter((row) => row.island === selectedDistributor.island) : distributionPoints)
+    .filter((row) => row.location_status !== "pending");
 
   function addFiles(files: FileList | null) {
     if (!files || !files.length) return;
     setRows((current) => [
       ...current,
-      ...Array.from(files).map((file) => ({ key: crypto.randomUUID(), distributionPointId: "", quantity: "1", unit: "copie", file, status: "idle" as const })),
+      ...Array.from(files).map((file) => {
+        const metadata = ARCHIVE_IMPORT_METADATA[file.name];
+        return {
+          key: crypto.randomUUID(),
+          distributionPointId: "",
+          name: metadata?.name ?? file.name.replace(/\.[^.]+$/, ""),
+          area: metadata?.area ?? "",
+          quantity: metadata?.quantity ?? "1",
+          unit: "copie",
+          file,
+          status: "idle" as const,
+        };
+      }),
     ]);
   }
 
@@ -618,21 +735,26 @@ function BulkPhotoUploadCard({ user, users, distributionPoints, busy, onSubmit }
   async function handleSubmit() {
     setRows((current) => current.map((row) => ({ ...row, status: "idle", error: undefined })));
     await onSubmit(
+      mode,
       distributorId,
-      rows.map((row) => ({ distributionPointId: row.distributionPointId, quantity: row.quantity, unit: row.unit, file: row.file as File })),
+      rows.map((row) => ({ distributionPointId: row.distributionPointId, name: row.name, area: row.area, quantity: row.quantity, unit: row.unit, file: row.file as File })),
       (index, status, message) => {
         setRows((current) => current.map((row, rowIndex) => (rowIndex === index ? { ...row, status, error: message } : row)));
       },
     );
   }
 
-  const ready = rows.length > 0 && rows.every((row) => row.distributionPointId && row.file instanceof File);
+  const ready = rows.length > 0 && rows.every((row) => row.file instanceof File && (mode === "existing" ? row.distributionPointId : row.name.trim() && row.area.trim()));
 
-  return <ActionCard index="05" title="Carico multiplo" text="Seleziona un distributore e carica più foto di consegna in un'unica operazione, senza impersonazione.">
+  return <ActionCard index="05" title="Carico multiplo" text="Carica foto per punti esistenti oppure crea nuovi locali da completare e assegnali subito al distributore.">
     <div className="bulk-upload-form">
+      <select value={mode} onChange={(event) => { setMode(event.target.value as BulkUploadMode); setRows([]); }}>
+        <option value="pending">Nuovi locali · indirizzo e posizione dopo</option>
+        <option value="existing">Punti già presenti nel CRM</option>
+      </select>
       <select value={distributorId} onChange={(event) => { setDistributorId(event.target.value); setRows([]); }}>
         <option value="">Seleziona distributore</option>
-        {distributors.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.island}</option>)}
+        {distributors.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.email ?? item.island} · {item.island}</option>)}
       </select>
       {distributorId && <>
         <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
@@ -642,18 +764,20 @@ function BulkPhotoUploadCard({ user, users, distributionPoints, busy, onSubmit }
         {rows.map((row, index) => <div key={row.key} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, padding: "6px 0", borderTop: "1px solid rgba(0,0,0,.08)" }}>
           <span style={{ minWidth: 18 }}>{index + 1}</span>
           <small style={{ maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis" }}>{row.file?.name ?? "—"}</small>
-          <select value={row.distributionPointId} onChange={(event) => updateRow(row.key, { distributionPointId: event.target.value })}>
-            <option value="">Punto di distribuzione</option>
-            {points.map((point) => <option key={String(point.id)} value={String(point.id)}>{point.name} · {point.address}</option>)}
-          </select>
+          {mode === "existing"
+            ? <select value={row.distributionPointId} onChange={(event) => updateRow(row.key, { distributionPointId: event.target.value })}>
+              <option value="">Punto di distribuzione</option>
+              {points.map((point) => <option key={String(point.id)} value={String(point.id)}>{point.name} · {point.address}</option>)}
+            </select>
+            : <><input value={row.name} maxLength={120} style={{ minWidth: 190 }} onChange={(event) => updateRow(row.key, { name: event.target.value })} placeholder="Nome locale" /><input value={row.area} maxLength={160} style={{ minWidth: 150 }} onChange={(event) => updateRow(row.key, { area: event.target.value })} placeholder="Zona" /></>}
           <input type="number" min="1" max="1000000" value={row.quantity} style={{ width: 70 }} onChange={(event) => updateRow(row.key, { quantity: event.target.value })} placeholder="Quantità" />
           <input value={row.unit} maxLength={30} style={{ width: 80 }} onChange={(event) => updateRow(row.key, { unit: event.target.value })} placeholder="Unità" />
           <button type="button" onClick={() => removeRow(row.key)} disabled={busy}>✕</button>
-          {row.status === "ok" && <span style={{ color: "seagreen" }}>✓ caricata</span>}
+          {row.status === "ok" && <span style={{ color: "seagreen" }}>✓ salvato</span>}
           {row.status === "error" && <span style={{ color: "crimson" }} title={row.error}>⚠ {row.error ?? "errore"}</span>}
         </div>)}
-        <p className="form-microcopy">Ogni foto crea una conferma di consegna attribuita al distributore selezionato, con le coordinate del punto scelto: non serve il GPS di chi carica, perché non è sul posto.</p>
-        <button type="button" className="primary" disabled={busy || !ready} onClick={() => void handleSubmit()}>Carica {rows.length || ""} foto e attribuisci</button>
+        <p className="form-microcopy">{mode === "pending" ? "Nome, zona e quantità delle 23 foto ricevute vengono riconosciuti automaticamente dal nome del file. Le foto restano segnate senza GPS finché indirizzo e posizione non vengono completati." : "Ogni foto crea una conferma attribuita al distributore con le coordinate del punto già scelto."}</p>
+        <button type="button" className="primary" disabled={busy || !ready} onClick={() => void handleSubmit()}>{mode === "pending" ? "Crea e assegna" : "Carica e attribuisci"} {rows.length || ""} {rows.length === 1 ? "locale" : "locali"}</button>
       </>}
     </div>
   </ActionCard>;

@@ -48,7 +48,7 @@ export async function handlePublicOperationsApi(request: Request, env: RuntimeEn
   const island = clean(url.searchParams.get("island"), 40);
   if (island && !isIsland(island)) return json({ error: { code: "invalid_island", message: "Isola non valida." } }, 400);
   const points = (await env.DB.prepare(
-    `SELECT id, name, island, address, latitude_e6, longitude_e6 FROM distribution_points WHERE public_visible = 1${island ? " AND island = ?" : ""} ORDER BY island, name LIMIT 500`,
+    `SELECT id, name, island, address, latitude_e6, longitude_e6 FROM distribution_points WHERE public_visible = 1 AND location_status = 'complete'${island ? " AND island = ?" : ""} ORDER BY island, name LIMIT 500`,
   ).bind(...(island ? [island] : [])).all<{ id: string; name: string; island: string; address: string; latitude_e6: number; longitude_e6: number }>()).results;
   return new Response(JSON.stringify({
     points: points.map((point) => ({ ...point, latitude: point.latitude_e6 / 1_000_000, longitude: point.longitude_e6 / 1_000_000, latitude_e6: undefined, longitude_e6: undefined })),
@@ -100,6 +100,12 @@ export async function handleOperationsApi(
     }
     if (url.pathname === "/api/operations/distribution-points/self-register" && request.method === "POST") {
       return selfRegisterDistributionPoint(request, env, user);
+    }
+    if (url.pathname === "/api/operations/distribution-points/import-draft" && request.method === "POST") {
+      return importPendingDistributionPoint(request, env, user);
+    }
+    if (url.pathname === "/api/operations/distribution-points/complete-location" && request.method === "POST") {
+      return completeDistributionPointLocation(request, env, user);
     }
     if (url.pathname === "/api/operations/distribution-points/stock" && request.method === "POST") {
       return updateDistributionStock(request, env, user);
@@ -181,10 +187,10 @@ async function operationsSnapshot(env: RuntimeEnv, user: OperationsUser): Promis
   const nowIsoForDue = new Date().toISOString();
   const distributionPoints = user.role === "distributor"
     ? (await env.DB.prepare(
-      "SELECT x.id, x.client_id, c.company_name AS client_company, x.name, x.island, x.address, x.latitude_e6, x.longitude_e6, x.capacity, x.stock, x.public_visible, x.self_registered, x.created_by, x.next_check_due_at, x.updated_at FROM distribution_points x LEFT JOIN clients c ON c.id = x.client_id WHERE x.island = ? AND x.public_visible = 1 ORDER BY (x.next_check_due_at IS NOT NULL AND x.next_check_due_at <= ?) DESC, x.next_check_due_at IS NULL, x.next_check_due_at, x.name LIMIT 300",
-    ).bind(String(user.island ?? ""), nowIsoForDue).all()).results
+      "SELECT x.id, x.client_id, c.company_name AS client_company, x.name, x.island, x.address, x.latitude_e6, x.longitude_e6, x.capacity, x.stock, x.public_visible, x.self_registered, x.created_by, x.next_check_due_at, x.area, x.location_status, x.assigned_distributor_user_id, u.name AS assigned_distributor_name, u.email AS assigned_distributor_email, x.updated_at FROM distribution_points x LEFT JOIN clients c ON c.id = x.client_id LEFT JOIN users u ON u.id = x.assigned_distributor_user_id WHERE x.island = ? AND (x.public_visible = 1 OR (x.location_status = 'pending' AND x.assigned_distributor_user_id = ?)) ORDER BY CASE x.location_status WHEN 'pending' THEN 0 ELSE 1 END, (x.next_check_due_at IS NOT NULL AND x.next_check_due_at <= ?) DESC, x.next_check_due_at IS NULL, x.next_check_due_at, x.name LIMIT 300",
+    ).bind(String(user.island ?? ""), user.id, nowIsoForDue).all()).results
     : (await env.DB.prepare(
-      `SELECT x.id, x.client_id, c.company_name AS client_company, x.name, x.island, x.address, x.latitude_e6, x.longitude_e6, x.capacity, x.stock, x.public_visible, x.self_registered, x.created_by, x.next_check_due_at, x.updated_at FROM distribution_points x LEFT JOIN clients c ON c.id = x.client_id WHERE 1 = 1${islandScope.sql} ORDER BY x.island, x.stock, x.name LIMIT 300`,
+      `SELECT x.id, x.client_id, c.company_name AS client_company, x.name, x.island, x.address, x.latitude_e6, x.longitude_e6, x.capacity, x.stock, x.public_visible, x.self_registered, x.created_by, x.next_check_due_at, x.area, x.location_status, x.assigned_distributor_user_id, u.name AS assigned_distributor_name, u.email AS assigned_distributor_email, x.updated_at FROM distribution_points x LEFT JOIN clients c ON c.id = x.client_id LEFT JOIN users u ON u.id = x.assigned_distributor_user_id WHERE 1 = 1${islandScope.sql} ORDER BY CASE x.location_status WHEN 'pending' THEN 0 ELSE 1 END, x.island, x.stock, x.name LIMIT 300`,
     ).bind(...islandScope.values).all()).results;
 
   const checkScope = isGlobalOperator(user) ? { sql: "", values: [] as string[] }
@@ -468,9 +474,10 @@ async function updateDistributionStock(request: Request, env: RuntimeEnv, user: 
   const body = await readJson<Record<string, unknown>>(request);
   const id = clean(body.id, 80);
   const stock = nonNegativeInt(body.stock, 1_000_000);
-  const row = await env.DB.prepare("SELECT id, island FROM distribution_points WHERE id = ? LIMIT 1").bind(id).first<{ id: string; island: string }>();
+  const row = await env.DB.prepare("SELECT id, island, location_status FROM distribution_points WHERE id = ? LIMIT 1").bind(id).first<{ id: string; island: string; location_status: string }>();
   if (!row || !canAccessIsland(user, row.island)) throw new OperationsError(404, "point_not_found", "Punto distribuzione non trovato.");
   if (user.role === "distributor") {
+    if (row.location_status !== "complete") throw new OperationsError(409, "location_incomplete", "Completa prima la posizione del punto.");
     const assigned = await env.DB.prepare(
       "SELECT 1 AS ok FROM deliveries WHERE distributor_user_id = ? AND distribution_point_id = ? LIMIT 1",
     ).bind(user.id, row.id).first();
@@ -504,6 +511,140 @@ async function geocodeAddress(env: RuntimeEnv, address: string, island: string):
     console.error(JSON.stringify({ level: "error", event: "geocode_failed", error: error instanceof Error ? error.message : "unknown" }));
     return null;
   }
+}
+
+async function importPendingDistributionPoint(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  requireManager(user);
+  if (!env.BUCKET) throw new OperationsError(503, "storage_missing", "Archivio fotografico non configurato.");
+  const length = Number(request.headers.get("content-length") ?? 0);
+  if (length > MAX_PHOTO_BYTES + 256_000) throw new OperationsError(413, "photo_too_large", "La foto supera 8 MB.");
+  if (!(request.headers.get("content-type") ?? "").includes("multipart/form-data")) {
+    throw new OperationsError(415, "form_required", "Invia distributore, nome del locale, zona, quantità e foto.");
+  }
+
+  const form = await request.formData();
+  const photo = form.get("photo");
+  if (!(photo instanceof File) || photo.size === 0 || photo.size > MAX_PHOTO_BYTES || !["image/jpeg", "image/png", "image/webp"].includes(photo.type)) {
+    throw new OperationsError(400, "invalid_photo", "Carica una foto JPG, PNG o WebP fino a 8 MB.");
+  }
+  const distributorId = clean(form.get("distributorId"), 80);
+  const name = clean(form.get("name"), 120);
+  const area = clean(form.get("area"), 160);
+  const quantity = positiveInt(form.get("quantity"), 1_000_000);
+  const unit = clean(form.get("unit"), 30) || "copie";
+  const reminderDays = Math.min(60, Math.max(1, nonNegativeInt(form.get("reminderDays"), 60) || 7));
+  if (!name || !area) throw new OperationsError(400, "invalid_point", "Nome del locale e zona sono obbligatori.");
+
+  const distributor = await env.DB.prepare(
+    "SELECT id, name, email, island FROM users WHERE id = ? AND role = 'distributor' AND active = 1 LIMIT 1",
+  ).bind(distributorId).first<{ id: string; name: string; email: string; island: string | null }>();
+  if (!distributor?.island || !canAccessIsland(user, distributor.island)) {
+    throw new OperationsError(400, "invalid_distributor", "Distributore non disponibile nel tuo perimetro.");
+  }
+
+  const bytes = await photo.arrayBuffer();
+  const digest = await sha256(bytes);
+  const duplicate = await env.DB.prepare(
+    "SELECT id FROM photo_audits WHERE sha256 = ? ORDER BY created_at DESC LIMIT 1",
+  ).bind(digest).first<{ id: string }>();
+  if (duplicate) throw new OperationsError(409, "photo_already_imported", "Questa foto è già presente nel CRM.");
+
+  const center = ISLAND_CENTERS[distributor.island];
+  if (!center) throw new OperationsError(400, "invalid_island", "Isola del distributore non valida.");
+  const pointId = crypto.randomUUID();
+  const deliveryId = crypto.randomUUID();
+  const auditId = crypto.randomUUID();
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const nextCheckDueAt = new Date(now.getTime() + reminderDays * 86_400_000).toISOString();
+  const address = `Indirizzo da completare · ${area}`;
+  const key = `distribution-imports/${distributor.island}/${nowIso.slice(0, 10)}/${pointId}.${extensionFor(photo.type)}`;
+  const watermarkText = `CRMVLC | IMPORT SENZA GPS | ${distributor.island} | ${nowIso} | ${digest.slice(0, 12)}`;
+  const aiAnalysis = await analyzeDeliveryPhoto(env, bytes, photo.type, {
+    quantity,
+    unit,
+    pointName: name,
+    pointAddress: area,
+    geofenceDistanceM: null,
+    exactDuplicate: false,
+  }, null);
+  aiAnalysis.verdict = "review_required";
+  aiAnalysis.reasons = ["Foto importata da archivio senza coordinate GPS; completare la posizione del locale.", ...aiAnalysis.reasons].slice(0, 4);
+
+  await env.BUCKET.put(key, bytes, {
+    httpMetadata: { contentType: photo.type, cacheControl: "private, no-store" },
+    customMetadata: { sha256: digest, watermark: watermarkText, pointId, deliveryId, source: "admin_archive_import" },
+  });
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO distribution_points (id, client_id, name, island, address, latitude_e6, longitude_e6, capacity, stock, public_visible, created_at, updated_at, created_by, self_registered, point_photo_r2_key, next_check_due_at, area, location_status, assigned_distributor_user_id) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 0, ?, ?, ?, 'pending', ?)",
+    ).bind(pointId, name, distributor.island, address, toE6(center.latitude), toE6(center.longitude), quantity, quantity, nowIso, nowIso, user.id, key, nextCheckDueAt, area, distributor.id),
+    env.DB.prepare(
+      "INSERT INTO deliveries (id, client_id, distributor_user_id, distribution_point_id, island, status, quantity, unit, scheduled_for, delivery_contact_name, delivery_contact_email, delivery_contact_phone, delivery_address, notes, version, created_by, completed_at, created_at, updated_at) VALUES (?, NULL, ?, ?, ?, 'delivered', ?, ?, ?, NULL, NULL, NULL, ?, ?, 1, ?, ?, ?, ?)",
+    ).bind(deliveryId, distributor.id, pointId, distributor.island, quantity, unit, canaryDateKey(now), area, "Foto importata dall'amministrazione; indirizzo e posizione da completare.", user.id, nowIso, nowIso, nowIso),
+    env.DB.prepare(
+      "INSERT INTO photo_audits (id, delivery_id, distributor_user_id, island, r2_key, sha256, latitude_e6, longitude_e6, geofence_distance_m, status, quality_score, duplicate_of_audit_id, ai_model, ai_verdict, ai_result_json, watermark_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'pending', ?, NULL, ?, ?, ?, ?, ?)",
+    ).bind(auditId, deliveryId, distributor.id, distributor.island, key, digest, toE6(center.latitude), toE6(center.longitude), aiAnalysis.qualityScore, aiAnalysis.model, aiAnalysis.verdict, JSON.stringify(aiAnalysis), watermarkText, nowIso),
+  ]);
+
+  await appendOperationsAudit(env, request, user, "distribution_point.archive_imported", "distribution_point", pointId, {
+    name,
+    area,
+    quantity,
+    unit,
+    distributorUserId: distributor.id,
+    distributorEmail: distributor.email,
+    deliveryId,
+    auditId,
+    originalFilename: clean(photo.name, 200),
+    locationStatus: "pending",
+  });
+  return json({ id: pointId, deliveryId, auditId, nextCheckDueAt, locationStatus: "pending", assignedDistributorUserId: distributor.id }, 201);
+}
+
+async function completeDistributionPointLocation(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  const body = await readJson<Record<string, unknown>>(request);
+  const id = clean(body.id, 80);
+  const address = clean(body.address, 260);
+  if (!id || !address) throw new OperationsError(400, "invalid_location", "Indica il punto e il suo indirizzo completo.");
+
+  const point = await env.DB.prepare(
+    "SELECT id, name, island, location_status, assigned_distributor_user_id FROM distribution_points WHERE id = ? LIMIT 1",
+  ).bind(id).first<{ id: string; name: string; island: string; location_status: string; assigned_distributor_user_id: string | null }>();
+  if (!point || !canAccessIsland(user, point.island)) throw new OperationsError(404, "point_not_found", "Punto di distribuzione non trovato.");
+  const manager = ["super_admin", "admin", "sales_manager"].includes(user.role);
+  const assignedDistributor = user.role === "distributor" && point.assigned_distributor_user_id === user.id;
+  if (!manager && !assignedDistributor) throw new OperationsError(403, "not_allowed", "Non puoi completare la posizione di questo punto.");
+  if (point.location_status !== "pending") throw new OperationsError(409, "location_already_complete", "La posizione di questo punto è già completa.");
+
+  let latitude = optionalCoordinate(body.latitude, -90, 90);
+  let longitude = optionalCoordinate(body.longitude, -180, 180);
+  if ((latitude === null) !== (longitude === null)) throw new OperationsError(400, "invalid_coordinates", "Inserisci sia latitudine sia longitudine.");
+  let geocodedAddress: string | null = null;
+  if (latitude === null || longitude === null) {
+    const geocode = await geocodeAddress(env, address, point.island);
+    if (!geocode) throw new OperationsError(422, "location_required", "Indirizzo non geolocalizzabile: inserisci le coordinate oppure completa il punto quando sei sul posto.");
+    latitude = geocode.latitude;
+    longitude = geocode.longitude;
+    geocodedAddress = geocode.formattedAddress;
+  }
+
+  const now = new Date().toISOString();
+  await env.DB.batch([
+    env.DB.prepare(
+      "UPDATE distribution_points SET address = ?, latitude_e6 = ?, longitude_e6 = ?, location_status = 'complete', public_visible = 1, updated_at = ? WHERE id = ? AND location_status = 'pending'",
+    ).bind(address, toE6(latitude), toE6(longitude), now, point.id),
+    env.DB.prepare("UPDATE deliveries SET delivery_address = ?, updated_at = ? WHERE distribution_point_id = ?").bind(address, now, point.id),
+  ]);
+  await appendOperationsAudit(env, request, user, "distribution_point.location_completed", "distribution_point", point.id, {
+    name: point.name,
+    address,
+    latitude,
+    longitude,
+    geocodedAddress,
+    assignedDistributorUserId: point.assigned_distributor_user_id,
+  });
+  return json({ id: point.id, address, latitude, longitude, geocodedAddress, locationStatus: "complete" });
 }
 
 async function selfRegisterDistributionPoint(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
@@ -589,7 +730,7 @@ async function createDeliveryCheck(request: Request, env: RuntimeEnv, user: Oper
   const notes = cleanOptional(form.get("notes"), 500);
   const reminderDays = Math.min(60, Math.max(1, nonNegativeInt(form.get("reminderDays"), 60) || 7));
 
-  const point = await env.DB.prepare("SELECT id, island, latitude_e6, longitude_e6 FROM distribution_points WHERE id = ? LIMIT 1").bind(pointId).first<{ id: string; island: string; latitude_e6: number; longitude_e6: number }>();
+  const point = await env.DB.prepare("SELECT id, island, latitude_e6, longitude_e6 FROM distribution_points WHERE id = ? AND location_status = 'complete' LIMIT 1").bind(pointId).first<{ id: string; island: string; latitude_e6: number; longitude_e6: number }>();
   if (!point || !canAccessIsland(user, point.island)) throw new OperationsError(404, "point_not_found", "Punto di distribuzione non trovato.");
 
   const distanceM = Math.round(haversineMeters(latitude, longitude, point.latitude_e6 / 1_000_000, point.longitude_e6 / 1_000_000));
@@ -655,7 +796,7 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
     const unit = clean(form.get("unit"), 30);
     const reminderDays = Math.min(60, Math.max(1, nonNegativeInt(form.get("reminderDays"), 60) || 7));
     const point = await env.DB.prepare(
-      "SELECT p.id, p.client_id, p.island, p.address, p.latitude_e6, p.longitude_e6, c.contact_name, c.email, c.phone FROM distribution_points p LEFT JOIN clients c ON c.id = p.client_id WHERE p.id = ? AND p.island = ? LIMIT 1",
+      "SELECT p.id, p.client_id, p.island, p.address, p.latitude_e6, p.longitude_e6, c.contact_name, c.email, c.phone FROM distribution_points p LEFT JOIN clients c ON c.id = p.client_id WHERE p.id = ? AND p.island = ? AND p.location_status = 'complete' LIMIT 1",
     ).bind(distributionPointId, distributor.island).first<{ id: string; client_id: string | null; island: string; address: string; latitude_e6: number; longitude_e6: number; contact_name: string | null; email: string | null; phone: string | null }>();
     if (!point || !unit) throw new OperationsError(404, "point_not_found", "Scegli un punto di distribuzione valido per l'isola del distributore.");
     latitude = point.latitude_e6 / 1_000_000;
@@ -915,7 +1056,7 @@ async function getSponsor(env: RuntimeEnv, id: string): Promise<{ id: string; is
 }
 
 async function nearestDistributionPoint(env: RuntimeEnv, island: string, latitude: number, longitude: number): Promise<{ id: string; distanceM: number } | null> {
-  const points = (await env.DB.prepare("SELECT id, latitude_e6, longitude_e6 FROM distribution_points WHERE island = ? LIMIT 300").bind(island).all<{ id: string; latitude_e6: number; longitude_e6: number }>()).results;
+  const points = (await env.DB.prepare("SELECT id, latitude_e6, longitude_e6 FROM distribution_points WHERE island = ? AND public_visible = 1 AND location_status = 'complete' LIMIT 300").bind(island).all<{ id: string; latitude_e6: number; longitude_e6: number }>()).results;
   let nearest: { id: string; distanceM: number } | null = null;
   for (const point of points) {
     const distanceM = Math.round(haversineMeters(latitude, longitude, point.latitude_e6 / 1_000_000, point.longitude_e6 / 1_000_000));

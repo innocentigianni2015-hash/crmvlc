@@ -111,16 +111,16 @@ export const landingLeads = sqliteTable("landing_leads", {
 
 export const deliveries = sqliteTable("deliveries", {
   id: text("id").primaryKey(),
-  clientId: text("client_id").notNull().references(() => clients.id),
+  clientId: text("client_id").references(() => clients.id),
   distributorUserId: text("distributor_user_id").notNull().references(() => users.id),
-  distributionPointId: text("distribution_point_id"),
+  distributionPointId: text("distribution_point_id").references(() => distributionPoints.id),
   island: text("island").notNull(),
   status: text("status", { enum: ["assigned", "in_progress", "delivered", "issue"] }).notNull().default("assigned"),
   quantity: integer("quantity").notNull().default(1),
   unit: text("unit").notNull().default("copie"),
   scheduledFor: text("scheduled_for"),
-  deliveryContactName: text("delivery_contact_name").notNull(),
-  deliveryContactEmail: text("delivery_contact_email").notNull(),
+  deliveryContactName: text("delivery_contact_name"),
+  deliveryContactEmail: text("delivery_contact_email"),
   deliveryContactPhone: text("delivery_contact_phone"),
   deliveryAddress: text("delivery_address"),
   notes: text("notes"),
@@ -134,6 +134,7 @@ export const deliveries = sqliteTable("deliveries", {
   index("deliveries_island_idx").on(table.island),
   index("deliveries_status_idx").on(table.status),
   index("deliveries_client_idx").on(table.clientId),
+  index("deliveries_distribution_point_idx").on(table.distributionPointId),
 ]);
 
 export const contractTemplates = sqliteTable("contract_templates", {
@@ -486,9 +487,22 @@ export const distributionPoints = sqliteTable("distribution_points", {
   capacity: integer("capacity").notNull().default(0),
   stock: integer("stock").notNull().default(0),
   publicVisible: integer("public_visible", { mode: "boolean" }).notNull().default(true),
+  createdBy: text("created_by").references(() => users.id),
+  selfRegistered: integer("self_registered", { mode: "boolean" }).notNull().default(false),
+  pointPhotoR2Key: text("point_photo_r2_key"),
+  nextCheckDueAt: text("next_check_due_at"),
+  area: text("area"),
+  locationStatus: text("location_status", { enum: ["pending", "complete"] }).notNull().default("complete"),
+  assignedDistributorUserId: text("assigned_distributor_user_id").references(() => users.id),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
-}, (table) => [index("distribution_points_island_idx").on(table.island, table.publicVisible)]);
+}, (table) => [
+  index("distribution_points_island_idx").on(table.island, table.publicVisible),
+  index("distribution_points_created_by_idx").on(table.createdBy),
+  index("distribution_points_next_check_due_idx").on(table.nextCheckDueAt),
+  index("distribution_points_location_status_idx").on(table.locationStatus, table.island),
+  index("distribution_points_assigned_distributor_idx").on(table.assignedDistributorUserId, table.locationStatus),
+]);
 
 export const photoAudits = sqliteTable("photo_audits", {
   id: text("id").primaryKey(),
@@ -511,6 +525,27 @@ export const photoAudits = sqliteTable("photo_audits", {
   createdAt: text("created_at").notNull(),
   reviewedAt: text("reviewed_at"),
 }, (table) => [index("photo_audits_delivery_idx").on(table.deliveryId), index("photo_audits_scope_idx").on(table.island, table.status)]);
+
+export const deliveryChecks = sqliteTable("delivery_checks", {
+  id: text("id").primaryKey(),
+  distributionPointId: text("distribution_point_id").notNull().references(() => distributionPoints.id),
+  deliveryId: text("delivery_id").references(() => deliveries.id),
+  distributorUserId: text("distributor_user_id").notNull().references(() => users.id),
+  island: text("island").notNull(),
+  quantityLeft: integer("quantity_left").notNull(),
+  quantityFound: integer("quantity_found").notNull(),
+  quantityTaken: integer("quantity_taken").notNull(),
+  r2Key: text("r2_key").notNull(),
+  latitude: integer("latitude_e6").notNull(),
+  longitude: integer("longitude_e6").notNull(),
+  geofenceDistanceM: integer("geofence_distance_m"),
+  notes: text("notes"),
+  createdAt: text("created_at").notNull(),
+}, (table) => [
+  index("delivery_checks_point_idx").on(table.distributionPointId),
+  index("delivery_checks_distributor_idx").on(table.distributorUserId),
+  index("delivery_checks_delivery_idx").on(table.deliveryId),
+]);
 
 export const salesCheckins = sqliteTable("sales_checkins", {
   id: text("id").primaryKey(),

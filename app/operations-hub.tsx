@@ -68,9 +68,10 @@ const TABS = [
   ["vip", "VIP & Sponsor"],
   ["finance", "Finanza"],
   ["inventory", "Spazi"],
-  ["distribution", "Geo audit"],
+  ["distribution", "Foto e locali"],
   ["sales", "Sales Ops"],
 ] as const;
+type OperationsTab = (typeof TABS)[number][0];
 
 class RequestError extends Error {
   constructor(message: string, readonly status = 0) { super(message); }
@@ -97,15 +98,16 @@ function when(value: unknown) {
   return new Intl.DateTimeFormat(localeTag(), { dateStyle: "short", timeStyle: "short" }).format(new Date(String(value)));
 }
 
-export function OperationsHub({ user, clients, users, deliveries, notify }: {
+export function OperationsHub({ user, clients, users, deliveries, notify, initialTab }: {
   user: User;
   clients: Client[];
   users: User[];
   deliveries: Delivery[];
   notify: (text: string, tone?: "ok" | "error") => void;
+  initialTab?: OperationsTab;
 }) {
   const [data, setData] = useState<Snapshot | null>(null);
-  const [tab, setTab] = useState<(typeof TABS)[number][0]>(user.role === "distributor" ? "distribution" : "overview");
+  const [tab, setTab] = useState<OperationsTab>(user.role === "distributor" ? "distribution" : initialTab ?? "overview");
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {

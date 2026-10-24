@@ -107,6 +107,10 @@ export async function handleOperationsApi(
     if (url.pathname === "/api/operations/distribution-points/complete-location" && request.method === "POST") {
       return completeDistributionPointLocation(request, env, user);
     }
+    const pointPhotoMatch = url.pathname.match(/^\/api\/operations\/distribution-points\/([^/]+)\/photo$/);
+    if (pointPhotoMatch && request.method === "GET") {
+      return servePointPhoto(env, pointPhotoMatch[1], user);
+    }
     if (url.pathname === "/api/operations/distribution-points/stock" && request.method === "POST") {
       return updateDistributionStock(request, env, user);
     }
@@ -645,6 +649,28 @@ async function completeDistributionPointLocation(request: Request, env: RuntimeE
     assignedDistributorUserId: point.assigned_distributor_user_id,
   });
   return json({ id: point.id, address, latitude, longitude, geocodedAddress, locationStatus: "complete" });
+}
+
+async function servePointPhoto(env: RuntimeEnv, pointId: string, user: OperationsUser): Promise<Response> {
+  if (!env.BUCKET) throw new OperationsError(503, "storage_missing", "Archivio fotografico non configurato.");
+  const point = await env.DB.prepare(
+    "SELECT id, island, public_visible, location_status, assigned_distributor_user_id, point_photo_r2_key FROM distribution_points WHERE id = ? LIMIT 1",
+  ).bind(pointId).first<{ id: string; island: string; public_visible: number; location_status: string | null; assigned_distributor_user_id: string | null; point_photo_r2_key: string | null }>();
+  if (!point) throw new OperationsError(404, "point_not_found", "Punto di distribuzione non trovato.");
+  const allowed = isGlobalOperator(user)
+    || (user.role === "sales_manager" && canAccessIsland(user, point.island))
+    || (user.role === "distributor" && canAccessIsland(user, point.island)
+      && (point.public_visible === 1 || (point.location_status === "pending" && point.assigned_distributor_user_id === user.id)));
+  if (!allowed) throw new OperationsError(403, "not_allowed", "Non puoi visualizzare questa foto.");
+  if (!point.point_photo_r2_key) throw new OperationsError(404, "photo_not_found", "Nessuna foto disponibile per questo punto.");
+  const object = await env.BUCKET.get(point.point_photo_r2_key);
+  if (!object) throw new OperationsError(404, "photo_not_found", "Foto non disponibile nell'archivio.");
+  return new Response(object.body, {
+    headers: {
+      "content-type": object.httpMetadata?.contentType ?? "image/jpeg",
+      "cache-control": "private, max-age=3600",
+    },
+  });
 }
 
 async function selfRegisterDistributionPoint(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {

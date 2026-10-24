@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { ChangeEvent, FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { loadOfflineSnapshot, prepareDeliveryPhoto, queuePhotoAudit, saveOfflineSnapshot } from "./offline";
 import { localeTag } from "./i18n";
 import { buildGoogleMapsSegments, optimizeDeliveryRoute } from "./delivery-route";
@@ -542,7 +542,7 @@ function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, subm
       {user.role !== "distributor" && <ActionCard index="02" title="Foto di consegna" text="Conferma una consegna già assegnata con foto, posizione e controllo geofence.">
         <form onSubmit={submitPhotoAudit}>
           <select name="deliveryId" required><option value="">Seleziona consegna</option>{deliveries.map((delivery) => <option key={delivery.id} value={delivery.id}>{delivery.client_company ?? delivery.id} · {delivery.island}</option>)}</select>
-          <input name="photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" required />
+          <PhotoPickerField />
           <p className="form-microcopy">Foto, coordinate e orario vengono acquisiti insieme.</p>
           <button className="primary" disabled={busy || !deliveries.length}>Scatta foto e registra consegna</button>
         </form>
@@ -555,6 +555,7 @@ function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, subm
         {data.distributionPoints.length ? data.distributionPoints.map((row) => {
           const pending = row.location_status === "pending";
           return <div className="hub-list-row" key={String(row.id)} style={{ flexWrap: "wrap" }}>
+            {pending && <PointPhotoThumb pointId={String(row.id)} size={72} />}
             <div style={{ flex: "1 1 220px" }}>
               <strong>{row.name}</strong>
               <small>{pending ? `${row.area ?? "Zona non indicata"} · ${row.island}` : `${row.address} · ${row.island}`}{Number(row.self_registered) === 1 ? " · registrato da distributore" : ""}</small>
@@ -615,7 +616,7 @@ function DistributorPointsBoard({ points, deliveries, busy, submitPointRegistrat
     {deliveries.length > 0 && <ActionCard index="00" title="Consegne assegnate da oggi" text="Hai consegne già pianificate dall'amministrazione: fotografa e confermale qui.">
       <form onSubmit={submitAssignedDelivery}>
         <select name="deliveryId" required><option value="">Seleziona consegna assegnata</option>{deliveries.map((delivery) => <option key={delivery.id} value={delivery.id}>{delivery.client_company ?? delivery.id}</option>)}</select>
-        <input name="photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" required />
+        <PhotoPickerField />
         <button className="primary" disabled={busy}>Scatta foto e registra consegna</button>
       </form>
     </ActionCard>}
@@ -627,7 +628,7 @@ function DistributorPointsBoard({ points, deliveries, busy, submitPointRegistrat
           <input name="address" placeholder="Indirizzo o riferimento" required maxLength={260} />
           <div className="field-pair"><input name="quantity" type="number" min="1" max="1000000" defaultValue="1" placeholder="Quante copie lasci" /><input name="unit" defaultValue="copie" maxLength={30} placeholder="Unità" /></div>
           <input name="reminderDays" type="number" min="1" max="60" defaultValue="7" placeholder="Torna a controllare dopo (giorni)" />
-          <input name="photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" required />
+          <PhotoPickerField />
           <p className="form-microcopy">Foto del negozio/espositore al momento della consegna. Posizione GPS acquisita automaticamente.</p>
           <div className="inline-actions">
             <button className="primary" disabled={busy}>Registra punto e prima consegna</button>
@@ -643,6 +644,7 @@ function DistributorPointsBoard({ points, deliveries, busy, submitPointRegistrat
           const overdue = isOverdue(row);
           const rowId = String(row.id);
           return <div className="hub-list-row distributor-point-row" key={rowId} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-start", padding: "8px 0", borderTop: "1px solid rgba(0,0,0,.08)" }}>
+            {pending && <PointPhotoThumb pointId={rowId} size={88} />}
             <div style={{ flex: "1 1 200px" }}>
               <strong>{row.name}</strong>
               <small style={{ display: "block" }}>{pending ? row.area ?? "Zona da completare" : row.address}</small>
@@ -659,14 +661,14 @@ function DistributorPointsBoard({ points, deliveries, busy, submitPointRegistrat
               <input type="hidden" name="id" value={rowId} />
               <input type="hidden" name="captureCurrentLocation" value="1" />
               <input name="address" placeholder="Indirizzo o riferimento del locale" required maxLength={260} />
-              <p className="form-microcopy">Quando sei davanti al locale, premi il pulsante: il CRM userà la posizione GPS attuale.</p>
+              <p className="form-microcopy">Guarda la foto qui sopra per riconoscere il locale. Quando sei davanti, premi il pulsante: il CRM userà la posizione GPS attuale.</p>
               <button className="primary" disabled={busy}>Sono sul posto · completa posizione</button>
             </form>}
             {!pending && expanded?.id === rowId && expanded.mode === "refill" && <form style={{ flexBasis: "100%" }} onSubmit={(event) => { submitRefill(event); setExpanded(null); }}>
               <input type="hidden" name="distributionPointId" value={rowId} />
               <div className="field-pair"><input name="quantity" type="number" min="1" max="1000000" defaultValue="1" placeholder="Quante copie lasci" /><input name="unit" defaultValue="copie" maxLength={30} placeholder="Unità" /></div>
               <input name="reminderDays" type="number" min="1" max="60" defaultValue="7" placeholder="Torna a controllare dopo (giorni)" />
-              <input name="photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" required />
+              <PhotoPickerField />
               <button className="primary" disabled={busy}>Scatta foto e registra rifornimento</button>
             </form>}
             {!pending && expanded?.id === rowId && expanded.mode === "check" && <form style={{ flexBasis: "100%" }} onSubmit={(event) => { submitDeliveryCheck(event); setExpanded(null); }}>
@@ -674,7 +676,7 @@ function DistributorPointsBoard({ points, deliveries, busy, submitPointRegistrat
               <input name="quantityFound" type="number" min="0" max="1000000" placeholder="Quante copie trovi ancora" required />
               <input name="reminderDays" type="number" min="1" max="60" defaultValue="7" placeholder="Torna a controllare dopo (giorni)" />
               <input name="notes" placeholder="Nota facoltativa" maxLength={500} />
-              <input name="photo" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" required />
+              <PhotoPickerField />
               <p className="form-microcopy">Il CRM calcola quante copie sono state prese e fissa da solo il prossimo controllo.</p>
               <button className="primary" disabled={busy}>Registra controllo</button>
             </form>}
@@ -684,7 +686,7 @@ function DistributorPointsBoard({ points, deliveries, busy, submitPointRegistrat
   </div>;
 }
 
-type BulkPhotoRow = { key: string; distributionPointId: string; name: string; area: string; quantity: string; unit: string; file: File | null; status: "idle" | "ok" | "error"; error?: string };
+type BulkPhotoRow = { key: string; distributionPointId: string; name: string; area: string; quantity: string; unit: string; file: File | null; previewUrl: string; status: "idle" | "ok" | "error"; error?: string };
 
 function BulkPhotoUploadCard({ users, distributionPoints, busy, onSubmit }: {
   users: User[];
@@ -720,6 +722,7 @@ function BulkPhotoUploadCard({ users, distributionPoints, busy, onSubmit }: {
           quantity: metadata?.quantity ?? "1",
           unit: "copie",
           file,
+          previewUrl: URL.createObjectURL(file),
           status: "idle" as const,
         };
       }),
@@ -731,8 +734,23 @@ function BulkPhotoUploadCard({ users, distributionPoints, busy, onSubmit }: {
   }
 
   function removeRow(key: string) {
-    setRows((current) => current.filter((row) => row.key !== key));
+    setRows((current) => {
+      const target = current.find((row) => row.key === key);
+      if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
+      return current.filter((row) => row.key !== key);
+    });
   }
+
+  function clearRows() {
+    setRows((current) => {
+      for (const row of current) if (row.previewUrl) URL.revokeObjectURL(row.previewUrl);
+      return [];
+    });
+  }
+
+  const rowsRef = useRef(rows);
+  useEffect(() => { rowsRef.current = rows; }, [rows]);
+  useEffect(() => () => { for (const row of rowsRef.current) if (row.previewUrl) URL.revokeObjectURL(row.previewUrl); }, []);
 
   async function handleSubmit() {
     setRows((current) => current.map((row) => ({ ...row, status: "idle", error: undefined })));
@@ -750,11 +768,11 @@ function BulkPhotoUploadCard({ users, distributionPoints, busy, onSubmit }: {
 
   return <ActionCard index="05" title="Carico multiplo" text="Carica foto per punti esistenti oppure crea nuovi locali da completare e assegnali subito al distributore.">
     <div className="bulk-upload-form">
-      <select value={mode} onChange={(event) => { setMode(event.target.value as BulkUploadMode); setRows([]); }}>
+      <select value={mode} onChange={(event) => { setMode(event.target.value as BulkUploadMode); clearRows(); }}>
         <option value="pending">Nuovi locali · indirizzo e posizione dopo</option>
         <option value="existing">Punti già presenti nel CRM</option>
       </select>
-      <select value={distributorId} onChange={(event) => { setDistributorId(event.target.value); setRows([]); }}>
+      <select value={distributorId} onChange={(event) => { setDistributorId(event.target.value); clearRows(); }}>
         <option value="">Seleziona distributore</option>
         {distributors.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.email ?? item.island} · {item.island}</option>)}
       </select>
@@ -765,6 +783,7 @@ function BulkPhotoUploadCard({ users, distributionPoints, busy, onSubmit }: {
         </label>
         {rows.map((row, index) => <div key={row.key} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, padding: "6px 0", borderTop: "1px solid rgba(0,0,0,.08)" }}>
           <span style={{ minWidth: 18 }}>{index + 1}</span>
+          {row.previewUrl && <img src={row.previewUrl} alt="Anteprima foto" style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 6, border: "1px solid rgba(0,0,0,.15)" }} />}
           <small style={{ maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis" }}>{row.file?.name ?? "—"}</small>
           {mode === "existing"
             ? <select value={row.distributionPointId} onChange={(event) => updateRow(row.key, { distributionPointId: event.target.value })}>
@@ -837,6 +856,48 @@ function SalesPanel({ data, user, users, clients, busy, run }: PanelProps & { us
 }
 
 type PanelProps = { data: Snapshot; user: User; busy: boolean; run: (action: () => Promise<unknown>, success: string, form?: HTMLFormElement) => Promise<void> };
+
+function PhotoPickerField({ name = "photo", required = true }: { name?: string; required?: boolean }) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    const form = inputRef.current?.form;
+    if (!form) return;
+    const handleReset = () => setPreviewUrl((current) => { if (current) URL.revokeObjectURL(current); return null; });
+    form.addEventListener("reset", handleReset);
+    return () => form.removeEventListener("reset", handleReset);
+  }, []);
+
+  useEffect(() => () => { if (previewUrl) URL.revokeObjectURL(previewUrl); }, [previewUrl]);
+
+  function handleChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] ?? null;
+    setPreviewUrl((current) => {
+      if (current) URL.revokeObjectURL(current);
+      return file ? URL.createObjectURL(file) : null;
+    });
+  }
+
+  return <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+    <input ref={inputRef} name={name} type="file" accept="image/jpeg,image/png,image/webp" capture="environment" required={required} onChange={handleChange} />
+    {previewUrl && <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <img src={previewUrl} alt="Anteprima foto scattata" style={{ width: 96, height: 96, objectFit: "cover", borderRadius: 8, border: "1px solid rgba(0,0,0,.15)" }} />
+      <small style={{ color: "seagreen" }}>✓ Foto pronta per l'invio — controlla che sia quella giusta prima di inviare.</small>
+    </div>}
+  </div>;
+}
+
+function PointPhotoThumb({ pointId, size = 88 }: { pointId: string; size?: number }) {
+  const [failed, setFailed] = useState(false);
+  if (failed || !pointId) return null;
+  return <img
+    src={`/api/operations/distribution-points/${pointId}/photo`}
+    alt="Foto del locale"
+    style={{ width: size, height: size, objectFit: "cover", borderRadius: 8, border: "1px solid rgba(0,0,0,.15)", flexShrink: 0 }}
+    onError={() => setFailed(true)}
+  />;
+}
 
 function ActionCard({ index, title, text, children }: { index: string; title: string; text: string; children: React.ReactNode }) {
   return <article className="module-card action-card"><header><div><span className="module-index">{index}</span><div><h2>{title}</h2><p>{text}</p></div></div></header><div className="action-body">{children}</div></article>;

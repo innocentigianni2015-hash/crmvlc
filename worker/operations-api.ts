@@ -66,71 +66,71 @@ export async function handleOperationsApi(
 
   try {
     if (url.pathname === "/api/operations" && request.method === "GET") {
-      return operationsSnapshot(env, user);
+      return await operationsSnapshot(env, user);
     }
     if (url.pathname === "/api/operations/sponsors" && request.method === "POST") {
-      return createSponsor(request, env, user);
+      return await createSponsor(request, env, user);
     }
     if (url.pathname === "/api/operations/vip-members" && request.method === "POST") {
-      return createVipMember(request, env, user);
+      return await createVipMember(request, env, user);
     }
     if (url.pathname === "/api/operations/coupons" && request.method === "POST") {
-      return issueCoupon(request, env, user);
+      return await issueCoupon(request, env, user);
     }
     if (url.pathname === "/api/operations/coupons/redeem" && request.method === "POST") {
-      return redeemCoupon(request, env, user);
+      return await redeemCoupon(request, env, user);
     }
     if (url.pathname === "/api/operations/commission-rules" && request.method === "POST") {
-      return createCommissionRule(request, env, user);
+      return await createCommissionRule(request, env, user);
     }
     if (url.pathname === "/api/operations/payout-requests" && request.method === "POST") {
-      return createPayoutRequest(request, env, user);
+      return await createPayoutRequest(request, env, user);
     }
     if (url.pathname === "/api/operations/payout-requests/review" && request.method === "POST") {
-      return reviewPayoutRequest(request, env, user);
+      return await reviewPayoutRequest(request, env, user);
     }
     if (url.pathname === "/api/operations/inventory" && request.method === "POST") {
-      return createInventorySlot(request, env, user);
+      return await createInventorySlot(request, env, user);
     }
     if (url.pathname === "/api/operations/inventory/status" && request.method === "POST") {
-      return updateInventoryStatus(request, env, user);
+      return await updateInventoryStatus(request, env, user);
     }
     if (url.pathname === "/api/operations/distribution-points" && request.method === "POST") {
-      return createDistributionPoint(request, env, user);
+      return await createDistributionPoint(request, env, user);
     }
     if (url.pathname === "/api/operations/distribution-points/self-register" && request.method === "POST") {
-      return selfRegisterDistributionPoint(request, env, user);
+      return await selfRegisterDistributionPoint(request, env, user);
     }
     if (url.pathname === "/api/operations/distribution-points/import-draft" && request.method === "POST") {
-      return importPendingDistributionPoint(request, env, user);
+      return await importPendingDistributionPoint(request, env, user);
     }
     if (url.pathname === "/api/operations/distribution-points/complete-location" && request.method === "POST") {
-      return completeDistributionPointLocation(request, env, user);
+      return await completeDistributionPointLocation(request, env, user);
     }
     const pointPhotoMatch = url.pathname.match(/^\/api\/operations\/distribution-points\/([^/]+)\/photo$/);
     if (pointPhotoMatch && request.method === "GET") {
-      return servePointPhoto(env, pointPhotoMatch[1], user);
+      return await servePointPhoto(env, pointPhotoMatch[1], user);
     }
     if (url.pathname === "/api/operations/distribution-points/stock" && request.method === "POST") {
-      return updateDistributionStock(request, env, user);
+      return await updateDistributionStock(request, env, user);
     }
     if (url.pathname === "/api/operations/photo-audits" && request.method === "POST") {
-      return uploadPhotoAudit(request, env, user);
+      return await uploadPhotoAudit(request, env, user);
     }
     if (url.pathname === "/api/operations/delivery-checks" && request.method === "POST") {
-      return createDeliveryCheck(request, env, user);
+      return await createDeliveryCheck(request, env, user);
     }
     if (url.pathname === "/api/operations/photo-audits/review" && request.method === "POST") {
-      return reviewPhotoAudit(request, env, user);
+      return await reviewPhotoAudit(request, env, user);
     }
     if (url.pathname === "/api/operations/sales-checkins" && request.method === "POST") {
-      return createSalesCheckin(request, env, user);
+      return await createSalesCheckin(request, env, user);
     }
     if (url.pathname === "/api/operations/sales-tasks" && request.method === "POST") {
-      return createSalesTask(request, env, user);
+      return await createSalesTask(request, env, user);
     }
     if (url.pathname === "/api/operations/sales-tasks/complete" && request.method === "POST") {
-      return completeSalesTask(request, env, user);
+      return await completeSalesTask(request, env, user);
     }
     throw new OperationsError(404, "not_found", "Risorsa operativa non trovata.");
   } catch (error) {

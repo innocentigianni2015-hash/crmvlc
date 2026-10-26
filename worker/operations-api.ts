@@ -609,8 +609,9 @@ async function importPendingDistributionPoint(request: Request, env: RuntimeEnv,
 async function completeDistributionPointLocation(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
   const body = await readJson<Record<string, unknown>>(request);
   const id = clean(body.id, 80);
+  const name = clean(body.name, 120);
   const address = clean(body.address, 260);
-  if (!id || !address) throw new OperationsError(400, "invalid_location", "Indica il punto e il suo indirizzo completo.");
+  if (!id || !name || !address) throw new OperationsError(400, "invalid_location", "Indica il punto, il nome del locale e l'indirizzo completo.");
 
   const point = await env.DB.prepare(
     "SELECT id, name, island, location_status, assigned_distributor_user_id FROM distribution_points WHERE id = ? LIMIT 1",
@@ -636,19 +637,20 @@ async function completeDistributionPointLocation(request: Request, env: RuntimeE
   const now = new Date().toISOString();
   await env.DB.batch([
     env.DB.prepare(
-      "UPDATE distribution_points SET address = ?, latitude_e6 = ?, longitude_e6 = ?, location_status = 'complete', public_visible = 1, updated_at = ? WHERE id = ? AND location_status = 'pending'",
-    ).bind(address, toE6(latitude), toE6(longitude), now, point.id),
+      "UPDATE distribution_points SET name = ?, address = ?, latitude_e6 = ?, longitude_e6 = ?, location_status = 'complete', public_visible = 1, updated_at = ? WHERE id = ? AND location_status = 'pending'",
+    ).bind(name, address, toE6(latitude), toE6(longitude), now, point.id),
     env.DB.prepare("UPDATE deliveries SET delivery_address = ?, updated_at = ? WHERE distribution_point_id = ?").bind(address, now, point.id),
   ]);
   await appendOperationsAudit(env, request, user, "distribution_point.location_completed", "distribution_point", point.id, {
-    name: point.name,
+    previousName: point.name,
+    name,
     address,
     latitude,
     longitude,
     geocodedAddress,
     assignedDistributorUserId: point.assigned_distributor_user_id,
   });
-  return json({ id: point.id, address, latitude, longitude, geocodedAddress, locationStatus: "complete" });
+  return json({ id: point.id, name, address, latitude, longitude, geocodedAddress, locationStatus: "complete" });
 }
 
 async function servePointPhoto(env: RuntimeEnv, pointId: string, user: OperationsUser): Promise<Response> {

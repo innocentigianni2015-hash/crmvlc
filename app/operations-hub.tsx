@@ -358,6 +358,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
       }
       await post("/api/operations/distribution-points/complete-location", {
         id: formData.get("id"),
+        name: formData.get("name"),
         address: formData.get("address"),
         latitude,
         longitude,
@@ -566,6 +567,7 @@ function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, subm
             <b className={!pending && Number(row.stock) <= Math.max(5, Number(row.capacity) * .15) ? "low-stock" : ""}>{row.stock}/{row.capacity}</b>
             {pending && <form style={{ flexBasis: "100%" }} onSubmit={submitPointLocation}>
               <input type="hidden" name="id" value={String(row.id)} />
+              <input name="name" defaultValue={String(row.name ?? "")} placeholder="Nome del locale" required maxLength={120} />
               <input name="address" placeholder="Indirizzo completo" required maxLength={260} />
               <div className="field-pair"><input name="latitude" type="number" step="0.000001" placeholder="Latitudine (oppure lascia vuoto)" /><input name="longitude" type="number" step="0.000001" placeholder="Longitudine (oppure lascia vuoto)" /></div>
               <p className="form-microcopy">Se lasci vuote le coordinate, il CRM prova a ricavarle dall’indirizzo.</p>
@@ -660,8 +662,9 @@ function DistributorPointsBoard({ points, deliveries, busy, submitPointRegistrat
             {pending && <form style={{ flexBasis: "100%" }} onSubmit={submitPointLocation}>
               <input type="hidden" name="id" value={rowId} />
               <input type="hidden" name="captureCurrentLocation" value="1" />
+              <input name="name" defaultValue={String(row.name ?? "")} placeholder="Nome del locale" required maxLength={120} />
               <input name="address" placeholder="Indirizzo o riferimento del locale" required maxLength={260} />
-              <p className="form-microcopy">Guarda la foto qui sopra per riconoscere il locale. Quando sei davanti, premi il pulsante: il CRM userà la posizione GPS attuale.</p>
+              <p className="form-microcopy">Guarda la foto qui sopra per riconoscere il locale. Correggi il nome se non è quello giusto. Quando sei davanti, premi il pulsante: il CRM userà la posizione GPS attuale.</p>
               <button className="primary" disabled={busy}>Sono sul posto · completa posizione</button>
             </form>}
             {!pending && expanded?.id === rowId && expanded.mode === "refill" && <form style={{ flexBasis: "100%" }} onSubmit={(event) => { submitRefill(event); setExpanded(null); }}>

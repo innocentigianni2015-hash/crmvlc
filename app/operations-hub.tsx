@@ -863,6 +863,22 @@ function SalesPanel({ data, user, users, clients, busy, run }: PanelProps & { us
 
 const BAD_NAME_PATTERN = /^(photo|img|dsc|vid)[-_ ]|whatsapp image/i;
 
+function csvCell(value: unknown): string {
+  return `"${String(value ?? "").replace(/"/g, "\"\"")}"`;
+}
+
+function downloadTextFile(filename: string, content: string, mimeType: string) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
 function ReportPanel({ data }: { data: Snapshot }) {
   const points = data.distributionPoints;
   const isVisible = (row: RecordRow) => Number(row.public_visible) === 1;
@@ -879,7 +895,28 @@ function ReportPanel({ data }: { data: Snapshot }) {
   });
   const clusters = Array.from(clusterMap.values()).filter((rows) => rows.length > 1);
 
-  return <div className="hub-stack">
+  function exportCsv() {
+    const header = ["Isola", "Nome", "Indirizzo/Zona", "Stato", "Nome da correggere", "Distributore assegnato"];
+    const rows = points.map((row) => {
+      const visibleRow = isVisible(row);
+      return [
+        row.island,
+        row.name,
+        visibleRow ? row.address : row.area,
+        visibleRow ? "Visibile" : "In attesa",
+        isBadName(row) ? "Sì" : "No",
+        row.assigned_distributor_name ?? row.assigned_distributor_email ?? "",
+      ];
+    });
+    const csv = [header, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n");
+    downloadTextFile(`report-punti-distribuzione-${new Date().toISOString().slice(0, 10)}.csv`, `﻿${csv}`, "text/csv;charset=utf-8;");
+  }
+
+  return <div className="hub-stack report-print-area">
+    <div className="report-actions no-print">
+      <button className="primary" onClick={exportCsv}>Scarica CSV</button>
+      <button onClick={() => window.print()}>Scarica PDF</button>
+    </div>
     <div className="hub-metrics compact">
       <HubMetric label="Punti totali" value={points.length} note="sulle cinque isole" />
       <HubMetric label="Visibili sulla mappa" value={visible.length} note="pubblicati su crmvlc.com/mappe" />

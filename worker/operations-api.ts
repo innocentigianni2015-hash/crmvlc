@@ -34,6 +34,19 @@ const ISLAND_CENTERS: Record<string, { latitude: number; longitude: number }> = 
   Fuerteventura: { latitude: 28.3587, longitude: -14.0537 },
   "La Palma": { latitude: 28.7134, longitude: -17.9058 },
 };
+// Bounding box covering all seven Canary Islands plus a safety margin, used to reject
+// coordinates that land outside the archipelago (e.g. a device's real GPS location when
+// someone completes a point's location while not physically on site).
+const CANARY_BOUNDS = { minLat: 27.0, maxLat: 29.6, minLon: -18.6, maxLon: -13.0 };
+function isWithinCanaryIslands(latitude: number, longitude: number): boolean {
+  return latitude >= CANARY_BOUNDS.minLat && latitude <= CANARY_BOUNDS.maxLat
+    && longitude >= CANARY_BOUNDS.minLon && longitude <= CANARY_BOUNDS.maxLon;
+}
+function assertWithinCanaryIslands(latitude: number, longitude: number): void {
+  if (!isWithinCanaryIslands(latitude, longitude)) {
+    throw new OperationsError(422, "location_out_of_range", "Le coordinate indicate cadono fuori dalle Canarie: controlla il GPS o l'indirizzo e riprova.");
+  }
+}
 
 class OperationsError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) {
@@ -463,6 +476,7 @@ async function createDistributionPoint(request: Request, env: RuntimeEnv, user: 
   const capacity = nonNegativeInt(body.capacity, 1_000_000);
   const stock = nonNegativeInt(body.stock, 1_000_000);
   if (!isIsland(island) || !name || !address) throw new OperationsError(400, "invalid_point", "Nome, isola, indirizzo e coordinate sono obbligatori.");
+  assertWithinCanaryIslands(latitude, longitude);
   const clientId = cleanOptional(body.clientId, 80);
   if (clientId) await assertClientScope(env, user, clientId, island);
   const id = crypto.randomUUID();
@@ -633,6 +647,7 @@ async function completeDistributionPointLocation(request: Request, env: RuntimeE
     longitude = geocode.longitude;
     geocodedAddress = geocode.formattedAddress;
   }
+  assertWithinCanaryIslands(latitude, longitude);
 
   const now = new Date().toISOString();
   await env.DB.batch([
@@ -694,6 +709,7 @@ async function selfRegisterDistributionPoint(request: Request, env: RuntimeEnv, 
   const unit = clean(form.get("unit"), 30) || "copie";
   const reminderDays = Math.min(60, Math.max(1, nonNegativeInt(form.get("reminderDays"), 60) || 7));
   if (!name || !address) throw new OperationsError(400, "invalid_point", "Nome e indirizzo del punto sono obbligatori.");
+  assertWithinCanaryIslands(latitude, longitude);
 
   const geocode = await geocodeAddress(env, address, user.island);
   const addressVerified = geocode !== null;

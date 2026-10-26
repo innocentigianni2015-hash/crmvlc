@@ -862,6 +862,9 @@ function SalesPanel({ data, user, users, clients, busy, run }: PanelProps & { us
 }
 
 const BAD_NAME_PATTERN = /^(photo|img|dsc|vid)[-_ ]|whatsapp image/i;
+const KNOWN_ADDRESS_ISSUES: Record<string, string> = {
+  "05d5ca34-ec8e-43b2-92c6-d26d88fe9db4": "Indirizzo non valido (“📍 Freire 580 · Barrio Samoré” non esiste alle Canarie). Posizione impostata al centro approssimativo di El Matorral: Carlo deve inserire l'indirizzo vero del locale.",
+};
 
 function csvCell(value: unknown): string {
   return `"${String(value ?? "").replace(/"/g, "\"\"")}"`;
@@ -885,7 +888,9 @@ function ReportPanel({ data }: { data: Snapshot }) {
   const visible = points.filter(isVisible);
   const pendingPoints = points.filter((row) => row.location_status === "pending");
   const isBadName = (row: RecordRow) => BAD_NAME_PATTERN.test(String(row.name ?? ""));
-  const badNamePoints = visible.filter(isBadName);
+  const addressIssue = (row: RecordRow) => KNOWN_ADDRESS_ISSUES[String(row.id)] ?? null;
+  const issueFor = (row: RecordRow) => (isBadName(row) ? "Nome del file invece del nome del locale" : addressIssue(row));
+  const flaggedPoints = visible.filter((row) => issueFor(row) !== null);
 
   const clusterMap = new Map<string, RecordRow[]>();
   visible.forEach((row) => {
@@ -896,7 +901,7 @@ function ReportPanel({ data }: { data: Snapshot }) {
   const clusters = Array.from(clusterMap.values()).filter((rows) => rows.length > 1);
 
   function exportCsv() {
-    const header = ["Isola", "Nome", "Indirizzo/Zona", "Stato", "Nome da correggere", "Distributore assegnato"];
+    const header = ["Isola", "Nome", "Indirizzo/Zona", "Stato", "Problema da correggere", "Distributore assegnato"];
     const rows = points.map((row) => {
       const visibleRow = isVisible(row);
       return [
@@ -904,7 +909,7 @@ function ReportPanel({ data }: { data: Snapshot }) {
         row.name,
         visibleRow ? row.address : row.area,
         visibleRow ? "Visibile" : "In attesa",
-        isBadName(row) ? "Sì" : "No",
+        issueFor(row) ?? "",
         row.assigned_distributor_name ?? row.assigned_distributor_email ?? "",
       ];
     });
@@ -921,16 +926,17 @@ function ReportPanel({ data }: { data: Snapshot }) {
       <HubMetric label="Punti totali" value={points.length} note="sulle cinque isole" />
       <HubMetric label="Visibili sulla mappa" value={visible.length} note="pubblicati su crmvlc.com/mappe" />
       <HubMetric label="In attesa di indirizzo" value={pendingPoints.length} note="da completare" />
-      <HubMetric label="Nome da correggere" value={badNamePoints.length} note="nome file invece del locale" />
+      <HubMetric label="Da correggere" value={flaggedPoints.length} note="nome file o indirizzo non valido" />
     </div>
 
-    <DataCard title="Punti con nome da correggere" count={badNamePoints.length}>
-      {badNamePoints.length
-        ? badNamePoints.map((row) => <div className="hub-list-row" key={String(row.id)}>
-          <div><strong className="ai-review">{String(row.name)}</strong><small>{row.island} · {row.address}</small></div>
+    <DataCard title="Punti da correggere (nome o indirizzo)" count={flaggedPoints.length}>
+      {flaggedPoints.length
+        ? flaggedPoints.map((row) => <div className="hub-list-row" key={String(row.id)} style={{ flexWrap: "wrap" }}>
+          <div style={{ flex: "1 1 220px" }}><strong>{String(row.name)}</strong><small>{row.island} · {row.address}</small></div>
           <span className="module-status pending">{row.assigned_distributor_name ?? row.assigned_distributor_email ?? "nessun distributore assegnato"}</span>
+          <small className="ai-review" style={{ flexBasis: "100%" }}>{issueFor(row)}</small>
         </div>)
-        : <MiniEmpty text="Nessun punto pubblicato mostra ancora il nome del file. Tutto corretto." />}
+        : <MiniEmpty text="Nessun punto pubblicato ha problemi noti di nome o indirizzo." />}
     </DataCard>
 
     <DataCard title="Coordinate sovrapposte" count={clusters.length}>
@@ -947,7 +953,7 @@ function ReportPanel({ data }: { data: Snapshot }) {
       {points.length
         ? points.map((row) => {
           const visibleRow = isVisible(row);
-          const bad = isBadName(row);
+          const bad = issueFor(row) !== null;
           return <div className="hub-list-row" key={String(row.id)} style={{ flexWrap: "wrap" }}>
             <div style={{ flex: "1 1 220px" }}>
               <strong className={bad ? "ai-review" : ""}>{String(row.name)}</strong>
@@ -959,7 +965,7 @@ function ReportPanel({ data }: { data: Snapshot }) {
         : <MiniEmpty text="Nessun punto registrato." />}
     </DataCard>
 
-    <p className="form-microcopy">Report calcolato in tempo reale dai dati del CRM. “Nome da correggere” segnala i punti pubblici il cui nome sembra ancora quello del file foto originale: si correggono riaprendo “Completa indirizzo e posizione” nel modulo Foto e locali.</p>
+    <p className="form-microcopy">Report calcolato in tempo reale dai dati del CRM. “Punti da correggere” segnala sia i punti pubblici il cui nome sembra ancora quello del file foto originale, sia i punti con un indirizzo noto come non valido: i nomi si correggono riaprendo “Completa indirizzo e posizione” nel modulo Foto e locali, gli indirizzi segnalati vanno verificati e aggiornati dal distributore assegnato.</p>
   </div>;
 }
 

@@ -125,7 +125,7 @@ async function passwordLogin(request: Request, env: AuthEnv): Promise<Response> 
     : false;
   if (!user || !valid) {
     await recordLoginFailure(env, email);
-    throw new AuthError(401, "invalid_credentials", user && !user.password_hash ? "Password non ancora impostata. Usa “Imposta o recupera password”." : "Email o password non validi.");
+    throw new AuthError(401, "invalid_credentials", "Email o password non validi. Se hai appena ricevuto un invito, usa “Imposta o recupera password”.");
   }
   await clearLoginFailures(env, email);
 

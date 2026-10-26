@@ -2184,6 +2184,16 @@ export async function processR2DeletionQueue(env: RuntimeEnv): Promise<void> {
   }
 }
 
+export async function cleanupExpiredAuthState(env: RuntimeEnv): Promise<void> {
+  if (!env.DB) return;
+  const now = new Date().toISOString();
+  await Promise.all([
+    env.DB.prepare("DELETE FROM sessions WHERE expires_at < ?").bind(now).run(),
+    env.DB.prepare("DELETE FROM auth_flow_tokens WHERE consumed_at IS NULL AND expires_at < ?").bind(now).run(),
+    env.DB.prepare("DELETE FROM auth_challenges WHERE expires_at < ?").bind(now).run(),
+  ]);
+}
+
 async function deliverOutboxMessage(env: RuntimeEnv, messageId: string): Promise<void> {
   const message = await env.DB.prepare(
     "SELECT id, recipient, subject, body_text, attachment_r2_key, attachment_filename, attempts FROM email_outbox WHERE id = ? AND status = 'pending' LIMIT 1",

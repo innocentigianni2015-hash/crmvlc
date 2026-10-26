@@ -69,8 +69,10 @@ const TABS = [
   ["finance", "Finanza"],
   ["inventory", "Spazi"],
   ["distribution", "Foto e locali"],
+  ["report", "Report Punti"],
   ["sales", "Sales Ops"],
 ] as const;
+const REPORT_TAB_ROLES = ["super_admin", "admin", "sales_manager"] as const;
 type OperationsTab = (typeof TABS)[number][0];
 
 class RequestError extends Error {
@@ -382,7 +384,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
       <div className="hub-live"><span /> Dati sincronizzati</div>
     </div>
     <div className="hub-tabs" role="tablist" aria-label="Moduli CRMVLC">
-      {TABS.filter(([key]) => user.role !== "distributor" || key === "distribution").map(([key, label]) => <button key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>{label}</button>)}
+      {TABS.filter(([key]) => (user.role !== "distributor" || key === "distribution") && (key !== "report" || REPORT_TAB_ROLES.includes(user.role as typeof REPORT_TAB_ROLES[number]))).map(([key, label]) => <button key={key} className={tab === key ? "active" : ""} onClick={() => setTab(key)}>{label}</button>)}
     </div>
 
     {tab === "overview" && user.role !== "distributor" && <Overview data={data} user={user} />}
@@ -390,6 +392,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
     {tab === "finance" && user.role !== "distributor" && <FinancePanel data={data} user={user} busy={busy} run={run} />}
     {tab === "inventory" && user.role !== "distributor" && <InventoryPanel data={data} user={user} busy={busy} run={run} />}
     {tab === "distribution" && <GeoAuditPanel data={data} user={user} users={users} clients={clients} deliveries={deliveries} busy={busy} run={run} submitPhotoAudit={submitPhotoAudit} submitPointRegistration={submitPointRegistration} submitDeliveryCheck={submitDeliveryCheck} submitBulkPhotoAudit={submitBulkPhotoAudit} submitPointLocation={submitPointLocation} />}
+    {tab === "report" && REPORT_TAB_ROLES.includes(user.role as typeof REPORT_TAB_ROLES[number]) && <ReportPanel data={data} />}
     {tab === "sales" && user.role !== "distributor" && <SalesPanel data={data} user={user} users={users} clients={clients} busy={busy} run={run} />}
   </section>;
 }
@@ -855,6 +858,71 @@ function SalesPanel({ data, user, users, clients, busy, run }: PanelProps & { us
       <DataCard title="Leaderboard" count={data.leaderboard.length}>{data.leaderboard.length ? data.leaderboard.map((row, index) => <div className="leader-row" key={String(row.user_id)}><span>{index + 1}</span><div><strong>{row.user_name}</strong><small>{row.island} · {row.won_count} chiusi</small></div><b>{euros(Number(row.won_value_cents))}</b></div>) : <MiniEmpty text="La classifica si alimenta con le opportunità chiuse." />}</DataCard>
     </div>
     <div className="bundle-strip"><div><small>Bundle live</small><h2>Offerta commerciale pronta</h2></div>{data.bundles.map((row) => <div key={String(row.id)}><strong>{row.name}</strong><span>{euros(Number(row.monthly_price_cents))}/mese</span><small>{row.description}</small></div>)}</div>
+  </div>;
+}
+
+const BAD_NAME_PATTERN = /^(photo|img|dsc|vid)[-_ ]|whatsapp image/i;
+
+function ReportPanel({ data }: { data: Snapshot }) {
+  const points = data.distributionPoints;
+  const isVisible = (row: RecordRow) => Number(row.public_visible) === 1;
+  const visible = points.filter(isVisible);
+  const pendingPoints = points.filter((row) => row.location_status === "pending");
+  const isBadName = (row: RecordRow) => BAD_NAME_PATTERN.test(String(row.name ?? ""));
+  const badNamePoints = visible.filter(isBadName);
+
+  const clusterMap = new Map<string, RecordRow[]>();
+  visible.forEach((row) => {
+    if (row.latitude_e6 == null || row.longitude_e6 == null) return;
+    const key = `${row.latitude_e6}:${row.longitude_e6}`;
+    clusterMap.set(key, [...(clusterMap.get(key) ?? []), row]);
+  });
+  const clusters = Array.from(clusterMap.values()).filter((rows) => rows.length > 1);
+
+  return <div className="hub-stack">
+    <div className="hub-metrics compact">
+      <HubMetric label="Punti totali" value={points.length} note="sulle cinque isole" />
+      <HubMetric label="Visibili sulla mappa" value={visible.length} note="pubblicati su crmvlc.com/mappe" />
+      <HubMetric label="In attesa di indirizzo" value={pendingPoints.length} note="da completare" />
+      <HubMetric label="Nome da correggere" value={badNamePoints.length} note="nome file invece del locale" />
+    </div>
+
+    <DataCard title="Punti con nome da correggere" count={badNamePoints.length}>
+      {badNamePoints.length
+        ? badNamePoints.map((row) => <div className="hub-list-row" key={String(row.id)}>
+          <div><strong className="ai-review">{String(row.name)}</strong><small>{row.island} · {row.address}</small></div>
+          <span className="module-status pending">{row.assigned_distributor_name ?? row.assigned_distributor_email ?? "nessun distributore assegnato"}</span>
+        </div>)
+        : <MiniEmpty text="Nessun punto pubblicato mostra ancora il nome del file. Tutto corretto." />}
+    </DataCard>
+
+    <DataCard title="Coordinate sovrapposte" count={clusters.length}>
+      {clusters.length
+        ? clusters.map((rows) => <div className="hub-list-row" key={String(rows[0].id)} style={{ flexWrap: "wrap" }}>
+          <div><strong>{rows[0].island}</strong><small>{(Number(rows[0].latitude_e6) / 1e6).toFixed(6)}, {(Number(rows[0].longitude_e6) / 1e6).toFixed(6)}</small></div>
+          <span className="module-status">{rows.length} negozi sullo stesso punto</span>
+          <small style={{ flexBasis: "100%" }}>{rows.map((r) => String(r.name)).join(" · ")}</small>
+        </div>)
+        : <MiniEmpty text="Nessuna coppia di coordinate sovrapposte tra i punti visibili." />}
+    </DataCard>
+
+    <DataCard title="Elenco completo dei punti" count={points.length}>
+      {points.length
+        ? points.map((row) => {
+          const visibleRow = isVisible(row);
+          const bad = isBadName(row);
+          return <div className="hub-list-row" key={String(row.id)} style={{ flexWrap: "wrap" }}>
+            <div style={{ flex: "1 1 220px" }}>
+              <strong className={bad ? "ai-review" : ""}>{String(row.name)}</strong>
+              <small>{row.island} · {visibleRow ? row.address : (row.area ?? "zona non indicata")}</small>
+            </div>
+            <span className={`module-status ${visibleRow ? "approved" : "pending"}`}>{visibleRow ? "Visibile" : "In attesa"}</span>
+          </div>;
+        })
+        : <MiniEmpty text="Nessun punto registrato." />}
+    </DataCard>
+
+    <p className="form-microcopy">Report calcolato in tempo reale dai dati del CRM. “Nome da correggere” segnala i punti pubblici il cui nome sembra ancora quello del file foto originale: si correggono riaprendo “Completa indirizzo e posizione” nel modulo Foto e locali.</p>
   </div>;
 }
 

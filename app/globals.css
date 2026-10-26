@@ -1397,5 +1397,7 @@ input[type="file"]::file-selector-button {
   body *{visibility:hidden}
   .report-print-area,.report-print-area *{visibility:visible}
   .report-print-area{position:absolute;left:0;top:0;width:100%;padding:12px}
-  .module-card{box-shadow:none;border:1px solid #ccc;break-inside:avoid}
+  .report-print-area .hub-list{max-height:none!important;overflow:visible!important}
+  .report-print-area .hub-list-row{break-inside:avoid}
+  .module-card{box-shadow:none;border:1px solid #ccc;break-inside:auto}
 }

@@ -2163,7 +2163,7 @@ export async function processR2DeletionQueue(env: RuntimeEnv): Promise<void> {
   let objects: { r2_key: string }[];
   try {
     objects = (await env.DB.prepare(
-      "SELECT r2_key FROM r2_deletion_queue ORDER BY created_at ASC LIMIT 50",
+      "SELECT r2_key FROM r2_deletion_queue WHERE attempts < 20 ORDER BY created_at ASC LIMIT 50",
     ).all<{ r2_key: string }>()).results;
   } catch (error) {
     // Deployments created before the cleanup migration do not have the queue yet.

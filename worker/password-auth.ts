@@ -141,6 +141,7 @@ async function changeRequiredPassword(request: Request, env: AuthEnv): Promise<R
   const token = String(body.token ?? "");
   const password = String(body.password ?? "");
   const flow = await requireFlow(env, token, "change_password");
+  await claimFlow(env, flow);
   const credentials = await createPasswordHash(password, env.AUTH_SECRET ?? "");
   const now = new Date().toISOString();
   await env.DB.batch([
@@ -188,6 +189,7 @@ async function confirmTotp(request: Request, env: AuthEnv): Promise<Response> {
   const flow = await requireFlow(env, token, "totp_setup");
   const data = safeJson(flow.data_json) as { secret?: string };
   if (!data.secret || !(await verifyTotp(data.secret, code))) throw new AuthError(400, "invalid_totp", "Codice dell’autenticatore non valido.");
+  await claimFlow(env, flow);
   const encrypted = await encryptSecret(env, data.secret);
   const now = new Date().toISOString();
   await env.DB.batch([
@@ -208,8 +210,7 @@ async function verifyTotpLogin(request: Request, env: AuthEnv): Promise<Response
   if (!user?.totp_secret_encrypted) throw new AuthError(400, "totp_not_configured", "Autenticatore non configurato.");
   const secret = await decryptSecret(env, user.totp_secret_encrypted);
   if (!(await verifyTotp(secret, code))) throw new AuthError(401, "invalid_totp", "Codice dell’autenticatore non valido.");
-  await env.DB.prepare("UPDATE auth_flow_tokens SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL")
-    .bind(new Date().toISOString(), flow.id).run();
+  await claimFlow(env, flow);
   return issueSession(request, env, user);
 }
 
@@ -246,6 +247,7 @@ async function resetPassword(request: Request, env: AuthEnv): Promise<Response> 
   const password = String(body.password ?? "");
   validatePassword(password);
   const flow = await requireFlow(env, token, "password_reset");
+  await claimFlow(env, flow);
   const credentials = await createPasswordHash(password, env.AUTH_SECRET ?? "");
   const now = new Date().toISOString();
   await env.DB.batch([
@@ -285,6 +287,15 @@ async function requireFlow(env: AuthEnv, token: string, purpose: FlowPurpose): P
     .bind(await sha256(token), purpose).first<FlowRow>();
   if (!flow || flow.consumed_at || Date.parse(flow.expires_at) <= Date.now()) throw new AuthError(400, "invalid_token", "Procedura scaduta o non valida.");
   return flow;
+}
+
+// Atomically marks a flow token as consumed. Call this right before performing the
+// privileged action a flow authorizes (password change, TOTP confirm/login) so two
+// concurrent requests carrying the same token cannot both complete it.
+async function claimFlow(env: AuthEnv, flow: FlowRow): Promise<void> {
+  const result = await env.DB.prepare("UPDATE auth_flow_tokens SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL")
+    .bind(new Date().toISOString(), flow.id).run();
+  if (Number(result.meta.changes ?? 0) !== 1) throw new AuthError(409, "token_already_used", "Questo collegamento è già stato utilizzato.");
 }
 
 async function getUserByEmail(env: AuthEnv, email: string): Promise<PasswordUser | null> {

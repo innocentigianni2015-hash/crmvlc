@@ -697,6 +697,7 @@ function DistributorPointsBoard({ points, deliveries, busy, run, submitPointRegi
           </div>;
         })}
     </ActionCard>
+    <PointsRouteBuilder points={points} />
   </div>;
 }
 
@@ -819,6 +820,7 @@ function BulkPhotoUploadCard({ users, distributionPoints, busy, onSubmit }: {
 }
 
 type RouteStop = Delivery & { latitude: number; longitude: number };
+type PointStop = RecordRow & { latitude: number; longitude: number };
 
 function DailyRouteCard({ deliveries, user }: { deliveries: Delivery[]; user: User }) {
   const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Atlantic/Canary", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
@@ -839,7 +841,74 @@ function DailyRouteCard({ deliveries, user }: { deliveries: Delivery[]; user: Us
   return <article className="module-card daily-route-card"><header><div><span className="module-index">00</span><div><h2>Percorso consegne di oggi</h2><p>{today} · ordinamento dalla posizione attuale</p></div></div><span className="route-count">{candidates.length} tappe</span></header>{user.role !== "distributor" && <select value={distributorId} onChange={(event) => { setDistributorId(event.target.value); setRoute([]); setOrigin(null); }}><option value="">Seleziona Distributore</option>{distributors.map(([id, name]) => <option value={id} key={id}>{name}</option>)}</select>}<button className="primary location-button" disabled={!candidates.length} onClick={() => void calculate()}>Ordina dalla mia posizione</button>{!candidates.length && <p className="form-microcopy">Nessuna consegna di oggi collegata a un punto autorizzato.</p>}{route.length > 0 && <><ol className="route-stop-list">{route.map((stop, index) => <li key={stop.id}><span>{index + 1}</span><div><strong>{stop.distribution_point_name ?? stop.client_company}</strong><small>{stop.distribution_point_address} · {stop.quantity} {stop.unit}</small></div><a href={pointNavigationUrl(stop)} target="_blank" rel="noopener noreferrer">Apri ↗</a></li>)}</ol><div className="route-segments">{segments.map((url, index) => <a href={url} target="_blank" rel="noopener noreferrer" key={url}>Avvia tratta {index + 1} ↗</a>)}</div><p className="form-microcopy">Le tratte sono divise in gruppi compatibili con la navigazione mobile; insieme coprono tutte le consegne ordinate.</p></>}</article>;
 }
 
-function pointNavigationUrl(stop: RouteStop) { return `https://www.google.com/maps/search/?api=1&query=${stop.latitude},${stop.longitude}`; }
+function pointNavigationUrl(stop: { latitude: number; longitude: number }) { return `https://www.google.com/maps/search/?api=1&query=${stop.latitude},${stop.longitude}`; }
+
+function PointsRouteBuilder({ points }: { points: RecordRow[] }) {
+  const nowMs = Date.now();
+  const isOverdue = (row: RecordRow) => Boolean(row.next_check_due_at) && new Date(String(row.next_check_due_at)).getTime() <= nowMs;
+  const routable = points.filter((row) => row.location_status !== "pending" && row.latitude_e6 != null && row.longitude_e6 != null);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set(routable.filter(isOverdue).map((row) => String(row.id))));
+  const [route, setRoute] = useState<PointStop[]>([]);
+  const [origin, setOrigin] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [calculating, setCalculating] = useState(false);
+
+  function toggleSelected(id: string) {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+    setRoute([]);
+  }
+
+  function selectOverdueOnly() { setSelected(new Set(routable.filter(isOverdue).map((row) => String(row.id)))); setRoute([]); }
+  function selectAll() { setSelected(new Set(routable.map((row) => String(row.id)))); setRoute([]); }
+  function clearSelection() { setSelected(new Set()); setRoute([]); }
+
+  async function calculate() {
+    setCalculating(true);
+    try {
+      const current = await currentLocation();
+      const stops: PointStop[] = routable
+        .filter((row) => selected.has(String(row.id)))
+        .map((row) => ({ ...row, latitude: Number(row.latitude_e6) / 1_000_000, longitude: Number(row.longitude_e6) / 1_000_000 }));
+      setOrigin(current);
+      setRoute(optimizeDeliveryRoute(current, stops));
+    } finally {
+      setCalculating(false);
+    }
+  }
+
+  const segments = origin ? buildGoogleMapsSegments(origin, route) : [];
+
+  return <ActionCard index="03" title="Crea il tuo giro" text="Scegli i punti da visitare oggi: il CRM li ordina dalla tua posizione attuale, dal più vicino al più lontano.">
+    {!routable.length
+      ? <MiniEmpty text="Nessun punto con posizione completata: completa prima l'indirizzo dei tuoi punti qui sopra." />
+      : <>
+        <div className="inline-actions" style={{ marginBottom: 8 }}>
+          <button type="button" onClick={selectOverdueOnly}>Solo da controllare</button>
+          <button type="button" onClick={selectAll}>Seleziona tutti</button>
+          <button type="button" onClick={clearSelection}>Svuota</button>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 260, overflowY: "auto", marginBottom: 10 }}>
+          {routable.map((row) => {
+            const id = String(row.id);
+            const overdue = isOverdue(row);
+            return <label key={id} className="check-line" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input type="checkbox" checked={selected.has(id)} onChange={() => toggleSelected(id)} />
+              <span style={{ flex: 1 }}>{row.name}{overdue && <small className="ai-review"> · da controllare</small>}</span>
+            </label>;
+          })}
+        </div>
+        <button className="primary location-button" disabled={!selected.size || calculating} onClick={() => void calculate()}>Ordina {selected.size || ""} tappe dalla mia posizione</button>
+        {route.length > 0 && <>
+          <ol className="route-stop-list">{route.map((stop, index) => <li key={String(stop.id)}><span>{index + 1}</span><div><strong>{String(stop.name)}</strong><small>{String(stop.address ?? "")} · {String(stop.stock)}/{String(stop.capacity)}</small></div><a href={pointNavigationUrl(stop)} target="_blank" rel="noopener noreferrer">Apri ↗</a></li>)}</ol>
+          <div className="route-segments">{segments.map((url, index) => <a href={url} target="_blank" rel="noopener noreferrer" key={url}>Avvia tratta {index + 1} ↗</a>)}</div>
+          <p className="form-microcopy">Le tratte sono divise in gruppi compatibili con la navigazione mobile; insieme coprono tutte le tappe scelte.</p>
+        </>}
+      </>}
+  </ActionCard>;
+}
 
 function photoAiSummary(row: RecordRow): { verdict: string; magazinesDetected: boolean; displayDetected: boolean; possibleDuplicate: boolean; confidence: number } | null {
   if (!row.ai_result_json) return null;

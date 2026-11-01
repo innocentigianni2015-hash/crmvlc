@@ -6,6 +6,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { platformOwnership, usePlatformLanguage } from "./i18n";
 
 type Service = "magazine" | "podcast" | "both";
+type DistributionPoint = { id: string; name: string; island: string; address?: string; latitude?: number; longitude?: number };
 
 const islands = [
   "Tenerife",
@@ -40,6 +41,11 @@ const copy = {
     proofThreeText: "una storia, più canali",
     proofPointsFallback: "punti attivi",
     proofPointsText: "punti di distribuzione sulle isole",
+    pointsEyebrow: "Dove ci trovi",
+    pointsTitle: "I punti di distribuzione",
+    pointsIntro: "Bar, ristoranti, hotel e negozi dove trovi Vivi Le Canarie, isola per isola.",
+    pointsCta: "Guarda tutti sulla mappa",
+    pointsEmpty: "Stiamo caricando i punti di distribuzione…",
     featureLabel: "Visibilità che parte dal territorio",
     featureTitle: "Non vendiamo spazi. Costruiamo attenzione.",
     featureText:
@@ -129,6 +135,11 @@ const copy = {
     proofThreeText: "una historia, más canales",
     proofPointsFallback: "puntos activos",
     proofPointsText: "puntos de distribución en las islas",
+    pointsEyebrow: "Dónde nos encuentras",
+    pointsTitle: "Los puntos de distribución",
+    pointsIntro: "Bares, restaurantes, hoteles y tiendas donde encuentras Vivi Le Canarie, isla por isla.",
+    pointsCta: "Ver todos en el mapa",
+    pointsEmpty: "Cargando los puntos de distribución…",
     featureLabel: "Visibilidad desde el territorio",
     featureTitle: "No vendemos espacios. Creamos atención.",
     featureText:
@@ -217,6 +228,11 @@ const copy = {
     proofThreeText: "one story, more channels",
     proofPointsFallback: "active points",
     proofPointsText: "distribution points across the islands",
+    pointsEyebrow: "Where to find us",
+    pointsTitle: "Our distribution points",
+    pointsIntro: "Bars, restaurants, hotels and shops where you can find Vivi Le Canarie, island by island.",
+    pointsCta: "See them all on the map",
+    pointsEmpty: "Loading distribution points…",
     featureLabel: "Visibility rooted in the territory",
     featureTitle: "We do not sell space. We build attention.",
     featureText: "We start with your audience, island and business goal. That is why there is no standard price: first we understand what the campaign needs to achieve.",
@@ -274,7 +290,7 @@ export default function PublicLanding() {
   const [status, setStatus] = useState<"idle" | "submitting" | "success" | "error">("idle");
   const t = copy[locale];
   const year = useMemo(() => new Date().getFullYear(), []);
-  const [distributionPointsCount, setDistributionPointsCount] = useState<number | null>(null);
+  const [distributionPoints, setDistributionPoints] = useState<DistributionPoint[] | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -282,11 +298,13 @@ export default function PublicLanding() {
       .then((response) => (response.ok ? response.json() : null))
       .then((payload: unknown) => {
         const points = (payload as { points?: unknown[] } | null)?.points;
-        if (active && Array.isArray(points)) setDistributionPointsCount(points.length);
+        if (active && Array.isArray(points)) setDistributionPoints(points as DistributionPoint[]);
       })
       .catch(() => {});
     return () => { active = false; };
   }, []);
+
+  const distributionPointsCount = distributionPoints?.length ?? null;
 
   function scrollToSection(id: "top" | "opportunita" | "chi-siamo" | "metodo" | "contatti") {
     const target = document.getElementById(id);
@@ -391,9 +409,28 @@ export default function PublicLanding() {
         <div><strong>{t.proofTwo}</strong><span>{t.proofTwoText}</span></div>
         <div><strong>{t.proofThree}</strong><span>{t.proofThreeText}</span></div>
         <a href="/mappe" target="_blank" rel="noopener noreferrer" aria-label={t.maps}>
-          <strong>{distributionPointsCount !== null ? `${distributionPointsCount}+ ${t.proofPointsFallback}` : t.proofPointsFallback}</strong>
+          <strong>{distributionPointsCount !== null ? `${distributionPointsCount} ${t.proofPointsFallback}` : t.proofPointsFallback}</strong>
           <span>{t.proofPointsText}</span>
         </a>
+      </section>
+
+      <section className="points-section" aria-label={t.pointsTitle}>
+        <div className="section-heading">
+          <p className="eyebrow">{t.pointsEyebrow}</p>
+          <h2>{t.pointsTitle}</h2>
+          <p>{t.pointsIntro}</p>
+        </div>
+        <div className="points-grid">
+          {distributionPoints && distributionPoints.length
+            ? distributionPoints.map((point) => (
+                <span className="point-chip" key={point.id}>
+                  <strong>{point.name}</strong>
+                  <small>{point.island}</small>
+                </span>
+              ))
+            : <p className="points-empty">{t.pointsEmpty}</p>}
+        </div>
+        <a className="button button-secondary points-cta" href="/mappe" target="_blank" rel="noopener noreferrer">{t.pointsCta}<span aria-hidden="true">↗</span></a>
       </section>
 
       <section className="services-section" id="opportunita">

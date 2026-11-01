@@ -415,6 +415,48 @@ html:has(.public-landing) {
   font-size: 12px;
 }
 
+.public-landing .points-section {
+  padding: 64px clamp(24px, 6vw, 96px) 96px;
+}
+
+.public-landing .points-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0 0 32px;
+  max-width: 1440px;
+}
+
+.public-landing .point-chip {
+  align-items: baseline;
+  background: var(--public-white);
+  border: 1px solid var(--public-line);
+  border-radius: 999px;
+  display: inline-flex;
+  gap: 8px;
+  padding: 9px 16px;
+}
+
+.public-landing .point-chip strong {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.public-landing .point-chip small {
+  color: var(--public-muted);
+  font-size: 11px;
+}
+
+.public-landing .points-empty {
+  color: var(--public-muted);
+  font-size: 15px;
+}
+
+.public-landing .points-cta {
+  display: inline-flex;
+  font-weight: 700;
+}
+
 .public-landing .services-section {
   padding: 120px clamp(24px, 6vw, 96px);
 }

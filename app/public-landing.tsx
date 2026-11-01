@@ -7,6 +7,7 @@ import { platformOwnership, usePlatformLanguage } from "./i18n";
 
 type Service = "magazine" | "podcast" | "both";
 type DistributionPoint = { id: string; name: string; island: string; address?: string; latitude?: number; longitude?: number };
+const BAD_POINT_NAME_PATTERN = /^(photo|img|dsc|vid)[-_ ]|whatsapp image/i;
 
 const islands = [
   "Tenerife",
@@ -305,6 +306,13 @@ export default function PublicLanding() {
   }, []);
 
   const distributionPointsCount = distributionPoints?.length ?? null;
+  const pointsByIsland = useMemo(() => {
+    if (!distributionPoints) return [];
+    const presentable = distributionPoints.filter((point) => !BAD_POINT_NAME_PATTERN.test(point.name));
+    const groups = new Map<string, DistributionPoint[]>();
+    presentable.forEach((point) => groups.set(point.island, [...(groups.get(point.island) ?? []), point]));
+    return islands.filter((island) => groups.has(island)).map((island) => [island, groups.get(island)!] as const);
+  }, [distributionPoints]);
 
   function scrollToSection(id: "top" | "opportunita" | "chi-siamo" | "metodo" | "contatti") {
     const target = document.getElementById(id);
@@ -420,16 +428,18 @@ export default function PublicLanding() {
           <h2>{t.pointsTitle}</h2>
           <p>{t.pointsIntro}</p>
         </div>
-        <div className="points-grid">
-          {distributionPoints && distributionPoints.length
-            ? distributionPoints.map((point) => (
-                <span className="point-chip" key={point.id}>
-                  <strong>{point.name}</strong>
-                  <small>{point.island}</small>
-                </span>
-              ))
-            : <p className="points-empty">{t.pointsEmpty}</p>}
-        </div>
+        {pointsByIsland.length
+          ? <div className="points-by-island">
+              {pointsByIsland.map(([island, points]) => (
+                <div className="points-island-group" key={island}>
+                  <h3>{island}</h3>
+                  <div className="points-grid">
+                    {points.map((point) => <span className="point-chip" key={point.id}>{point.name}</span>)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          : <p className="points-empty">{t.pointsEmpty}</p>}
         <a className="button button-secondary points-cta" href="/mappe" target="_blank" rel="noopener noreferrer">{t.pointsCta}<span aria-hidden="true">↗</span></a>
       </section>
 

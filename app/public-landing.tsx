@@ -2,7 +2,7 @@
 
 /* eslint-disable @next/next/no-img-element */
 
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { platformOwnership, usePlatformLanguage } from "./i18n";
 
 type Service = "magazine" | "podcast" | "both";
@@ -38,6 +38,8 @@ const copy = {
     proofTwoText: "comunicazione trilingue",
     proofThree: "Rivista + video",
     proofThreeText: "una storia, più canali",
+    proofPointsFallback: "punti attivi",
+    proofPointsText: "punti di distribuzione sulle isole",
     featureLabel: "Visibilità che parte dal territorio",
     featureTitle: "Non vendiamo spazi. Costruiamo attenzione.",
     featureText:
@@ -125,6 +127,8 @@ const copy = {
     proofTwoText: "comunicación trilingüe",
     proofThree: "Revista + vídeo",
     proofThreeText: "una historia, más canales",
+    proofPointsFallback: "puntos activos",
+    proofPointsText: "puntos de distribución en las islas",
     featureLabel: "Visibilidad desde el territorio",
     featureTitle: "No vendemos espacios. Creamos atención.",
     featureText:
@@ -211,6 +215,8 @@ const copy = {
     proofTwoText: "trilingual communication",
     proofThree: "Magazine + video",
     proofThreeText: "one story, more channels",
+    proofPointsFallback: "active points",
+    proofPointsText: "distribution points across the islands",
     featureLabel: "Visibility rooted in the territory",
     featureTitle: "We do not sell space. We build attention.",
     featureText: "We start with your audience, island and business goal. That is why there is no standard price: first we understand what the campaign needs to achieve.",
@@ -268,6 +274,19 @@ export default function PublicLanding() {
   const [status, setStatus] = useState<"idle" | "submitting" | "success" | "error">("idle");
   const t = copy[locale];
   const year = useMemo(() => new Date().getFullYear(), []);
+  const [distributionPointsCount, setDistributionPointsCount] = useState<number | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    fetch("/api/public/distribution-points")
+      .then((response) => (response.ok ? response.json() : null))
+      .then((payload: unknown) => {
+        const points = (payload as { points?: unknown[] } | null)?.points;
+        if (active && Array.isArray(points)) setDistributionPointsCount(points.length);
+      })
+      .catch(() => {});
+    return () => { active = false; };
+  }, []);
 
   function scrollToSection(id: "top" | "opportunita" | "chi-siamo" | "metodo" | "contatti") {
     const target = document.getElementById(id);
@@ -371,6 +390,10 @@ export default function PublicLanding() {
         <div><strong>{t.proofOne}</strong><span>{t.proofOneText}</span></div>
         <div><strong>{t.proofTwo}</strong><span>{t.proofTwoText}</span></div>
         <div><strong>{t.proofThree}</strong><span>{t.proofThreeText}</span></div>
+        <a href="/mappe" target="_blank" rel="noopener noreferrer" aria-label={t.maps}>
+          <strong>{distributionPointsCount !== null ? `${distributionPointsCount}+ ${t.proofPointsFallback}` : t.proofPointsFallback}</strong>
+          <span>{t.proofPointsText}</span>
+        </a>
       </section>
 
       <section className="services-section" id="opportunita">

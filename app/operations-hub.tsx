@@ -536,7 +536,7 @@ function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, subm
   const isOverdue = (row: RecordRow) => Boolean(row.next_check_due_at) && new Date(String(row.next_check_due_at)).getTime() <= nowMs;
   return <div className="hub-stack">
     <DailyRouteCard deliveries={deliveries} user={user} />
-    {user.role === "distributor" && <DistributorPointsBoard points={freeConfirmationPoints} deliveries={deliveries} busy={busy} submitPointRegistration={submitPointRegistration} submitRefill={submitPhotoAudit} submitDeliveryCheck={submitDeliveryCheck} submitAssignedDelivery={submitPhotoAudit} submitPointLocation={submitPointLocation} />}
+    {user.role === "distributor" && <DistributorPointsBoard points={freeConfirmationPoints} deliveries={deliveries} busy={busy} run={run} submitPointRegistration={submitPointRegistration} submitRefill={submitPhotoAudit} submitDeliveryCheck={submitDeliveryCheck} submitAssignedDelivery={submitPhotoAudit} submitPointLocation={submitPointLocation} />}
     <div className="hub-two">
       {canManage && <ActionCard index="01" title="Punto distribuzione" text="Coordinate, capacità, stock e visibilità pubblica.">
         <form onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const fd = new FormData(form); void run(() => post("/api/operations/distribution-points", { ...Object.fromEntries(fd), publicVisible: fd.get("publicVisible") === "on" }), "Punto distribuzione creato.", form); }}>
@@ -585,10 +585,11 @@ function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, subm
   </div>;
 }
 
-function DistributorPointsBoard({ points, deliveries, busy, submitPointRegistration, submitRefill, submitDeliveryCheck, submitAssignedDelivery, submitPointLocation }: {
+function DistributorPointsBoard({ points, deliveries, busy, run, submitPointRegistration, submitRefill, submitDeliveryCheck, submitAssignedDelivery, submitPointLocation }: {
   points: RecordRow[];
   deliveries: Delivery[];
   busy: boolean;
+  run: (action: () => Promise<unknown>, success: string, form?: HTMLFormElement) => Promise<void>;
   submitPointRegistration: (event: FormEvent<HTMLFormElement>) => void;
   submitRefill: (event: FormEvent<HTMLFormElement>) => void;
   submitDeliveryCheck: (event: FormEvent<HTMLFormElement>) => void;
@@ -598,7 +599,7 @@ function DistributorPointsBoard({ points, deliveries, busy, submitPointRegistrat
   const nowMs = Date.now();
   const isOverdue = (row: RecordRow) => Boolean(row.next_check_due_at) && new Date(String(row.next_check_due_at)).getTime() <= nowMs;
   const [showNewPoint, setShowNewPoint] = useState(points.length === 0);
-  const [expanded, setExpanded] = useState<{ id: string; mode: "refill" | "check" } | null>(null);
+  const [expanded, setExpanded] = useState<{ id: string; mode: "refill" | "check" | "stock" } | null>(null);
   const overdueCount = points.filter((row) => row.location_status !== "pending" && isOverdue(row)).length;
   const sorted = [...points].sort((a, b) => {
     const aPending = a.location_status === "pending" ? 0 : 1;
@@ -613,7 +614,7 @@ function DistributorPointsBoard({ points, deliveries, busy, submitPointRegistrat
     return String(a.name).localeCompare(String(b.name));
   });
 
-  function toggle(id: string, mode: "refill" | "check") {
+  function toggle(id: string, mode: "refill" | "check" | "stock") {
     setExpanded((current) => (current && current.id === id && current.mode === mode ? null : { id, mode }));
   }
 
@@ -661,6 +662,7 @@ function DistributorPointsBoard({ points, deliveries, busy, submitPointRegistrat
             {!pending && <div className="inline-actions">
               <button type="button" disabled={busy} onClick={() => toggle(rowId, "refill")}>Rifornisci</button>
               <button type="button" disabled={busy} onClick={() => toggle(rowId, "check")}>{overdue ? "Fai il controllo" : "Controlla ora"}</button>
+              <button type="button" disabled={busy} onClick={() => toggle(rowId, "stock")}>Correggi giacenza</button>
             </div>}
             {pending && <form style={{ flexBasis: "100%" }} onSubmit={submitPointLocation}>
               <input type="hidden" name="id" value={rowId} />
@@ -685,6 +687,12 @@ function DistributorPointsBoard({ points, deliveries, busy, submitPointRegistrat
               <PhotoPickerField />
               <p className="form-microcopy">Il CRM calcola quante copie sono state prese e fissa da solo il prossimo controllo.</p>
               <button className="primary" disabled={busy}>Registra controllo</button>
+            </form>}
+            {!pending && expanded?.id === rowId && expanded.mode === "stock" && <form style={{ flexBasis: "100%" }} onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const fd = new FormData(form); void run(() => post("/api/operations/distribution-points/stock", { id: fd.get("id"), stock: fd.get("stock") }), "Giacenza corretta.", form).then(() => setExpanded(null)); }}>
+              <input type="hidden" name="id" value={rowId} />
+              <input name="stock" type="number" min="0" max="1000000" defaultValue={String(row.stock ?? 0)} required />
+              <p className="form-microcopy">Usa questo campo solo per correggere la giacenza senza foto, ad esempio dopo un conteggio manuale. Per registrare un rifornimento o un ritiro con foto usa i pulsanti sopra.</p>
+              <button className="primary" disabled={busy}>Salva giacenza corretta</button>
             </form>}
           </div>;
         })}

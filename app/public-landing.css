@@ -376,11 +376,22 @@ html:has(.public-landing) {
   background: var(--public-ink);
   color: var(--public-white);
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   padding: 28px clamp(24px, 6vw, 96px);
 }
 
-.public-landing .proof-strip div {
+.public-landing .proof-strip a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.public-landing .proof-strip a:hover strong,
+.public-landing .proof-strip a:hover span {
+  text-decoration: underline;
+}
+
+.public-landing .proof-strip div,
+.public-landing .proof-strip a {
   align-items: baseline;
   border-right: 1px solid rgba(255, 255, 255, 0.18);
   display: flex;
@@ -389,7 +400,8 @@ html:has(.public-landing) {
   padding: 8px 20px;
 }
 
-.public-landing .proof-strip div:last-child {
+.public-landing .proof-strip div:last-child,
+.public-landing .proof-strip a:last-child {
   border-right: 0;
 }
 
@@ -1127,14 +1139,16 @@ html:has(.public-landing) {
     padding: 20px;
   }
 
-  .public-landing .proof-strip div {
+  .public-landing .proof-strip div,
+  .public-landing .proof-strip a {
     border-bottom: 1px solid rgba(255, 255, 255, 0.18);
     border-right: 0;
     justify-content: flex-start;
     padding: 15px 4px;
   }
 
-  .public-landing .proof-strip div:last-child {
+  .public-landing .proof-strip div:last-child,
+  .public-landing .proof-strip a:last-child {
     border-bottom: 0;
   }
 

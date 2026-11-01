@@ -46,6 +46,7 @@ const copy = {
     pointsTitle: "I punti di distribuzione",
     pointsIntro: "Bar, ristoranti, hotel e negozi dove trovi Vivi Le Canarie, isola per isola.",
     pointsCta: "Guarda tutti sulla mappa",
+    pointsSearchPrefix: "Cerca un punto vendita a",
     pointsEmpty: "Stiamo caricando i punti di distribuzione…",
     featureLabel: "Visibilità che parte dal territorio",
     featureTitle: "Non vendiamo spazi. Costruiamo attenzione.",
@@ -140,6 +141,7 @@ const copy = {
     pointsTitle: "Los puntos de distribución",
     pointsIntro: "Bares, restaurantes, hoteles y tiendas donde encuentras Vivi Le Canarie, isla por isla.",
     pointsCta: "Ver todos en el mapa",
+    pointsSearchPrefix: "Busca un punto de venta en",
     pointsEmpty: "Cargando los puntos de distribución…",
     featureLabel: "Visibilidad desde el territorio",
     featureTitle: "No vendemos espacios. Creamos atención.",
@@ -233,6 +235,7 @@ const copy = {
     pointsTitle: "Our distribution points",
     pointsIntro: "Bars, restaurants, hotels and shops where you can find Vivi Le Canarie, island by island.",
     pointsCta: "See them all on the map",
+    pointsSearchPrefix: "Search for a point of sale in",
     pointsEmpty: "Loading distribution points…",
     featureLabel: "Visibility rooted in the territory",
     featureTitle: "We do not sell space. We build attention.",
@@ -433,8 +436,27 @@ export default function PublicLanding() {
               {pointsByIsland.map(([island, points]) => (
                 <div className="points-island-group" key={island}>
                   <h3>{island}</h3>
-                  <div className="points-grid">
-                    {points.map((point) => <span className="point-chip" key={point.id}>{point.name}</span>)}
+                  <div className="points-search-wrap">
+                    <span className="points-search-icon" aria-hidden="true">🔍</span>
+                    <select
+                      className="points-select"
+                      defaultValue=""
+                      onChange={(event) => {
+                        const url = event.target.value;
+                        event.target.value = "";
+                        if (url) window.open(url, "_blank", "noopener,noreferrer");
+                      }}
+                    >
+                      <option value="" disabled>{t.pointsSearchPrefix} {island} ({points.length})</option>
+                      {points.map((point) => (
+                        <option
+                          key={point.id}
+                          value={point.latitude != null && point.longitude != null ? `https://www.google.com/maps/search/?api=1&query=${point.latitude},${point.longitude}` : ""}
+                        >
+                          {point.name}
+                        </option>
+                      ))}
+                    </select>
                   </div>
                 </div>
               ))}

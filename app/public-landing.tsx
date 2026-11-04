@@ -7,8 +7,6 @@ import { platformOwnership, usePlatformLanguage } from "./i18n";
 
 type Service = "magazine" | "podcast" | "both";
 type DistributionPoint = { id: string; name: string; island: string; address?: string; latitude?: number; longitude?: number };
-const BAD_POINT_NAME_PATTERN = /^(photo|img|dsc|vid)[-_ ]|whatsapp image/i;
-
 const islands = [
   "Tenerife",
   "Gran Canaria",
@@ -323,9 +321,8 @@ export default function PublicLanding() {
   const distributionPointsCount = distributionPoints?.length ?? null;
   const pointsByIsland = useMemo(() => {
     if (!distributionPoints) return [];
-    const presentable = distributionPoints.filter((point) => !BAD_POINT_NAME_PATTERN.test(point.name));
     const groups = new Map<string, DistributionPoint[]>();
-    presentable.forEach((point) => groups.set(point.island, [...(groups.get(point.island) ?? []), point]));
+    distributionPoints.forEach((point) => groups.set(point.island, [...(groups.get(point.island) ?? []), point]));
     return islands.filter((island) => groups.has(island)).map((island) => [island, groups.get(island)!] as const);
   }, [distributionPoints]);
 

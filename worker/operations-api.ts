@@ -1,4 +1,5 @@
 import { photoReviewForUploader } from "./distribution-photo-policy.js";
+import { cleanPublicDistributionPoints } from "./public-distribution-directory.js";
 
 type RuntimeEnv = Env & {
   AI?: Ai;
@@ -65,8 +66,9 @@ export async function handlePublicOperationsApi(request: Request, env: RuntimeEn
   const points = (await env.DB.prepare(
     `SELECT id, name, island, address, latitude_e6, longitude_e6 FROM distribution_points WHERE public_visible = 1 AND location_status = 'complete'${island ? " AND island = ?" : ""} ORDER BY island, name LIMIT 500`,
   ).bind(...(island ? [island] : [])).all<{ id: string; name: string; island: string; address: string; latitude_e6: number; longitude_e6: number }>()).results;
+  const directoryPoints = cleanPublicDistributionPoints(points);
   return new Response(JSON.stringify({
-    points: points.map((point) => ({ ...point, latitude: point.latitude_e6 / 1_000_000, longitude: point.longitude_e6 / 1_000_000, latitude_e6: undefined, longitude_e6: undefined })),
+    points: directoryPoints.map((point) => ({ ...point, latitude: point.latitude_e6 / 1_000_000, longitude: point.longitude_e6 / 1_000_000, latitude_e6: undefined, longitude_e6: undefined })),
     islands: ISLANDS,
   }), { headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
 }

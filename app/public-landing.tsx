@@ -298,14 +298,26 @@ export default function PublicLanding() {
 
   useEffect(() => {
     let active = true;
-    fetch("/api/public/distribution-points")
+    const loadPoints = () => fetch("/api/public/distribution-points", { cache: "no-store" })
       .then((response) => (response.ok ? response.json() : null))
       .then((payload: unknown) => {
         const points = (payload as { points?: unknown[] } | null)?.points;
         if (active && Array.isArray(points)) setDistributionPoints(points as DistributionPoint[]);
       })
       .catch(() => {});
-    return () => { active = false; };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void loadPoints();
+    };
+    void loadPoints();
+    const interval = window.setInterval(refreshWhenVisible, 30_000);
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
   }, []);
 
   const distributionPointsCount = distributionPoints?.length ?? null;

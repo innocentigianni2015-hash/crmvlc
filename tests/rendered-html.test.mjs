@@ -31,8 +31,8 @@ test("renders the public landing with development preview metadata", async () =>
   );
   const body = await response.text();
   assert.match(body, developmentPreviewMeta);
-  assert.match(body, /Il tuo brand/);
-  assert.match(body, /Richiedi una chiamata/);
+  assert.match(body, /Tu marca/);
+  assert.match(body, /Solicitar una llamada/);
   assert.match(body, /data-scroll-target="opportunita"/);
   assert.match(body, /data-scroll-target="chi-siamo"/);
   assert.match(body, /data-scroll-target="metodo"/);
@@ -49,8 +49,8 @@ test("renders the trilingual sales application page", async () => {
   }, { waitUntil() {}, passThroughOnException() {} });
   assert.equal(response.status, 200);
   const body = await response.text();
-  assert.match(body, /Diventa il riferimento commerciale/);
-  assert.match(body, /Collaborazione a provvigioni/);
-  assert.match(body, /Candidatura commerciale/);
-  assert.match(body, /Invia candidatura/);
+  assert.match(body, /Conviértete en el referente comercial/);
+  assert.match(body, /Colaboración a comisión/);
+  assert.match(body, /Candidatura comercial/);
+  assert.match(body, /Enviar candidatura/);
 });

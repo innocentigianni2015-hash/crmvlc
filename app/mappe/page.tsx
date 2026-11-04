@@ -35,20 +35,35 @@ export default function PublicDistributionMap() {
   const mapRef = useRef<LeafletMap | null>(null);
   const markersRef = useRef<Map<string, LeafletMarker>>(new Map());
 
-  const load = useCallback(async () => {
-    setLoading(true); setError("");
+  const load = useCallback(async (showLoading = true) => {
+    if (showLoading) setLoading(true);
+    setError("");
     try {
       const query = island ? `?island=${encodeURIComponent(island)}` : "";
-      const response = await fetch(`/api/public/distribution-points${query}`);
+      const response = await fetch(`/api/public/distribution-points${query}`, { cache: "no-store" });
       if (!response.ok) throw new Error("map_unavailable");
       const next = await response.json() as Directory;
       setData(next);
       setSelectedPointId(next.points[0]?.id ?? null);
     } catch { setError("Mappa temporaneamente non disponibile."); }
-    finally { setLoading(false); }
+    finally { if (showLoading) setLoading(false); }
   }, [island]);
 
-  useEffect(() => { const timer = window.setTimeout(() => { void load(); }, 0); return () => window.clearTimeout(timer); }, [load]);
+  useEffect(() => { const timer = window.setTimeout(() => { void load(true); }, 0); return () => window.clearTimeout(timer); }, [load]);
+
+  useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void load(false);
+    };
+    const interval = window.setInterval(refreshWhenVisible, 30_000);
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [load]);
 
   // Create the map once, on the client only.
   useEffect(() => {

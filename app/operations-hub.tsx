@@ -218,7 +218,9 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
       form.reset();
       notify(queued
         ? "Foto di consegna salvata sul dispositivo. Verrà inviata appena torna la rete."
-        : "Verifica fotografica inviata.");
+        : user.role === "distributor"
+          ? "Foto approvata e consegna registrata."
+          : "Verifica fotografica inviata.");
       if (!queued) await refresh();
     } catch (error) {
       notify(error instanceof Error ? error.message : "Acquisizione non riuscita.", "error");
@@ -257,7 +259,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
       await request("/api/operations/distribution-points/self-register", { method: "POST", body: upload });
 
       form.reset();
-      notify("Punto vendita registrato e prima consegna inviata.");
+      notify("Punto approvato e pubblicato nella home e nelle mappe.");
       await refresh();
     } catch (error) {
       notify(error instanceof Error ? error.message : "Registrazione non riuscita.", "error");

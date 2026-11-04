@@ -1,3 +1,5 @@
+import { photoReviewForUploader } from "./distribution-photo-policy.js";
+
 type RuntimeEnv = Env & {
   AI?: Ai;
   AUTH_SECRET?: string;
@@ -66,7 +68,7 @@ export async function handlePublicOperationsApi(request: Request, env: RuntimeEn
   return new Response(JSON.stringify({
     points: points.map((point) => ({ ...point, latitude: point.latitude_e6 / 1_000_000, longitude: point.longitude_e6 / 1_000_000, latitude_e6: undefined, longitude_e6: undefined })),
     islands: ISLANDS,
-  }), { headers: { "content-type": "application/json; charset=utf-8", "cache-control": "public, max-age=300, stale-while-revalidate=3600" } });
+  }), { headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
 }
 
 export async function handleOperationsApi(
@@ -739,21 +741,22 @@ async function selfRegisterDistributionPoint(request: Request, env: RuntimeEnv, 
   else if (!addressVerified) aiAnalysis.reasons = ["Indirizzo non verificabile tramite geocoding: revisione manuale consigliata.", ...aiAnalysis.reasons].slice(0, 4);
   await env.BUCKET.put(key, bytes, { httpMetadata: { contentType: photo.type, cacheControl: "private, no-store" }, customMetadata: { sha256: digest, watermark: watermarkText, pointId, deliveryId } });
   const nextCheckDueAt = new Date(now.getTime() + reminderDays * 86_400_000).toISOString();
+  const photoReview = photoReviewForUploader(user.role, user.id, nowIso);
 
   await env.DB.batch([
     env.DB.prepare(
-      "INSERT INTO distribution_points (id, client_id, name, island, address, latitude_e6, longitude_e6, capacity, stock, public_visible, created_at, updated_at, created_by, self_registered, point_photo_r2_key, next_check_due_at) VALUES (?, NULL, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?, ?, 1, ?, ?)",
-    ).bind(pointId, name, user.island, address, toE6(latitude), toE6(longitude), quantity, nowIso, nowIso, user.id, key, nextCheckDueAt),
+      "INSERT INTO distribution_points (id, client_id, name, island, address, latitude_e6, longitude_e6, capacity, stock, public_visible, created_at, updated_at, created_by, self_registered, point_photo_r2_key, next_check_due_at, area, location_status, assigned_distributor_user_id) VALUES (?, NULL, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?, ?, 1, ?, ?, ?, 'complete', ?)",
+    ).bind(pointId, name, user.island, address, toE6(latitude), toE6(longitude), quantity, nowIso, nowIso, user.id, key, nextCheckDueAt, address, user.id),
     env.DB.prepare(
       "INSERT INTO deliveries (id, client_id, distributor_user_id, distribution_point_id, island, status, quantity, unit, scheduled_for, delivery_contact_name, delivery_contact_email, delivery_contact_phone, delivery_address, notes, version, created_by, completed_at, created_at, updated_at) VALUES (?, NULL, ?, ?, ?, 'delivered', ?, ?, ?, NULL, NULL, NULL, ?, ?, 1, ?, ?, ?, ?)",
     ).bind(deliveryId, user.id, pointId, user.island, quantity, unit, canaryDateKey(now), address, "Punto registrato e prima consegna dal Distributore.", user.id, nowIso, nowIso, nowIso),
     env.DB.prepare(
-      "INSERT INTO photo_audits (id, delivery_id, distributor_user_id, island, r2_key, sha256, latitude_e6, longitude_e6, geofence_distance_m, status, quality_score, duplicate_of_audit_id, ai_model, ai_verdict, ai_result_json, watermark_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', ?, ?, ?, ?, ?, ?, ?)",
-    ).bind(auditId, deliveryId, user.id, user.island, key, digest, toE6(latitude), toE6(longitude), aiAnalysis.qualityScore, duplicate?.id ?? null, aiAnalysis.model, aiAnalysis.verdict, JSON.stringify(aiAnalysis), watermarkText, nowIso),
+      "INSERT INTO photo_audits (id, delivery_id, distributor_user_id, island, r2_key, sha256, latitude_e6, longitude_e6, geofence_distance_m, status, quality_score, duplicate_of_audit_id, ai_model, ai_verdict, ai_result_json, watermark_text, reviewed_by, reviewed_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(auditId, deliveryId, user.id, user.island, key, digest, toE6(latitude), toE6(longitude), photoReview.status, aiAnalysis.qualityScore, duplicate?.id ?? null, aiAnalysis.model, aiAnalysis.verdict, JSON.stringify(aiAnalysis), watermarkText, photoReview.reviewedBy, photoReview.reviewedAt, nowIso),
   ]);
 
-  await appendOperationsAudit(env, request, user, "distribution_point.self_registered", "distribution_point", pointId, { name, address, quantity, unit, reminderDays, deliveryId, duplicateOfAuditId: duplicate?.id ?? null, addressVerified, addressDistanceM, geocodedAddress: geocode?.formattedAddress ?? null });
-  return json({ id: pointId, deliveryId, auditId, nextCheckDueAt, addressVerified, addressDistanceM, geocodedAddress: geocode?.formattedAddress ?? null, addressMismatch }, 201);
+  await appendOperationsAudit(env, request, user, "distribution_point.self_registered", "distribution_point", pointId, { name, address, quantity, unit, reminderDays, deliveryId, auditId, photoStatus: photoReview.status, autoApproved: photoReview.autoApproved, publicVisible: true, duplicateOfAuditId: duplicate?.id ?? null, addressVerified, addressDistanceM, geocodedAddress: geocode?.formattedAddress ?? null });
+  return json({ id: pointId, deliveryId, auditId, status: photoReview.status, autoApproved: photoReview.autoApproved, publicVisible: true, nextCheckDueAt, addressVerified, addressDistanceM, geocodedAddress: geocode?.formattedAddress ?? null, addressMismatch }, 201);
 }
 
 async function createDeliveryCheck(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
@@ -897,6 +900,7 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
   const previous = await env.DB.prepare("SELECT id, r2_key FROM photo_audits WHERE delivery_id = ? ORDER BY created_at DESC LIMIT 1").bind(delivery.id).first<{ id: string; r2_key: string }>();
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
+  const photoReview = photoReviewForUploader(user.role, user.id, now);
   const watermarkText = `CRMVLC | ${delivery.island} | ${now} | ${latitude.toFixed(6)},${longitude.toFixed(6)} | ${digest.slice(0, 12)}`;
   const aiAnalysis = await analyzeDeliveryPhoto(env, bytes, photo.type, {
     quantity: delivery.quantity,
@@ -910,15 +914,15 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
   const key = `distribution-audit/${delivery.island}/${now.slice(0, 10)}/${id}.${extensionFor(photo.type)}`;
   await env.BUCKET.put(key, bytes, { httpMetadata: { contentType: photo.type, cacheControl: "private, no-store" }, customMetadata: { sha256: digest, watermark: watermarkText, deliveryId } });
   const mutations = [
-    env.DB.prepare("INSERT INTO photo_audits (id, delivery_id, distributor_user_id, island, r2_key, sha256, latitude_e6, longitude_e6, geofence_distance_m, status, quality_score, duplicate_of_audit_id, ai_model, ai_verdict, ai_result_json, watermark_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)")
-      .bind(id, delivery.id, delivery.distributor_user_id, delivery.island, key, digest, toE6(latitude), toE6(longitude), nearest?.distanceM ?? null, qualityScore, duplicate?.id ?? null, aiAnalysis.model, aiAnalysis.verdict, JSON.stringify(aiAnalysis), watermarkText, now),
+    env.DB.prepare("INSERT INTO photo_audits (id, delivery_id, distributor_user_id, island, r2_key, sha256, latitude_e6, longitude_e6, geofence_distance_m, status, quality_score, duplicate_of_audit_id, ai_model, ai_verdict, ai_result_json, watermark_text, reviewed_by, reviewed_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(id, delivery.id, delivery.distributor_user_id, delivery.island, key, digest, toE6(latitude), toE6(longitude), nearest?.distanceM ?? null, photoReview.status, qualityScore, duplicate?.id ?? null, aiAnalysis.model, aiAnalysis.verdict, JSON.stringify(aiAnalysis), watermarkText, photoReview.reviewedBy, photoReview.reviewedAt, now),
   ];
   if (user.role === "distributor" && !selfReported) {
     mutations.push(env.DB.prepare("UPDATE deliveries SET status = 'delivered', completed_at = ?, version = version + 1, updated_at = ? WHERE id = ? AND distributor_user_id = ? AND status IN ('assigned','in_progress','issue')").bind(now, now, delivery.id, user.id));
   }
   await env.DB.batch(mutations);
-  await appendOperationsAudit(env, request, user, "photo_audit.created", "photo_audit", id, { deliveryId, selfReported, digest, distanceM: nearest?.distanceM ?? null, qualityScore, duplicateOfAuditId: duplicate?.id ?? null, aiVerdict: aiAnalysis.verdict, adminBulkUpload, onBehalfOfDistributorId: adminBulkUpload ? delivery.distributor_user_id : null });
-  return json({ id, deliveryId, selfReported, adminBulkUpload, distributorUserId: delivery.distributor_user_id, status: "pending", qualityScore, geofenceDistanceM: nearest?.distanceM ?? null, watermarkText, aiVerdict: aiAnalysis.verdict, duplicate: Boolean(duplicate) }, 201);
+  await appendOperationsAudit(env, request, user, "photo_audit.created", "photo_audit", id, { deliveryId, selfReported, digest, status: photoReview.status, autoApproved: photoReview.autoApproved, distanceM: nearest?.distanceM ?? null, qualityScore, duplicateOfAuditId: duplicate?.id ?? null, aiVerdict: aiAnalysis.verdict, adminBulkUpload, onBehalfOfDistributorId: adminBulkUpload ? delivery.distributor_user_id : null });
+  return json({ id, deliveryId, selfReported, adminBulkUpload, distributorUserId: delivery.distributor_user_id, status: photoReview.status, autoApproved: photoReview.autoApproved, qualityScore, geofenceDistanceM: nearest?.distanceM ?? null, watermarkText, aiVerdict: aiAnalysis.verdict, duplicate: Boolean(duplicate) }, 201);
 }
 
 type PhotoAiResult = {

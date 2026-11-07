@@ -229,6 +229,36 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
     }
   }
 
+  async function submitPhotoAuditReplace(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    setBusy(true);
+    try {
+      const formData = new FormData(form);
+      const auditId = String(formData.get("auditId") ?? "");
+      const selected = formData.get("photo");
+      if (!auditId) throw new Error("Foto non valida.");
+      if (!(selected instanceof File) || selected.size === 0) throw new Error("Scatta o scegli la nuova foto.");
+      const photo = await prepareDeliveryPhoto(selected);
+      const upload = new FormData();
+      upload.set("auditId", auditId);
+      if (user.role === "distributor") {
+        const location = await currentLocation();
+        upload.set("latitude", String(location.latitude));
+        upload.set("longitude", String(location.longitude));
+      }
+      upload.set("photo", photo, photo.name);
+      await request("/api/operations/photo-audits/replace", { method: "POST", body: upload });
+      form.reset();
+      notify("Foto sostituita e inviata per una nuova verifica.");
+      await refresh();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Sostituzione non riuscita.", "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function submitPointRegistration(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
@@ -393,7 +423,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
     {tab === "vip" && user.role !== "distributor" && <VipPanel data={data} user={user} clients={clients} busy={busy} run={run} />}
     {tab === "finance" && user.role !== "distributor" && <FinancePanel data={data} user={user} busy={busy} run={run} />}
     {tab === "inventory" && user.role !== "distributor" && <InventoryPanel data={data} user={user} busy={busy} run={run} />}
-    {tab === "distribution" && <GeoAuditPanel data={data} user={user} users={users} clients={clients} deliveries={deliveries} busy={busy} run={run} submitPhotoAudit={submitPhotoAudit} submitPointRegistration={submitPointRegistration} submitDeliveryCheck={submitDeliveryCheck} submitBulkPhotoAudit={submitBulkPhotoAudit} submitPointLocation={submitPointLocation} />}
+    {tab === "distribution" && <GeoAuditPanel data={data} user={user} users={users} clients={clients} deliveries={deliveries} busy={busy} run={run} submitPhotoAudit={submitPhotoAudit} submitPointRegistration={submitPointRegistration} submitDeliveryCheck={submitDeliveryCheck} submitBulkPhotoAudit={submitBulkPhotoAudit} submitPointLocation={submitPointLocation} submitPhotoAuditReplace={submitPhotoAuditReplace} />}
     {tab === "report" && REPORT_TAB_ROLES.includes(user.role as typeof REPORT_TAB_ROLES[number]) && <ReportPanel data={data} />}
     {tab === "sales" && user.role !== "distributor" && <SalesPanel data={data} user={user} users={users} clients={clients} busy={busy} run={run} />}
   </section>;
@@ -517,7 +547,7 @@ function InventoryPanel({ data, user, busy, run }: PanelProps) {
   </div>;
 }
 
-function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, submitPhotoAudit, submitPointRegistration, submitDeliveryCheck, submitBulkPhotoAudit, submitPointLocation }: PanelProps & {
+function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, submitPhotoAudit, submitPointRegistration, submitDeliveryCheck, submitBulkPhotoAudit, submitPointLocation, submitPhotoAuditReplace }: PanelProps & {
   users: User[];
   clients: Client[];
   deliveries: Delivery[];
@@ -531,6 +561,7 @@ function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, subm
     onProgress: (index: number, status: "ok" | "error", message?: string) => void,
   ) => Promise<void>;
   submitPointLocation: (event: FormEvent<HTMLFormElement>) => void;
+  submitPhotoAuditReplace: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   const canManage = ["super_admin", "admin", "sales_manager"].includes(user.role);
   const freeConfirmationPoints = data.distributionPoints;
@@ -538,7 +569,7 @@ function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, subm
   const isOverdue = (row: RecordRow) => Boolean(row.next_check_due_at) && new Date(String(row.next_check_due_at)).getTime() <= nowMs;
   return <div className="hub-stack">
     <DailyRouteCard deliveries={deliveries} user={user} />
-    {user.role === "distributor" && <DistributorPointsBoard points={freeConfirmationPoints} deliveries={deliveries} busy={busy} run={run} submitPointRegistration={submitPointRegistration} submitRefill={submitPhotoAudit} submitDeliveryCheck={submitDeliveryCheck} submitAssignedDelivery={submitPhotoAudit} submitPointLocation={submitPointLocation} />}
+    {user.role === "distributor" && <DistributorPointsBoard points={freeConfirmationPoints} deliveries={deliveries} photoAudits={data.photoAudits} busy={busy} run={run} submitPointRegistration={submitPointRegistration} submitRefill={submitPhotoAudit} submitDeliveryCheck={submitDeliveryCheck} submitAssignedDelivery={submitPhotoAudit} submitPointLocation={submitPointLocation} submitPhotoAuditReplace={submitPhotoAuditReplace} />}
     <div className="hub-two">
       {canManage && <ActionCard index="01" title="Punto distribuzione" text="Coordinate, capacità, stock e visibilità pubblica.">
         <form onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const fd = new FormData(form); void run(() => post("/api/operations/distribution-points", { ...Object.fromEntries(fd), publicVisible: fd.get("publicVisible") === "on" }), "Punto distribuzione creato.", form); }}>
@@ -581,15 +612,16 @@ function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, subm
           </div>;
         }) : <MiniEmpty text="Nessun punto geolocalizzato." />}
       </DataCard>
-      <DataCard title="Audit fotografici" count={data.photoAudits.length}>{data.photoAudits.length ? data.photoAudits.map((row) => { const ai = photoAiSummary(row); return <div className="hub-list-row audit-row" key={String(row.id)}><div><strong>{row.distributor_name}</strong><small>{row.island} · {when(row.created_at)} · distanza {row.geofence_distance_m ?? "—"} m</small>{ai && <small className={ai.verdict === "compliant_candidate" ? "ai-pass" : "ai-review"}>AI: {ai.magazinesDetected || ai.displayDetected ? "riviste/espositore rilevati" : "contenuto da verificare"} · {ai.possibleDuplicate ? "possibile duplicato" : "nessun duplicato rilevato"} · confidenza {ai.confidence}%</small>}{row.duplicate_of_audit_id && <small className="ai-review">Hash identico a una foto già registrata.</small>}</div><b>Qualità {row.quality_score}%</b><span className={`module-status ${row.status}`}>{row.status}</span>{canManage && row.status === "pending" && <div className="inline-actions"><button disabled={busy} onClick={() => void run(() => post("/api/operations/photo-audits/review", { id: row.id, status: "approved" }), "Foto approvata.")}>Approva</button><button disabled={busy} onClick={() => void run(() => post("/api/operations/photo-audits/review", { id: row.id, status: "rejected" }), "Foto rifiutata.")}>Rifiuta</button></div>}</div>; }) : <MiniEmpty text="Nessuna foto da verificare." />}</DataCard>
+      <DataCard title="Audit fotografici" count={data.photoAudits.length}>{data.photoAudits.length ? data.photoAudits.map((row) => { const ai = photoAiSummary(row); const auditId = String(row.id); return <div className="hub-list-row audit-row" key={auditId} style={{ flexWrap: "wrap", alignItems: "flex-start" }}><PhotoAuditThumb auditId={auditId} size={64} /><div><strong>{row.distributor_name}</strong><small>{row.island} · {when(row.created_at)} · distanza {row.geofence_distance_m ?? "—"} m</small>{ai && <small className={ai.verdict === "compliant_candidate" ? "ai-pass" : "ai-review"}>AI: {ai.magazinesDetected || ai.displayDetected ? "riviste/espositore rilevati" : "contenuto da verificare"} · {ai.possibleDuplicate ? "possibile duplicato" : "nessun duplicato rilevato"} · confidenza {ai.confidence}%</small>}{row.duplicate_of_audit_id && <small className="ai-review">Hash identico a una foto già registrata.</small>}</div><b>Qualità {row.quality_score}%</b><span className={`module-status ${row.status}`}>{row.status}</span>{canManage && row.status === "pending" && <div className="inline-actions"><button disabled={busy} onClick={() => void run(() => post("/api/operations/photo-audits/review", { id: row.id, status: "approved" }), "Foto approvata.")}>Approva</button><button disabled={busy} onClick={() => void run(() => post("/api/operations/photo-audits/review", { id: row.id, status: "rejected" }), "Foto rifiutata.")}>Rifiuta</button></div>}{canManage && <PhotoAuditEditActions auditId={auditId} busy={busy} run={run} onReplace={submitPhotoAuditReplace} />}</div>; }) : <MiniEmpty text="Nessuna foto da verificare." />}</DataCard>
     </div>
     <DataCard title="Controlli ritiro" count={data.deliveryChecks.length}>{data.deliveryChecks.length ? data.deliveryChecks.map((row) => <div className="hub-list-row" key={String(row.id)}><div><strong>{row.point_name}</strong><small>{row.distributor_name ? `${row.distributor_name} · ` : ""}{when(row.created_at)} · distanza {row.geofence_distance_m ?? "—"} m</small></div><b>{row.quantity_found}/{row.quantity_left}</b><span className="module-status">prese {row.quantity_taken}</span></div>) : <MiniEmpty text="Nessun controllo di ritiro registrato." />}</DataCard>
   </div>;
 }
 
-function DistributorPointsBoard({ points, deliveries, busy, run, submitPointRegistration, submitRefill, submitDeliveryCheck, submitAssignedDelivery, submitPointLocation }: {
+function DistributorPointsBoard({ points, deliveries, photoAudits, busy, run, submitPointRegistration, submitRefill, submitDeliveryCheck, submitAssignedDelivery, submitPointLocation, submitPhotoAuditReplace }: {
   points: RecordRow[];
   deliveries: Delivery[];
+  photoAudits: RecordRow[];
   busy: boolean;
   run: (action: () => Promise<unknown>, success: string, form?: HTMLFormElement) => Promise<void>;
   submitPointRegistration: (event: FormEvent<HTMLFormElement>) => void;
@@ -597,6 +629,7 @@ function DistributorPointsBoard({ points, deliveries, busy, run, submitPointRegi
   submitDeliveryCheck: (event: FormEvent<HTMLFormElement>) => void;
   submitAssignedDelivery: (event: FormEvent<HTMLFormElement>) => void;
   submitPointLocation: (event: FormEvent<HTMLFormElement>) => void;
+  submitPhotoAuditReplace: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   const nowMs = Date.now();
   const isOverdue = (row: RecordRow) => Boolean(row.next_check_due_at) && new Date(String(row.next_check_due_at)).getTime() <= nowMs;
@@ -696,6 +729,26 @@ function DistributorPointsBoard({ points, deliveries, busy, run, submitPointRegi
               <p className="form-microcopy">Usa questo campo solo per correggere la giacenza senza foto, ad esempio dopo un conteggio manuale. Per registrare un rifornimento o un ritiro con foto usa i pulsanti sopra.</p>
               <button className="primary" disabled={busy}>Salva giacenza corretta</button>
             </form>}
+          </div>;
+        })}
+    </ActionCard>
+    <ActionCard index="03" title="Le mie foto" text="Le foto che hai caricato: cancella quelle sbagliate o sostituiscile prima della verifica dell'amministrazione.">
+      {!photoAudits.length
+        ? <MiniEmpty text="Nessuna foto caricata." />
+        : photoAudits.map((row) => {
+          const auditId = String(row.id);
+          const status = String(row.status);
+          const statusLabel = status === "approved" ? "Approvata" : status === "rejected" ? "Rifiutata" : "In verifica";
+          return <div className="hub-list-row" key={auditId} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-start", padding: "8px 0", borderTop: "1px solid rgba(0,0,0,.08)" }}>
+            <PhotoAuditThumb auditId={auditId} size={72} />
+            <div style={{ flex: "1 1 200px" }}>
+              <strong>{row.island}</strong>
+              <small style={{ display: "block" }}>{when(row.created_at)} · qualità {row.quality_score}%</small>
+            </div>
+            <span className={`module-status ${status}`}>{statusLabel}</span>
+            {status === "pending"
+              ? <PhotoAuditEditActions auditId={auditId} busy={busy} run={run} onReplace={submitPhotoAuditReplace} />
+              : <small style={{ flexBasis: "100%", color: "#67655e" }}>Foto già verificata: per modificarla contatta l'amministrazione.</small>}
           </div>;
         })}
     </ActionCard>
@@ -1090,6 +1143,41 @@ function PointPhotoThumb({ pointId, size = 88 }: { pointId: string; size?: numbe
     style={{ width: size, height: size, objectFit: "cover", borderRadius: 8, border: "1px solid rgba(0,0,0,.15)", flexShrink: 0 }}
     onError={() => setFailed(true)}
   />;
+}
+
+function PhotoAuditThumb({ auditId, size = 88 }: { auditId: string; size?: number }) {
+  const [failed, setFailed] = useState(false);
+  if (failed || !auditId) return null;
+  return <img
+    src={`/api/operations/photo-audits/${auditId}/photo`}
+    alt="Foto caricata"
+    style={{ width: size, height: size, objectFit: "cover", borderRadius: 8, border: "1px solid rgba(0,0,0,.15)", flexShrink: 0 }}
+    onError={() => setFailed(true)}
+  />;
+}
+
+function PhotoAuditEditActions({ auditId, busy, run, onReplace }: {
+  auditId: string;
+  busy: boolean;
+  run: (action: () => Promise<unknown>, success: string, form?: HTMLFormElement) => Promise<void>;
+  onReplace: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  return <div style={{ flexBasis: "100%", display: "flex", flexDirection: "column", gap: 6 }}>
+    <div className="inline-actions">
+      <button type="button" disabled={busy} onClick={() => setEditing((value) => !value)}>{editing ? "Annulla modifica" : "Modifica foto"}</button>
+      <button type="button" disabled={busy} onClick={() => {
+        if (window.confirm("Eliminare questa foto? L'operazione non si può annullare.")) {
+          void run(() => post("/api/operations/photo-audits/delete", { id: auditId }), "Foto eliminata.");
+        }
+      }}>Elimina</button>
+    </div>
+    {editing && <form onSubmit={(event) => { onReplace(event); setEditing(false); }}>
+      <input type="hidden" name="auditId" value={auditId} />
+      <PhotoPickerField />
+      <button className="primary" disabled={busy}>Invia foto sostitutiva</button>
+    </form>}
+  </div>;
 }
 
 function ActionCard({ index, title, text, children }: { index: string; title: string; text: string; children: React.ReactNode }) {

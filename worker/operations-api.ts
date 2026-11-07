@@ -140,6 +140,16 @@ export async function handleOperationsApi(
     if (url.pathname === "/api/operations/photo-audits/review" && request.method === "POST") {
       return await reviewPhotoAudit(request, env, user);
     }
+    if (url.pathname === "/api/operations/photo-audits/delete" && request.method === "POST") {
+      return await deletePhotoAudit(request, env, user);
+    }
+    if (url.pathname === "/api/operations/photo-audits/replace" && request.method === "POST") {
+      return await replacePhotoAudit(request, env, user);
+    }
+    const photoAuditImageMatch = url.pathname.match(/^\/api\/operations\/photo-audits\/([^/]+)\/photo$/);
+    if (photoAuditImageMatch && request.method === "GET") {
+      return await servePhotoAuditImage(env, photoAuditImageMatch[1], user);
+    }
     if (url.pathname === "/api/operations/sales-checkins" && request.method === "POST") {
       return await createSalesCheckin(request, env, user);
     }
@@ -1020,6 +1030,118 @@ async function reviewPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
   await env.DB.prepare("UPDATE photo_audits SET status = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ? AND status = 'pending'").bind(status, user.id, now, id).run();
   await appendOperationsAudit(env, request, user, `photo_audit.${status}`, "photo_audit", id, {});
   return json({ ok: true });
+}
+
+async function deletePhotoAudit(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  const body = await readJson<Record<string, unknown>>(request);
+  const id = clean(body.id, 80);
+  if (!id) throw new OperationsError(400, "invalid_id", "Foto non valida.");
+  const row = await env.DB.prepare("SELECT id, island, status, distributor_user_id, r2_key FROM photo_audits WHERE id = ? LIMIT 1")
+    .bind(id).first<{ id: string; island: string; status: string; distributor_user_id: string; r2_key: string }>();
+  if (!row) throw new OperationsError(404, "audit_not_found", "Verifica fotografica non trovata.");
+  const isManager = ["super_admin", "admin", "sales_manager"].includes(user.role);
+  const allowed = (isManager && canAccessIsland(user, row.island))
+    || (user.role === "distributor" && row.distributor_user_id === user.id && row.status === "pending");
+  if (!allowed) {
+    throw new OperationsError(403, "not_allowed", user.role === "distributor" ? "Puoi cancellare solo le tue foto non ancora verificate." : "Non puoi cancellare questa foto.");
+  }
+  const now = new Date().toISOString();
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM photo_audits WHERE id = ?").bind(id),
+    env.DB.prepare("INSERT OR IGNORE INTO r2_deletion_queue (r2_key, source, created_at, attempts) VALUES (?, 'photo_audit_deleted', ?, 0)").bind(row.r2_key, now),
+  ]);
+  await appendOperationsAudit(env, request, user, "photo_audit.deleted", "photo_audit", id, { previousStatus: row.status, r2Key: row.r2_key });
+  return json({ id, deleted: true });
+}
+
+async function replacePhotoAudit(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  if (!env.BUCKET) throw new OperationsError(503, "storage_missing", "Archivio fotografico non configurato.");
+  const length = Number(request.headers.get("content-length") ?? 0);
+  if (length > MAX_PHOTO_BYTES + 256_000) throw new OperationsError(413, "photo_too_large", "La foto supera 8 MB.");
+  if (!(request.headers.get("content-type") ?? "").includes("multipart/form-data")) throw new OperationsError(415, "form_required", "Invia la nuova foto.");
+  const form = await request.formData();
+  const auditId = clean(form.get("auditId"), 80);
+  const photo = form.get("photo");
+  if (!(photo instanceof File) || photo.size === 0 || photo.size > MAX_PHOTO_BYTES || !["image/jpeg", "image/png", "image/webp"].includes(photo.type)) {
+    throw new OperationsError(400, "invalid_photo", "Carica una foto JPG, PNG o WebP fino a 8 MB.");
+  }
+  const old = await env.DB.prepare("SELECT id, delivery_id, distributor_user_id, island, status, r2_key FROM photo_audits WHERE id = ? LIMIT 1")
+    .bind(auditId).first<{ id: string; delivery_id: string; distributor_user_id: string; island: string; status: string; r2_key: string }>();
+  if (!old) throw new OperationsError(404, "audit_not_found", "Verifica fotografica non trovata.");
+  const isManager = ["super_admin", "admin", "sales_manager"].includes(user.role);
+  const allowed = (isManager && canAccessIsland(user, old.island))
+    || (user.role === "distributor" && old.distributor_user_id === user.id && old.status === "pending");
+  if (!allowed) {
+    throw new OperationsError(403, "not_allowed", user.role === "distributor" ? "Puoi modificare solo le tue foto non ancora verificate." : "Non puoi modificare questa foto.");
+  }
+
+  const delivery = await env.DB.prepare(
+    "SELECT d.id, d.distributor_user_id, d.island, d.quantity, d.unit, d.distribution_point_id, p.name AS point_name, p.address AS point_address, p.latitude_e6 AS point_latitude_e6, p.longitude_e6 AS point_longitude_e6 FROM deliveries d LEFT JOIN distribution_points p ON p.id = d.distribution_point_id WHERE d.id = ? LIMIT 1",
+  ).bind(old.delivery_id).first<{ id: string; distributor_user_id: string; island: string; quantity: number; unit: string; distribution_point_id: string | null; point_name: string | null; point_address: string | null; point_latitude_e6: number | null; point_longitude_e6: number | null }>();
+  if (!delivery) throw new OperationsError(404, "delivery_not_found", "Consegna collegata non trovata.");
+
+  let latitude: number;
+  let longitude: number;
+  let distanceM: number | null = null;
+  if (user.role === "distributor") {
+    latitude = requiredCoordinate(form.get("latitude"), -90, 90);
+    longitude = requiredCoordinate(form.get("longitude"), -180, 180);
+    if (delivery.distribution_point_id && delivery.point_latitude_e6 !== null && delivery.point_longitude_e6 !== null) {
+      distanceM = Math.round(haversineMeters(latitude, longitude, delivery.point_latitude_e6 / 1_000_000, delivery.point_longitude_e6 / 1_000_000));
+      if (distanceM > MAX_GEOFENCE_REJECT_M) {
+        throw new OperationsError(422, "too_far_from_point", `Sei a ${distanceM} m dal punto: troppo lontano per sostituire la foto da qui. Torna sul posto e riprova.`);
+      }
+    }
+  } else {
+    latitude = delivery.point_latitude_e6 !== null ? delivery.point_latitude_e6 / 1_000_000 : 0;
+    longitude = delivery.point_longitude_e6 !== null ? delivery.point_longitude_e6 / 1_000_000 : 0;
+  }
+
+  const bytes = await photo.arrayBuffer();
+  const digest = await sha256(bytes);
+  const duplicate = await env.DB.prepare("SELECT id FROM photo_audits WHERE sha256 = ? AND id != ? ORDER BY created_at DESC LIMIT 1").bind(digest, old.id).first<{ id: string }>();
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const watermarkText = `CRMVLC | ${delivery.island} | ${now} | ${latitude.toFixed(6)},${longitude.toFixed(6)} | ${digest.slice(0, 12)}`;
+  const aiAnalysis = await analyzeDeliveryPhoto(env, bytes, photo.type, {
+    quantity: delivery.quantity,
+    unit: delivery.unit,
+    pointName: delivery.point_name,
+    pointAddress: delivery.point_address,
+    geofenceDistanceM: distanceM,
+    exactDuplicate: Boolean(duplicate),
+  }, null);
+  const key = `distribution-audit/${delivery.island}/${now.slice(0, 10)}/${id}.${extensionFor(photo.type)}`;
+  await env.BUCKET.put(key, bytes, { httpMetadata: { contentType: photo.type, cacheControl: "private, no-store" }, customMetadata: { sha256: digest, watermark: watermarkText, deliveryId: delivery.id } });
+
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO photo_audits (id, delivery_id, distributor_user_id, island, r2_key, sha256, latitude_e6, longitude_e6, geofence_distance_m, status, quality_score, duplicate_of_audit_id, ai_model, ai_verdict, ai_result_json, watermark_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(id, delivery.id, old.distributor_user_id, delivery.island, key, digest, toE6(latitude), toE6(longitude), distanceM, aiAnalysis.qualityScore, duplicate?.id ?? null, aiAnalysis.model, aiAnalysis.verdict, JSON.stringify(aiAnalysis), watermarkText, now),
+    env.DB.prepare("DELETE FROM photo_audits WHERE id = ?").bind(old.id),
+    env.DB.prepare("INSERT OR IGNORE INTO r2_deletion_queue (r2_key, source, created_at, attempts) VALUES (?, 'photo_audit_replaced', ?, 0)").bind(old.r2_key, now),
+  ]);
+
+  await appendOperationsAudit(env, request, user, "photo_audit.replaced", "photo_audit", id, { replacedAuditId: old.id, deliveryId: delivery.id, digest, distanceM, qualityScore: aiAnalysis.qualityScore, duplicateOfAuditId: duplicate?.id ?? null });
+  return json({ id, replacedAuditId: old.id, status: "pending", qualityScore: aiAnalysis.qualityScore, geofenceDistanceM: distanceM }, 201);
+}
+
+async function servePhotoAuditImage(env: RuntimeEnv, auditId: string, user: OperationsUser): Promise<Response> {
+  if (!env.BUCKET) throw new OperationsError(503, "storage_missing", "Archivio fotografico non configurato.");
+  const row = await env.DB.prepare("SELECT id, island, distributor_user_id, r2_key FROM photo_audits WHERE id = ? LIMIT 1")
+    .bind(auditId).first<{ id: string; island: string; distributor_user_id: string; r2_key: string }>();
+  if (!row) throw new OperationsError(404, "photo_not_found", "Foto non trovata.");
+  const isManager = ["super_admin", "admin", "sales_manager"].includes(user.role);
+  const allowed = (isManager && canAccessIsland(user, row.island)) || (user.role === "distributor" && row.distributor_user_id === user.id);
+  if (!allowed) throw new OperationsError(403, "not_allowed", "Non puoi visualizzare questa foto.");
+  const object = await env.BUCKET.get(row.r2_key);
+  if (!object) throw new OperationsError(404, "photo_not_found", "Foto non disponibile nell'archivio.");
+  return new Response(object.body, {
+    headers: {
+      "content-type": object.httpMetadata?.contentType ?? "image/jpeg",
+      "cache-control": "private, max-age=3600",
+    },
+  });
 }
 
 async function createSalesCheckin(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {

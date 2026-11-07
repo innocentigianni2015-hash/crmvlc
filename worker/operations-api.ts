@@ -1041,9 +1041,9 @@ async function deletePhotoAudit(request: Request, env: RuntimeEnv, user: Operati
   if (!row) throw new OperationsError(404, "audit_not_found", "Verifica fotografica non trovata.");
   const isManager = ["super_admin", "admin", "sales_manager"].includes(user.role);
   const allowed = (isManager && canAccessIsland(user, row.island))
-    || (user.role === "distributor" && row.distributor_user_id === user.id && row.status === "pending");
+    || (user.role === "distributor" && row.distributor_user_id === user.id);
   if (!allowed) {
-    throw new OperationsError(403, "not_allowed", user.role === "distributor" ? "Puoi cancellare solo le tue foto non ancora verificate." : "Non puoi cancellare questa foto.");
+    throw new OperationsError(403, "not_allowed", user.role === "distributor" ? "Puoi cancellare solo le tue foto." : "Non puoi cancellare questa foto.");
   }
   const now = new Date().toISOString();
   await env.DB.batch([
@@ -1070,9 +1070,9 @@ async function replacePhotoAudit(request: Request, env: RuntimeEnv, user: Operat
   if (!old) throw new OperationsError(404, "audit_not_found", "Verifica fotografica non trovata.");
   const isManager = ["super_admin", "admin", "sales_manager"].includes(user.role);
   const allowed = (isManager && canAccessIsland(user, old.island))
-    || (user.role === "distributor" && old.distributor_user_id === user.id && old.status === "pending");
+    || (user.role === "distributor" && old.distributor_user_id === user.id);
   if (!allowed) {
-    throw new OperationsError(403, "not_allowed", user.role === "distributor" ? "Puoi modificare solo le tue foto non ancora verificate." : "Non puoi modificare questa foto.");
+    throw new OperationsError(403, "not_allowed", user.role === "distributor" ? "Puoi modificare solo le tue foto." : "Non puoi modificare questa foto.");
   }
 
   const delivery = await env.DB.prepare(
@@ -1113,17 +1113,18 @@ async function replacePhotoAudit(request: Request, env: RuntimeEnv, user: Operat
   }, null);
   const key = `distribution-audit/${delivery.island}/${now.slice(0, 10)}/${id}.${extensionFor(photo.type)}`;
   await env.BUCKET.put(key, bytes, { httpMetadata: { contentType: photo.type, cacheControl: "private, no-store" }, customMetadata: { sha256: digest, watermark: watermarkText, deliveryId: delivery.id } });
+  const photoReview = photoReviewForUploader(user.role, user.id, now);
 
   await env.DB.batch([
     env.DB.prepare(
-      "INSERT INTO photo_audits (id, delivery_id, distributor_user_id, island, r2_key, sha256, latitude_e6, longitude_e6, geofence_distance_m, status, quality_score, duplicate_of_audit_id, ai_model, ai_verdict, ai_result_json, watermark_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)",
-    ).bind(id, delivery.id, old.distributor_user_id, delivery.island, key, digest, toE6(latitude), toE6(longitude), distanceM, aiAnalysis.qualityScore, duplicate?.id ?? null, aiAnalysis.model, aiAnalysis.verdict, JSON.stringify(aiAnalysis), watermarkText, now),
+      "INSERT INTO photo_audits (id, delivery_id, distributor_user_id, island, r2_key, sha256, latitude_e6, longitude_e6, geofence_distance_m, status, quality_score, duplicate_of_audit_id, ai_model, ai_verdict, ai_result_json, watermark_text, reviewed_by, reviewed_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(id, delivery.id, old.distributor_user_id, delivery.island, key, digest, toE6(latitude), toE6(longitude), distanceM, photoReview.status, aiAnalysis.qualityScore, duplicate?.id ?? null, aiAnalysis.model, aiAnalysis.verdict, JSON.stringify(aiAnalysis), watermarkText, photoReview.reviewedBy, photoReview.reviewedAt, now),
     env.DB.prepare("DELETE FROM photo_audits WHERE id = ?").bind(old.id),
     env.DB.prepare("INSERT OR IGNORE INTO r2_deletion_queue (r2_key, source, created_at, attempts) VALUES (?, 'photo_audit_replaced', ?, 0)").bind(old.r2_key, now),
   ]);
 
-  await appendOperationsAudit(env, request, user, "photo_audit.replaced", "photo_audit", id, { replacedAuditId: old.id, deliveryId: delivery.id, digest, distanceM, qualityScore: aiAnalysis.qualityScore, duplicateOfAuditId: duplicate?.id ?? null });
-  return json({ id, replacedAuditId: old.id, status: "pending", qualityScore: aiAnalysis.qualityScore, geofenceDistanceM: distanceM }, 201);
+  await appendOperationsAudit(env, request, user, "photo_audit.replaced", "photo_audit", id, { replacedAuditId: old.id, deliveryId: delivery.id, digest, distanceM, qualityScore: aiAnalysis.qualityScore, duplicateOfAuditId: duplicate?.id ?? null, status: photoReview.status, autoApproved: photoReview.autoApproved });
+  return json({ id, replacedAuditId: old.id, status: photoReview.status, autoApproved: photoReview.autoApproved, qualityScore: aiAnalysis.qualityScore, geofenceDistanceM: distanceM }, 201);
 }
 
 async function servePhotoAuditImage(env: RuntimeEnv, auditId: string, user: OperationsUser): Promise<Response> {

@@ -732,7 +732,7 @@ function DistributorPointsBoard({ points, deliveries, photoAudits, busy, run, su
           </div>;
         })}
     </ActionCard>
-    <ActionCard index="03" title="Le mie foto" text="Le foto che hai caricato: cancella quelle sbagliate o sostituiscile prima della verifica dell'amministrazione.">
+    <ActionCard index="03" title="Le mie foto" text="Le foto che hai caricato: cancellale o sostituiscile in qualsiasi momento, anche se già approvate.">
       {!photoAudits.length
         ? <MiniEmpty text="Nessuna foto caricata." />
         : photoAudits.map((row) => {
@@ -746,9 +746,7 @@ function DistributorPointsBoard({ points, deliveries, photoAudits, busy, run, su
               <small style={{ display: "block" }}>{when(row.created_at)} · qualità {row.quality_score}%</small>
             </div>
             <span className={`module-status ${status}`}>{statusLabel}</span>
-            {status === "pending"
-              ? <PhotoAuditEditActions auditId={auditId} busy={busy} run={run} onReplace={submitPhotoAuditReplace} />
-              : <small style={{ flexBasis: "100%", color: "#67655e" }}>Foto già verificata: per modificarla contatta l'amministrazione.</small>}
+            <PhotoAuditEditActions auditId={auditId} busy={busy} run={run} onReplace={submitPhotoAuditReplace} />
           </div>;
         })}
     </ActionCard>

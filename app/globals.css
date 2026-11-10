@@ -599,6 +599,8 @@ code { padding: 4px 7px; border-radius: 6px; color: #22516d; background: #eaf3f7
 .kanban-cards article:hover { transform: translateY(-1px); }
 .kanban-cards article.dragging { opacity: .4; }
 .kanban-grip { position: absolute; top: 8px; right: 9px; color: #aebbc4; }
+.kanban-card-trigger { display: block; width: 100%; padding: 0; border: 0; text-align: left; background: none; cursor: pointer; }
+.kanban-card-trigger:hover strong { text-decoration: underline; }
 .kanban-cards strong { display: block; padding-right: 18px; font-size: 11px; }
 .kanban-cards p, .kanban-cards small { display: block; margin: 5px 0 0; color: var(--muted); font-size: 9px; }
 .kanban-cards article > div:last-child { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; }

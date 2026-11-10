@@ -570,7 +570,7 @@ function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, subm
   const [pointDetail, setPointDetail] = useState<RecordRow | null>(null);
   return <div className="hub-stack">
     <DailyRouteCard deliveries={deliveries} user={user} />
-    {user.role === "distributor" && <DistributorPointsBoard points={freeConfirmationPoints} deliveries={deliveries} photoAudits={data.photoAudits} busy={busy} run={run} submitPointRegistration={submitPointRegistration} submitRefill={submitPhotoAudit} submitDeliveryCheck={submitDeliveryCheck} submitAssignedDelivery={submitPhotoAudit} submitPointLocation={submitPointLocation} submitPhotoAuditReplace={submitPhotoAuditReplace} />}
+    {user.role === "distributor" && <DistributorPointsBoard points={freeConfirmationPoints} deliveries={deliveries} deliveryChecks={data.deliveryChecks} photoAudits={data.photoAudits} busy={busy} run={run} submitPointRegistration={submitPointRegistration} submitRefill={submitPhotoAudit} submitDeliveryCheck={submitDeliveryCheck} submitAssignedDelivery={submitPhotoAudit} submitPointLocation={submitPointLocation} submitPhotoAuditReplace={submitPhotoAuditReplace} />}
     <div className="hub-two">
       {canManage && <ActionCard index="01" title="Punto distribuzione" text="Coordinate, capacità, stock e visibilità pubblica.">
         <form onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const fd = new FormData(form); void run(() => post("/api/operations/distribution-points", { ...Object.fromEntries(fd), publicVisible: fd.get("publicVisible") === "on" }), "Punto distribuzione creato.", form); }}>
@@ -662,9 +662,10 @@ function PointDetailModal({ title, subtitle, onClose, children }: { title: strin
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="ops-modal" role="dialog" aria-modal="true" aria-label={title}><header><div><h2>{title}</h2><p>{subtitle}</p></div><button onClick={onClose} aria-label="Chiudi">×</button></header>{children}</section></div>;
 }
 
-function DistributorPointsBoard({ points, deliveries, photoAudits, busy, run, submitPointRegistration, submitRefill, submitDeliveryCheck, submitAssignedDelivery, submitPointLocation, submitPhotoAuditReplace }: {
+function DistributorPointsBoard({ points, deliveries, deliveryChecks, photoAudits, busy, run, submitPointRegistration, submitRefill, submitDeliveryCheck, submitAssignedDelivery, submitPointLocation, submitPhotoAuditReplace }: {
   points: RecordRow[];
   deliveries: Delivery[];
+  deliveryChecks: RecordRow[];
   photoAudits: RecordRow[];
   busy: boolean;
   run: (action: () => Promise<unknown>, success: string, form?: HTMLFormElement) => Promise<void>;
@@ -679,6 +680,7 @@ function DistributorPointsBoard({ points, deliveries, photoAudits, busy, run, su
   const isOverdue = (row: RecordRow) => Boolean(row.next_check_due_at) && new Date(String(row.next_check_due_at)).getTime() <= nowMs;
   const [showNewPoint, setShowNewPoint] = useState(points.length === 0);
   const [expanded, setExpanded] = useState<{ id: string; mode: "refill" | "check" | "stock" } | null>(null);
+  const [pointDetail, setPointDetail] = useState<RecordRow | null>(null);
   const overdueCount = points.filter((row) => row.location_status !== "pending" && isOverdue(row)).length;
   const sorted = [...points].sort((a, b) => {
     const aPending = a.location_status === "pending" ? 0 : 1;
@@ -730,14 +732,19 @@ function DistributorPointsBoard({ points, deliveries, photoAudits, busy, run, su
           const rowId = String(row.id);
           return <div className="hub-list-row distributor-point-row" key={rowId} style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "flex-start", padding: "8px 0", borderTop: "1px solid rgba(0,0,0,.08)" }}>
             {pending && <PointPhotoThumb pointId={rowId} size={88} />}
-            <div style={{ flex: "1 1 200px" }}>
-              <strong>{row.name}</strong>
-              <small style={{ display: "block" }}>{pending ? row.area ?? "Zona da completare" : row.address}</small>
-              {pending
-                ? <small className="ai-review">POSIZIONE DA COMPLETARE · foto e consegna già assegnate a te</small>
-                : <small className={overdue ? "ai-review" : ""}>{overdue ? "DA CONTROLLARE" : row.next_check_due_at ? `Controllo entro ${when(row.next_check_due_at)}` : "Nessun controllo programmato"}</small>}
-            </div>
+            {pending
+              ? <div style={{ flex: "1 1 200px" }}>
+                <strong>{row.name}</strong>
+                <small style={{ display: "block" }}>{row.area ?? "Zona da completare"}</small>
+                <small className="ai-review">POSIZIONE DA COMPLETARE · foto e consegna già assegnate a te</small>
+              </div>
+              : <button type="button" className="point-row-trigger" onClick={() => setPointDetail(row)} style={{ flex: "1 1 200px", textAlign: "left", background: "none", border: "none", padding: 0, cursor: "pointer" }}>
+                <strong>{row.name}</strong>
+                <small style={{ display: "block" }}>{row.address}</small>
+                <small className={overdue ? "ai-review" : ""}>{overdue ? "DA CONTROLLARE" : row.next_check_due_at ? `Controllo entro ${when(row.next_check_due_at)}` : "Nessun controllo programmato"}</small>
+              </button>}
             <b>{row.stock}/{row.capacity}</b>
+            {!pending && <button type="button" className="mini-link" onClick={() => setPointDetail(row)}>Scheda →</button>}
             {!pending && <div className="inline-actions">
               <button type="button" disabled={busy} onClick={() => toggle(rowId, "refill")}>Rifornisci</button>
               <button type="button" disabled={busy} onClick={() => toggle(rowId, "check")}>{overdue ? "Fai il controllo" : "Controlla ora"}</button>
@@ -795,6 +802,7 @@ function DistributorPointsBoard({ points, deliveries, photoAudits, busy, run, su
         })}
     </ActionCard>
     <PointsRouteBuilder points={points} />
+    {pointDetail && <DistributionPointDetailModal point={pointDetail} deliveries={deliveries} deliveryChecks={deliveryChecks} onClose={() => setPointDetail(null)} />}
   </div>;
 }
 

@@ -512,7 +512,7 @@ export default function Home() {
             <Metric label="Proposte" value={String(data.clients.filter((client) => client.stage === "proposal").length)} note="in fase proposta" />
             <Metric label="Contratti firmati" value={String(data.contracts.filter((contract) => contract.status === "signed").length)} note="con evidenza OTP" />
           </div>
-          <CrmKanban actor={data.user} users={data.users} clients={filteredClients} onStageChange={changeStage} onOwnerChange={changeOwner} />
+          <CrmKanban actor={data.user} users={data.users} clients={filteredClients} deliveries={data.deliveries} onStageChange={changeStage} onOwnerChange={changeOwner} />
         </section>}
 
         {active === "operations" && <OperationsHub user={data.user} clients={data.clients} users={data.users} deliveries={data.deliveries} notify={notify} initialTab={operationsInitialTab} />}
@@ -700,8 +700,9 @@ function Empty({ title, text }: { title: string; text: string }) {
   return <div className="empty"><span>＋</span><strong>{title}</strong><p>{text}</p></div>;
 }
 
-function CrmKanban({ actor, users, clients, onStageChange, onOwnerChange }: { actor: User; users: User[]; clients: Client[]; onStageChange: (client: Client, stage: string) => Promise<void>; onOwnerChange: (client: Client, ownerUserId: string) => Promise<void> }) {
+function CrmKanban({ actor, users, clients, deliveries, onStageChange, onOwnerChange }: { actor: User; users: User[]; clients: Client[]; deliveries: Delivery[]; onStageChange: (client: Client, stage: string) => Promise<void>; onOwnerChange: (client: Client, ownerUserId: string) => Promise<void> }) {
   const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [historyClient, setHistoryClient] = useState<Client | null>(null);
   const canReassign = ["super_admin", "admin", "sales_manager"].includes(actor.role);
   return <div className="kanban-shell">
     <div className="kanban-head"><div><h2>Pipeline commerciale</h2><p>Trascina le schede oppure usa il selettore su mobile.</p></div><span>{clients.length} opportunità</span></div>
@@ -716,7 +717,10 @@ function CrmKanban({ actor, users, clients, onStageChange, onOwnerChange }: { ac
                 && (actor.role !== "sales_manager" || candidate.sales_manager_id === actor.id));
               const currentOwnerEligible = eligibleSales.some((candidate) => candidate.id === client.owner_user_id);
               return <article key={client.id} draggable onDragStart={() => setDraggedId(client.id)} onDragEnd={() => setDraggedId(null)} className={draggedId === client.id ? "dragging" : ""}>
-                <div className="kanban-grip">⠿</div><strong>{client.company_name}</strong><p>{client.contact_name} · {client.island}</p><small>{client.owner_name ?? "—"}</small>
+                <div className="kanban-grip">⠿</div>
+                <button type="button" className="kanban-card-trigger" onClick={() => setHistoryClient(client)}>
+                  <strong>{client.company_name}</strong><p>{client.contact_name} · {client.island}</p><small>{client.owner_name ?? "—"}</small>
+                </button>
                 {canReassign && <label className="kanban-owner">Sales responsabile<select aria-label={`Sales responsabile ${client.company_name}`} value={client.owner_user_id} onChange={(event) => void onOwnerChange(client, event.target.value)}>{!currentOwnerEligible && <option value={client.owner_user_id}>{client.owner_name ?? "Responsabile attuale"} · da riassegnare</option>}{eligibleSales.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}</select></label>}
                 <div><b>{money(client.value_cents)}</b><select aria-label={`Fase ${client.company_name}`} value={client.stage} onChange={(event) => void onStageChange(client, event.target.value)}>{STAGES.map((option) => <option key={option} value={option}>{stageLabels[option]}</option>)}</select></div>
               </article>;
@@ -726,7 +730,32 @@ function CrmKanban({ actor, users, clients, onStageChange, onOwnerChange }: { ac
         </section>;
       })}
     </div>
+    {historyClient && <ClientHistoryModal client={historyClient} deliveries={deliveries} onClose={() => setHistoryClient(null)} />}
   </div>;
+}
+
+function ClientHistoryModal({ client, deliveries, onClose }: { client: Client; deliveries: Delivery[]; onClose: () => void }) {
+  const clientDeliveries = deliveries
+    .filter((delivery) => delivery.client_id === client.id)
+    .sort((a, b) => String(b.scheduled_for ?? b.created_at ?? "").localeCompare(String(a.scheduled_for ?? a.created_at ?? "")));
+  const totalDelivered = clientDeliveries.filter((delivery) => delivery.status === "delivered").reduce((sum, delivery) => sum + Number(delivery.quantity ?? 0), 0);
+  const points = [...new Map(clientDeliveries.map((delivery) => [delivery.distribution_point_id ?? delivery.id, delivery.distribution_point_name ?? delivery.delivery_address ?? "Punto non indicato"])).values()];
+  return <Modal title={client.company_name} subtitle={`${client.contact_name} · ${client.island}${client.phone ? ` · ${client.phone}` : ""}`} onClose={onClose}>
+    <div className="metric-grid" style={{ padding: "18px 24px 0", marginBottom: 6, gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
+      <Metric label="Punti vendita" value={String(points.length)} note={points.join(" · ") || "nessuno collegato"} />
+      <Metric label="Consegne registrate" value={String(clientDeliveries.length)} note="su tutti i punti del cliente" />
+      <Metric label="Copie consegnate" value={String(totalDelivered)} note="totale confermato" />
+    </div>
+    <h3 className="point-detail-heading">Storico consegne per punto vendita</h3>
+    <div className="simple-list">
+      {clientDeliveries.length ? clientDeliveries.map((delivery) => <div key={delivery.id}>
+        <div><strong>{delivery.distribution_point_name ?? delivery.delivery_address ?? "Punto non indicato"}</strong><small>{delivery.scheduled_for ? dateOnly(delivery.scheduled_for) : "Data non indicata"} · {delivery.distributor_name ?? "Distributore non indicato"}</small></div>
+        <b>{delivery.quantity ?? 0} {delivery.unit ?? "copie"}</b>
+        <span className={`delivery-status ${delivery.status}`}>{deliveryStatusLabels[delivery.status]}</span>
+      </div>) : <Empty title="Nessuna consegna" text="Nessuna consegna registrata per questo cliente." />}
+    </div>
+    <div className="modal-actions" style={{ padding: "0 24px 20px" }}><button type="button" onClick={onClose}>Chiudi</button></div>
+  </Modal>;
 }
 
 function PriceListPanel({ data, search, refresh, notify, preferredCampaignId, onQuoteCreated }: { data: Bootstrap; search: string; refresh: () => Promise<void>; notify: (text: string, tone?: "ok" | "error") => void; preferredCampaignId: string; onQuoteCreated: () => void }) {

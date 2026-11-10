@@ -26,6 +26,7 @@ type Contract = {
   island: string; signer_name: string | null; signer_email: string | null; document_sha256: string;
   signature_sha256: string | null; version: number; parent_contract_id: string | null;
   cancelled_reason: string | null; signed_at: string | null; updated_at: string;
+  notes: string | null; contract_data_json?: string | null;
 };
 type Delivery = {
   id: string; client_id: string; client_company?: string; distributor_user_id: string; distributor_name?: string;
@@ -168,6 +169,7 @@ export default function Home() {
   const [contractModal, setContractModal] = useState(false);
   const [signing, setSigning] = useState<Contract | null>(null);
   const [superseding, setSuperseding] = useState<Contract | null>(null);
+  const [editingContract, setEditingContract] = useState<Contract | null>(null);
   const [deliveryModal, setDeliveryModal] = useState<Delivery | "new" | null>(null);
   const [profileModal, setProfileModal] = useState(false);
   const [impersonationModal, setImpersonationModal] = useState<"sales" | "distributor" | null>(null);
@@ -448,6 +450,15 @@ export default function Home() {
     } catch (error) { notify(error instanceof Error ? error.message : "Aggiornamento non riuscito.", "error"); }
   }
 
+  async function deleteDraftContract(contract: Contract) {
+    if (!window.confirm(`Cancellare definitivamente la bozza "${contract.title}"? L'operazione non è reversibile.`)) return;
+    try {
+      await api(`/api/contracts/${contract.id}`, { method: "DELETE" });
+      notify("Bozza cancellata.");
+      await refresh();
+    } catch (error) { notify(error instanceof Error ? error.message : "Cancellazione non riuscita.", "error"); }
+  }
+
   async function changeOwner(client: Client, ownerUserId: string) {
     if (!ownerUserId || ownerUserId === client.owner_user_id) return;
     try {
@@ -525,7 +536,7 @@ export default function Home() {
               {filteredContracts.map((contract) => <article key={contract.id} className="contract-row">
                 <div className="doc-icon">PDF</div>
                 <div className="contract-copy"><div><strong>{contract.title}</strong><span className={`status ${contract.status}`}>{statusLabels[contract.status]}</span></div><p>{contract.client_company} · {contract.island} · versione {contract.version}{contract.quote_number ? ` · ${contract.quote_number}` : ""}</p><small>Aggiornato {dateTime(contract.updated_at)}{contract.signer_email ? ` · ${contract.signer_email}` : ""}</small></div>
-                <div className="row-actions"><button onClick={() => window.open(`/api/contracts/${contract.id}/download`, "_blank")}>Documento</button>{contract.status === "signed" && <button onClick={() => window.open(`/api/contracts/${contract.id}/evidence`, "_blank")}>Evidenza</button>}{["draft", "awaiting_signature"].includes(contract.status) && <button className="accent" onClick={() => setSigning(contract)}>Firma</button>}{contract.status === "signed" && data.user.role === "super_admin" && <button className="danger" onClick={() => setSuperseding(contract)}>Annulla + nuova</button>}</div>
+                <div className="row-actions"><button onClick={() => window.open(`/api/contracts/${contract.id}/download`, "_blank")}>Documento</button>{contract.status === "signed" && <button onClick={() => window.open(`/api/contracts/${contract.id}/evidence`, "_blank")}>Evidenza</button>}<button onClick={() => setEditingContract(contract)}>{contract.status === "draft" && contract.contract_data_json ? "Modifica / Note" : "Note"}</button>{["draft", "awaiting_signature"].includes(contract.status) && <button className="accent" onClick={() => setSigning(contract)}>Firma</button>}{contract.status === "signed" && data.user.role === "super_admin" && <button className="danger" onClick={() => setSuperseding(contract)}>Annulla + nuova</button>}{contract.status === "draft" && !contract.quote_id && <button className="danger" onClick={() => deleteDraftContract(contract)}>Cancella bozza</button>}</div>
               </article>)}
               {!filteredContracts.length && <Empty title="Nessun contratto" text={data.clients.length ? "Carica il primo contratto PDF da inviare alla firma." : "Crea prima un cliente nel CRM."} />}
             </div>
@@ -550,6 +561,7 @@ export default function Home() {
       {contractModal && <ContractModal data={data} onClose={() => setContractModal(false)} onSaved={async () => { setContractModal(false); notify("Contratto archiviato come bozza."); await refresh(); }} />}
       {signing && <SignatureModal contract={signing} onClose={() => setSigning(null)} onSaved={async () => { setSigning(null); notify("Firma registrata con evidenza OTP."); await refresh(); }} />}
       {superseding && <SupersedeModal contract={superseding} onClose={() => setSuperseding(null)} onSaved={async () => { setSuperseding(null); notify("Contratto annullato e nuova versione creata."); await refresh(); }} />}
+      {editingContract && <ContractEditModal contract={editingContract} onClose={() => setEditingContract(null)} onSaved={async () => { setEditingContract(null); notify("Contratto aggiornato."); await refresh(); }} />}
       {deliveryModal && <DeliveryModal data={data} delivery={deliveryModal === "new" ? null : deliveryModal} onClose={() => setDeliveryModal(null)} onSaved={async () => { setDeliveryModal(null); notify(deliveryModal === "new" ? "Consegna assegnata." : "Consegna aggiornata."); await refresh(); }} />}
       {profileModal && <ProfileModal user={data.user} onClose={() => setProfileModal(false)} onSaved={async (message) => { setProfileModal(false); notify(message); await refresh(); }} />}
       {impersonationModal && <ImpersonationModal role={impersonationModal} users={data.impersonationUsers ?? []} currentUserId={data.impersonation ? data.user.id : null} onClose={() => setImpersonationModal(null)} onStarted={impersonationStarted} />}
@@ -1131,6 +1143,55 @@ function SupersedeModal({ contract, onClose, onSaved }: { contract: Contract; on
   const [busy, setBusy] = useState(false); const [error, setError] = useState("");
   async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setBusy(true); setError(""); try { await api(`/api/contracts/${contract.id}/supersede`, { method: "POST", body: new FormData(event.currentTarget) }); await onSaved(); } catch (cause) { setError(cause instanceof Error ? cause.message : "Operazione non riuscita."); setBusy(false); } }
   return <Modal title="Annulla e crea nuova versione" subtitle="Il contratto firmato resterà conservato e marcato come annullato." onClose={onClose}><form className="form-grid" onSubmit={submit}><label className="span-2">Motivazione obbligatoria<textarea name="reason" required rows={3} maxLength={500} /></label><label className="span-2">Titolo nuova versione<input name="title" defaultValue={contract.title} required /></label><label className="span-2">Nuovo PDF<input type="file" name="file" accept="application/pdf" required /></label><label className="confirmation span-2 document-language-confirmation"><input type="checkbox" name="documentLanguage" value="es" required /><span><strong>Documento esclusivamente in spagnolo</strong>Confermo che tutto il contenuto del nuovo PDF è redatto in spagnolo.</span></label>{error && <div className="form-error span-2">{error}</div>}<div className="modal-actions span-2"><button type="button" onClick={onClose}>Annulla</button><button className="danger-solid" disabled={busy}>{busy ? "Creazione…" : "Annulla e crea versione"}</button></div></form></Modal>;
+}
+
+function ContractEditModal({ contract, onClose, onSaved }: { contract: Contract; onClose: () => void; onSaved: () => Promise<void> }) {
+  const [busyData, setBusyData] = useState(false); const [errorData, setErrorData] = useState("");
+  const [busyNotes, setBusyNotes] = useState(false); const [errorNotes, setErrorNotes] = useState("");
+  const editable = contract.status === "draft" && Boolean(contract.contract_data_json);
+  let initial: Record<string, unknown> = {};
+  try { initial = contract.contract_data_json ? JSON.parse(contract.contract_data_json) : {}; } catch { initial = {}; }
+  const field = (key: string) => String((initial as Record<string, unknown>)[key] ?? "");
+  async function submitData(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setBusyData(true); setErrorData("");
+    const form = new FormData(event.currentTarget);
+    try {
+      await api(`/api/contracts/${contract.id}/update-data`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(Object.fromEntries(form.entries())) });
+      await onSaved();
+    } catch (cause) { setErrorData(cause instanceof Error ? cause.message : "Aggiornamento non riuscito."); setBusyData(false); }
+  }
+  async function submitNotes(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setBusyNotes(true); setErrorNotes("");
+    const form = new FormData(event.currentTarget);
+    try {
+      await api(`/api/contracts/${contract.id}/notes`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ notes: form.get("notes") }) });
+      await onSaved();
+    } catch (cause) { setErrorNotes(cause instanceof Error ? cause.message : "Aggiornamento note non riuscito."); setBusyNotes(false); }
+  }
+  return <Modal title="Modifica contratto" subtitle={`${contract.title} · ${contract.client_company ?? ""}`} onClose={onClose}>
+    {editable ? <form className="form-grid" onSubmit={submitData}>
+      <div className="contract-wizard-note span-2"><strong>Dati contrattuali</strong><span>Modificabili solo mentre il contratto è in bozza. Al salvataggio il PDF viene rigenerato.</span></div>
+      <label>Ragione sociale cliente<input name="customerCompany" required maxLength={160} defaultValue={field("customerCompany")} /></label>
+      <label>NIF/CIF<input name="taxId" required maxLength={40} defaultValue={field("taxId")} /></label>
+      <label className="span-2">Domicilio fiscale<textarea name="fiscalAddress" rows={2} required maxLength={300} defaultValue={field("fiscalAddress")} /></label>
+      <label>Email di fatturazione<input name="billingEmail" type="email" required defaultValue={field("billingEmail")} /></label>
+      <label>Telefono cliente<input name="customerPhone" type="tel" required maxLength={40} defaultValue={field("customerPhone")} /></label>
+      <label>Firmatario del cliente<input name="legalSignerName" required maxLength={120} defaultValue={field("legalSignerName")} /></label>
+      <label>Carica del firmatario<input name="legalSignerRole" required maxLength={120} defaultValue={field("legalSignerRole")} /></label>
+      <label>Data inizio campagna<input name="campaignStartDate" type="date" required defaultValue={field("campaignStartDate")} /></label>
+      <label className="span-2">URL di destinazione<input name="destinationUrl" type="url" required maxLength={500} defaultValue={field("destinationUrl")} /></label>
+      <label>Edizione impresa<input name="printEdition" required maxLength={120} defaultValue={field("printEdition")} /></label>
+      <label>Tiratura prevista<input name="printRun" type="number" min="1" max="10000000" required defaultValue={field("printRun")} /></label>
+      <label className="span-2">Zona e canali di distribuzione<textarea name="distribution" rows={2} required maxLength={500} defaultValue={field("distribution")} /></label>
+      {errorData && <div className="form-error span-2">{errorData}</div>}
+      <div className="modal-actions span-2"><button className="primary" disabled={busyData}>{busyData ? "Salvataggio…" : "Salva e rigenera PDF"}</button></div>
+    </form> : <div className="contract-wizard-note span-2"><strong>Dati contrattuali non modificabili</strong><span>{contract.status !== "draft" ? "Un contratto in firma o firmato resta bloccato per legge: puoi comunque aggiungere note interne." : "Questo contratto è un PDF caricato manualmente: cancella la bozza e ricaricala per correggerla."}</span></div>}
+    <form className="form-grid" onSubmit={submitNotes}>
+      <label className="span-2">Note interne<textarea name="notes" rows={4} maxLength={4000} defaultValue={contract.notes ?? ""} placeholder="Note visibili solo al team, conservabili anche dopo la firma." /></label>
+      {errorNotes && <div className="form-error span-2">{errorNotes}</div>}
+      <div className="modal-actions span-2"><button type="button" onClick={onClose}>Chiudi</button><button className="primary" disabled={busyNotes}>{busyNotes ? "Salvataggio…" : "Salva note"}</button></div>
+    </form>
+  </Modal>;
 }
 
 function DistributionPanel({ data, deliveries, onCreate, onEdit, onBulkUpload }: { data: Bootstrap; deliveries: Delivery[]; onCreate: () => void; onEdit: (delivery: Delivery) => void; onBulkUpload: () => void }) {

@@ -108,6 +108,7 @@ type ContractRow = {
   evidence_r2_key: string | null;
   document_sha256: string;
   contract_data_json?: string | null;
+  notes?: string | null;
   signed_document_sha256: string | null;
   signature_sha256: string | null;
   version: number;
@@ -506,6 +507,18 @@ export async function handleCrmApi(
     const supersedeContract = url.pathname.match(/^\/api\/contracts\/([^/]+)\/supersede$/);
     if (supersedeContract && request.method === "POST") {
       return supersedeSignedContract(request, supersedeContract[1], user, env, ctx);
+    }
+    const contractNotes = url.pathname.match(/^\/api\/contracts\/([^/]+)\/notes$/);
+    if (contractNotes && request.method === "PATCH") {
+      return updateContractNotes(request, contractNotes[1], user, env);
+    }
+    const contractUpdateData = url.pathname.match(/^\/api\/contracts\/([^/]+)\/update-data$/);
+    if (contractUpdateData && request.method === "POST") {
+      return updateContractData(request, contractUpdateData[1], user, env, ctx);
+    }
+    const contractDelete = url.pathname.match(/^\/api\/contracts\/([^/]+)$/);
+    if (contractDelete && request.method === "DELETE") {
+      return deleteDraftContract(request, contractDelete[1], user, env, ctx);
     }
 
     const operationsResponse = await handleOperationsApi(request, env, user);
@@ -1994,6 +2007,106 @@ async function supersedeSignedContract(request: Request, contractId: string, use
   }
   await appendAudit(env, request, user, "contract.cancelled_and_superseded", "contract", contract.id, { reason, newContractId: newId, newVersion, documentSha256 });
   return json({ id: newId, version: newVersion }, 201);
+}
+
+async function updateContractNotes(request: Request, contractId: string, user: UserRow, env: RuntimeEnv): Promise<Response> {
+  const contract = await getContract(env, contractId);
+  if (!contract || !canWriteRecord(user, contract)) throw new ApiError(404, "contract_not_found", "Contratto non trovato.");
+  const body = await readJson<{ notes?: string }>(request);
+  const notes = cleanOptionalText(body.notes, 4000);
+  await env.DB.prepare("UPDATE contracts SET notes = ?, updated_at = ? WHERE id = ?").bind(notes, new Date().toISOString(), contract.id).run();
+  await appendAudit(env, request, user, "contract.notes_updated", "contract", contract.id, { hasNotes: Boolean(notes) });
+  return json({ ok: true, notes });
+}
+
+async function updateContractData(request: Request, contractId: string, user: UserRow, env: RuntimeEnv, ctx: ExecutionContext): Promise<Response> {
+  const contract = await getContract(env, contractId);
+  if (!contract || !canWriteRecord(user, contract)) throw new ApiError(404, "contract_not_found", "Contratto non trovato.");
+  if (contract.status !== "draft") throw new ApiError(409, "invalid_contract_state", "Solo le bozze possono essere modificate.");
+  if (!contract.contract_data_json) {
+    throw new ApiError(409, "not_editable", "Questo contratto è un PDF caricato manualmente: cancella la bozza e ricaricala per correggerla.");
+  }
+  let existing: Record<string, unknown>;
+  try {
+    existing = JSON.parse(contract.contract_data_json);
+  } catch {
+    throw new ApiError(500, "corrupt_contract_data", "Dati contrattuali non leggibili.");
+  }
+
+  const body = await readJson<Record<string, unknown>>(request);
+  const customerCompany = cleanText(body.customerCompany, 160);
+  const taxId = cleanText(body.taxId, 40);
+  const fiscalAddress = cleanText(body.fiscalAddress, 300);
+  const billingEmail = normalizeEmail(body.billingEmail);
+  const legalSignerName = cleanText(body.legalSignerName, 120);
+  const legalSignerRole = cleanText(body.legalSignerRole, 120);
+  const customerPhone = normalizePhone(body.customerPhone);
+  const campaignStartDate = strictDateKey(body.campaignStartDate);
+  const destinationUrl = cleanText(body.destinationUrl, 500);
+  const printEdition = cleanText(body.printEdition, 120);
+  const printRun = positiveInteger(body.printRun, 10_000_000);
+  const distribution = cleanText(body.distribution, 500);
+  if (!customerCompany || !taxId || !fiscalAddress || !isEmail(billingEmail) || !legalSignerName || !legalSignerRole || !customerPhone || !printEdition || !distribution) {
+    throw new ApiError(400, "contract_data_incomplete", "Completa tutti i dati fiscali, del firmatario e della campagna.");
+  }
+  let parsedDestination: URL;
+  try {
+    parsedDestination = new URL(destinationUrl);
+  } catch {
+    throw new ApiError(400, "invalid_destination_url", "Inserisci un URL di destinazione completo, ad esempio https://azienda.es.");
+  }
+  if (!["http:", "https:"].includes(parsedDestination.protocol)) {
+    throw new ApiError(400, "invalid_destination_url", "L'URL di destinazione deve iniziare con http:// o https://.");
+  }
+
+  const months = Number(existing.months ?? 1);
+  const campaignEndDate = contractEndDate(campaignStartDate, months);
+  const contractData = {
+    ...existing,
+    customerCompany,
+    customerPhone,
+    taxId,
+    fiscalAddress,
+    billingEmail,
+    legalSignerName,
+    legalSignerRole,
+    campaignStartDate,
+    campaignEndDate,
+    destinationUrl: parsedDestination.toString(),
+    printEdition,
+    printRun,
+    distribution,
+    generatedAt: new Date().toISOString(),
+  };
+  const pdfBytes = await buildContractPdf(contractData);
+  const documentSha256 = await sha256(pdfBytes);
+  await env.BUCKET.put(contract.draft_r2_key, pdfBytes, {
+    httpMetadata: { contentType: "application/pdf" },
+    customMetadata: { sha256: documentSha256, updatedBy: user.id },
+  });
+  const now = new Date().toISOString();
+  const result = await env.DB.prepare("UPDATE contracts SET document_sha256 = ?, contract_data_json = ?, updated_at = ? WHERE id = ? AND status = 'draft'")
+    .bind(documentSha256, JSON.stringify(contractData), now, contract.id).run();
+  if (Number(result.meta.changes ?? 0) !== 1) throw new ApiError(409, "invalid_contract_state", "Solo le bozze possono essere modificate.");
+  await env.DB.prepare("UPDATE clients SET phone = ?, tax_id = ?, fiscal_address = ?, billing_email = ?, legal_signer_name = ?, legal_signer_role = ?, version = version + 1, updated_at = ? WHERE id = ?")
+    .bind(customerPhone, taxId, fiscalAddress, billingEmail, legalSignerName, legalSignerRole, now, contract.client_id).run();
+  await appendAudit(env, request, user, "contract.data_updated", "contract", contract.id, { documentSha256, contractData });
+  return json({ ok: true, documentSha256 });
+}
+
+async function deleteDraftContract(request: Request, contractId: string, user: UserRow, env: RuntimeEnv, ctx: ExecutionContext): Promise<Response> {
+  const contract = await getContract(env, contractId);
+  if (!contract || !canWriteRecord(user, contract)) throw new ApiError(404, "contract_not_found", "Contratto non trovato.");
+  if (contract.status !== "draft") throw new ApiError(409, "invalid_contract_state", "Solo le bozze possono essere cancellate.");
+  if (contract.quote_id) {
+    throw new ApiError(409, "quote_linked_contract", "Questo contratto è collegato a un preventivo e il preventivo non è cancellabile: correggi i dati invece di cancellare la bozza.");
+  }
+  await env.DB.prepare("INSERT INTO r2_deletion_queue (r2_key, source, created_at, attempts) VALUES (?, 'contract_draft_deleted', ?, 0)")
+    .bind(contract.draft_r2_key, new Date().toISOString()).run();
+  const result = await env.DB.prepare("DELETE FROM contracts WHERE id = ? AND status = 'draft'").bind(contract.id).run();
+  if (Number(result.meta.changes ?? 0) !== 1) throw new ApiError(409, "invalid_contract_state", "Solo le bozze possono essere cancellate.");
+  await appendAudit(env, request, user, "contract.draft_deleted", "contract", contract.id, { title: contract.title });
+  return json({ ok: true });
 }
 
 async function ensureBootstrapAdmin(env: RuntimeEnv): Promise<void> {

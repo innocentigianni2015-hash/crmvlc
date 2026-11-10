@@ -1421,10 +1421,9 @@ async function convertQuoteToContract(request: Request, quoteId: string, user: U
   const printEdition = cleanText(body.printEdition, 120);
   const printRun = positiveInteger(body.printRun, 10_000_000);
   const distribution = cleanText(body.distribution, 500);
-  const paymentTerms = cleanText(body.paymentTerms, 500);
   const complimentaryNote = cleanOptionalText(body.complimentaryNote, 500);
-  if (!taxId || !fiscalAddress || !isEmail(billingEmail) || !legalSignerName || !legalSignerRole || !customerPhone || !printEdition || !distribution || !paymentTerms) {
-    throw new ApiError(400, "contract_data_incomplete", "Completa tutti i dati fiscali, del firmatario, della campagna e le modalità di pagamento prima di generare il contratto.");
+  if (!taxId || !fiscalAddress || !isEmail(billingEmail) || !legalSignerName || !legalSignerRole || !customerPhone || !printEdition || !distribution) {
+    throw new ApiError(400, "contract_data_incomplete", "Completa tutti i dati fiscali, del firmatario e della campagna prima di generare il contratto.");
   }
   let parsedDestination: URL;
   try {
@@ -1466,7 +1465,6 @@ async function convertQuoteToContract(request: Request, quoteId: string, user: U
     printEdition,
     printRun,
     distribution,
-    paymentTerms,
     complimentaryNote,
     months: quote.months,
     currency: quote.currency,
@@ -2050,10 +2048,9 @@ async function updateContractData(request: Request, contractId: string, user: Us
   const printEdition = cleanText(body.printEdition, 120);
   const printRun = positiveInteger(body.printRun, 10_000_000);
   const distribution = cleanText(body.distribution, 500);
-  const paymentTerms = cleanText(body.paymentTerms, 500);
   const complimentaryNote = cleanOptionalText(body.complimentaryNote, 500);
-  if (!customerCompany || !taxId || !fiscalAddress || !isEmail(billingEmail) || !legalSignerName || !legalSignerRole || !customerPhone || !printEdition || !distribution || !paymentTerms) {
-    throw new ApiError(400, "contract_data_incomplete", "Completa tutti i dati fiscali, del firmatario, della campagna e le modalità di pagamento.");
+  if (!customerCompany || !taxId || !fiscalAddress || !isEmail(billingEmail) || !legalSignerName || !legalSignerRole || !customerPhone || !printEdition || !distribution) {
+    throw new ApiError(400, "contract_data_incomplete", "Completa tutti i dati fiscali, del firmatario e della campagna.");
   }
   let parsedDestination: URL;
   try {
@@ -2082,7 +2079,6 @@ async function updateContractData(request: Request, contractId: string, user: Us
     printEdition,
     printRun,
     distribution,
-    paymentTerms,
     complimentaryNote,
     generatedAt: new Date().toISOString(),
   };

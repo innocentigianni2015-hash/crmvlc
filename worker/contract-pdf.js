@@ -42,15 +42,27 @@ export async function buildContractPdf(contract) {
   productTable(ctx, contract.items);
   totals(ctx, contract);
 
+  const plan = paymentPlan(contract.months, contract.netCents);
+
   section(ctx, "Fechas y ejecución");
   keyValues(ctx, [
     ["Fecha prevista de inicio", formatDate(contract.campaignStartDate)],
     ["Fecha prevista de finalización", formatDate(contract.campaignEndDate)],
     ["Duración comercial", `${contract.months} ${contract.months === 1 ? "mes" : "meses"}`],
-    ["Pago", contract.paymentTerms || "100 % dentro de los 7 días siguientes a la factura"],
+    ["Pago", plan.summaryLine],
     ["Inicio", "Tras la recepción del pago, los materiales y la aprobación del Cliente"],
     ["Impuestos", `${contract.taxName} al ${formatPercent(contract.taxRateBps)} aplicado sobre la base imponible`],
   ]);
+
+  section(ctx, "Condiciones de pago");
+  numbered(ctx, [
+    "Pago de las inserciones publicitarias. Para una salida única o un paquete de 3 salidas, el importe íntegro debe abonarse antes de la primera publicación. Los artículos relacionados, si los hubiera, deben abonarse antes de la salida en la que se publiquen.",
+    "Pago de los paquetes de 6 y 12 salidas. El paquete de 6 salidas se abona en 2 cuotas, cada una equivalente a 3 salidas: una antes de la salida n.º 1 y otra antes de la salida n.º 4. El paquete de 12 salidas se abona en 4 cuotas, cada una equivalente a 3 salidas, antes de las salidas n.º 1, 4, 7 y 10. Cada cuota se calcula sobre el importe imponible (sin impuestos) del acuerdo. Los plazos siguen las salidas programadas, aunque no sean consecutivas, y no los trimestres naturales. El compromiso de compra del paquete completo se mantiene en cualquier caso. La publicación queda supeditada a la recepción del pago correspondiente y a la aprobación del material.",
+    "Aprobación de calidad de las piezas gráficas. Todas las piezas gráficas, incluidas las sustituciones, deben cumplir los estándares de calidad de la publicación y ser aprobadas antes de su publicación. La evaluación considera legibilidad, resolución de las imágenes, maquetación, dimensiones e idoneidad para impresión.",
+    "Envío del material antes del pago. Se recomienda enviar la pieza gráfica con antelación para verificar su idoneidad y evitar el pago de una inserción cuyo material aún no haya sido aprobado. El pago no implica la aprobación de la pieza gráfica.",
+    "Servicio de diseño gráfico con presupuesto separado. Si la calidad no es adecuada, la publicación pone a disposición su propio servicio de diseño gráfico. Este servicio tiene coste adicional, no incluido en los precios de las inserciones y los paquetes, y se inicia únicamente tras la aceptación de un presupuesto separado con costes, plazos y condiciones de pago.",
+  ]);
+  callout(ctx, "CALENDARIO DE PAGO DE ESTE ACUERDO", plan.schedule.join(" "));
 
   section(ctx, "Datos operativos de la campaña");
   keyValues(ctx, [
@@ -329,6 +341,35 @@ function wrap(value, font, size, maxWidth) {
   }
   if (row) rows.push(row);
   return rows.length ? rows : [""];
+}
+
+function paymentPlan(months, netCents) {
+  const n = Number(months);
+  const net = Number(netCents) || 0;
+  if (n === 6) {
+    const first = Math.round(net / 2);
+    const second = net - first;
+    return {
+      summaryLine: `Pago en 2 cuotas de 3 salidas cada una, ${money(first)} antes de la salida n.º 1 y ${money(second)} antes de la salida n.º 4, impuestos excluidos.`,
+      schedule: [
+        `Cuota 1: ${money(first)} (imponible) antes de la salida n.º 1.`,
+        `Cuota 2: ${money(second)} (imponible) antes de la salida n.º 4.`,
+      ],
+    };
+  }
+  if (n === 12) {
+    const base = Math.floor(net / 4);
+    const amounts = [base, base, base, net - base * 3];
+    const marks = [1, 4, 7, 10];
+    return {
+      summaryLine: `Pago en 4 cuotas de 3 salidas cada una (antes de las salidas n.º 1, 4, 7 y 10), impuestos excluidos.`,
+      schedule: amounts.map((amount, index) => `Cuota ${index + 1}: ${money(amount)} (imponible) antes de la salida n.º ${marks[index]}.`),
+    };
+  }
+  return {
+    summaryLine: `Pago único: 100 % del importe (${money(net)}, imponible) antes de la primera publicación.`,
+    schedule: [`Pago único: ${money(net)} (imponible) antes de la salida n.º 1.`],
+  };
 }
 
 function money(cents) {

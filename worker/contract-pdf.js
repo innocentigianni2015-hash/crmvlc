@@ -47,7 +47,7 @@ export async function buildContractPdf(contract) {
     ["Fecha prevista de inicio", formatDate(contract.campaignStartDate)],
     ["Fecha prevista de finalización", formatDate(contract.campaignEndDate)],
     ["Duración comercial", `${contract.months} ${contract.months === 1 ? "mes" : "meses"}`],
-    ["Pago", "100 % dentro de los 7 días siguientes a la factura"],
+    ["Pago", contract.paymentTerms || "100 % dentro de los 7 días siguientes a la factura"],
     ["Inicio", "Tras la recepción del pago, los materiales y la aprobación del Cliente"],
     ["Impuestos", `${contract.taxName} al ${formatPercent(contract.taxRateBps)} aplicado sobre la base imponible`],
   ]);
@@ -61,6 +61,14 @@ export async function buildContractPdf(contract) {
     ["Isla comercial", contract.island],
     ["Referencia", contract.quoteNumber],
   ]);
+
+  if (contract.complimentaryNote) {
+    callout(
+      ctx,
+      "SERVICIO DE CORTESÍA (NO CONTRACTUAL)",
+      `${contract.complimentaryNote} Este servicio adicional se ofrece a título de cortesía y no modifica los importes, plazos ni obligaciones de pago establecidos en este acuerdo.`,
+    );
+  }
 
   section(ctx, "Cómo empezamos");
   numbered(ctx, [

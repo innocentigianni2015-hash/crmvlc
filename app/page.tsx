@@ -1076,6 +1076,8 @@ function ContractGenerationModal({ quote, client, busy, onClose, onGenerate }: {
     <label>Edizione impresa<input name="printEdition" required maxLength={120} placeholder="N. 12 · settembre 2026" /></label>
     <label>Tiratura prevista<input name="printRun" type="number" min="1" max="10000000" required placeholder="10000" /></label>
     <label className="span-2">Zona e canali di distribuzione<textarea name="distribution" rows={2} required maxLength={500} placeholder="Tenerife · hotel, ristoranti e punti autorizzati" /></label>
+    <label className="span-2">Modalità di pagamento<textarea name="paymentTerms" rows={2} required maxLength={500} placeholder="100% a 7 giorni dalla fattura / bonifico in 3 rate mensili, ecc." /></label>
+    <label className="span-2">Servizio omaggio (opzionale, non modifica il contratto)<textarea name="complimentaryNote" rows={2} maxLength={500} placeholder="Es. un mese extra di pubblicità incluso a titolo di cortesia" /></label>
     <div className="contract-summary span-2"><span>Durata <strong>{quote.months} mesi</strong></span><span>Imponibile <strong>{money(quote.net_cents)}</strong></span><span>{quote.tax_name} <strong>{money(quote.tax_cents)}</strong></span><span>Totale <strong>{money(quote.total_cents)}</strong></span></div>
     <label className="confirmation span-2 document-language-confirmation"><input type="checkbox" required /><span><strong>Confermo i dati contrattuali</strong>Il contratto sarà generato esclusivamente in spagnolo e collegato in modo immutabile al preventivo.</span></label>
     {error && <div className="form-error span-2">{error}</div>}
@@ -1183,6 +1185,8 @@ function ContractEditModal({ contract, onClose, onSaved }: { contract: Contract;
       <label>Edizione impresa<input name="printEdition" required maxLength={120} defaultValue={field("printEdition")} /></label>
       <label>Tiratura prevista<input name="printRun" type="number" min="1" max="10000000" required defaultValue={field("printRun")} /></label>
       <label className="span-2">Zona e canali di distribuzione<textarea name="distribution" rows={2} required maxLength={500} defaultValue={field("distribution")} /></label>
+      <label className="span-2">Modalità di pagamento<textarea name="paymentTerms" rows={2} required maxLength={500} defaultValue={field("paymentTerms")} placeholder="100% a 7 giorni dalla fattura / bonifico in 3 rate mensili, ecc." /></label>
+      <label className="span-2">Servizio omaggio (opzionale, non modifica il contratto)<textarea name="complimentaryNote" rows={2} maxLength={500} defaultValue={field("complimentaryNote")} placeholder="Es. un mese extra di pubblicità incluso a titolo di cortesia" /></label>
       {errorData && <div className="form-error span-2">{errorData}</div>}
       <div className="modal-actions span-2"><button className="primary" disabled={busyData}>{busyData ? "Salvataggio…" : "Salva e rigenera PDF"}</button></div>
     </form> : <div className="contract-wizard-note span-2"><strong>Dati contrattuali non modificabili</strong><span>{contract.status !== "draft" ? "Un contratto in firma o firmato resta bloccato per legge: puoi comunque aggiungere note interne." : "Questo contratto è un PDF caricato manualmente: cancella la bozza e ricaricala per correggerla."}</span></div>}

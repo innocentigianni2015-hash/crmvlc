@@ -15,9 +15,11 @@ export function calculateQuoteTotals(lines, months, taxRateBps, discountBps) {
     if (!PRICING_MODELS.includes(pricingModel)) throw new Error("invalid pricing model");
     // Le voci "una tantum" non dipendono dalla durata del preventivo: prezzo x quantita.
     const lineMonths = pricingModel === "one_time" ? 1 : months;
-    const lineSubtotalCents = monthlyPriceCents * quantity * lineMonths;
+    const complimentary = line.complimentary === true;
+    // Le righe in omaggio mantengono il prezzo di listino (per mostrarne il valore) ma non entrano nel totale.
+    const lineSubtotalCents = complimentary ? 0 : monthlyPriceCents * quantity * lineMonths;
     if (!Number.isSafeInteger(lineSubtotalCents)) throw new Error("quote amount is too large");
-    return { ...line, pricingModel, monthlyPriceCents, quantity, months: lineMonths, lineSubtotalCents };
+    return { ...line, pricingModel, monthlyPriceCents, quantity, months: lineMonths, complimentary, lineSubtotalCents };
   });
 
   const subtotalCents = calculatedLines.reduce((sum, line) => sum + line.lineSubtotalCents, 0);

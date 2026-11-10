@@ -45,3 +45,14 @@ test("one-time products ignore the quote duration while per-issue products multi
   assert.equal(result.subtotalCents, 100_000);
   assert.throws(() => calculateQuoteTotals([{ monthlyPriceCents: 1, quantity: 1, pricingModel: "weekly" }], 1, 700, 0), /pricing model/);
 });
+
+test("complimentary lines are shown but cost nothing and do not alter the totals", () => {
+  const result = calculateQuoteTotals([
+    { priceItemId: "a", monthlyPriceCents: 4_900, quantity: 1, pricingModel: "monthly", complimentary: true },
+    { priceItemId: "b", monthlyPriceCents: 9_900, quantity: 1, pricingModel: "monthly" },
+  ], 3, 700, 0);
+  assert.deepEqual(result.lines.map((line) => line.lineSubtotalCents), [0, 29_700]);
+  assert.equal(result.lines[0].complimentary, true);
+  assert.equal(result.lines[1].complimentary, false);
+  assert.equal(result.subtotalCents, 29_700);
+});

@@ -49,7 +49,7 @@ type PriceItemType = "ad_space" | "article" | "service";
 type PricingModel = "monthly" | "per_issue" | "one_time";
 type PriceItem = {
   id: string; price_list_id: string; code: string; category: string;
-  item_type: PriceItemType; pricing_model: PricingModel;
+  item_type: PriceItemType; pricing_model: PricingModel; giftable: number;
   name: string; dimensions: string; monthly_price_cents: number; included_services: string | null;
   active: number; sort_order: number; version: number; updated_at: string;
 };
@@ -100,7 +100,8 @@ const roleLabels: Record<Role, string> = { super_admin: "Super Admin", admin: "A
 const priceTypeLabels: Record<PriceItemType, string> = { ad_space: "Spazi pubblicitari", article: "Articoli", service: "Servizi" };
 const pricingModelLabels: Record<PricingModel, string> = { monthly: "Mensile", per_issue: "Per uscita", one_time: "Una tantum" };
 const pricingModelUnit: Record<PricingModel, string> = { monthly: "/mese", per_issue: "/uscita", one_time: " una tantum" };
-function lineCents(item: PriceItem, quantity: number, months: number) {
+function lineCents(item: PriceItem, quantity: number, months: number, complimentary = false) {
+  if (complimentary) return 0;
   return item.monthly_price_cents * quantity * (item.pricing_model === "one_time" ? 1 : months);
 }
 const BRAND_LOGO = "/brand/viv-le-canarie-icon.svg";
@@ -787,6 +788,7 @@ function PriceListPanel({ data, search, refresh, notify, preferredCampaignId, on
   const [discountCampaignId, setDiscountCampaignId] = useState(preferredCampaignId);
   const [customerNote, setCustomerNote] = useState("");
   const [quantities, setQuantities] = useState<Record<string, number>>({});
+  const [gifts, setGifts] = useState<Record<string, boolean>>({});
   const [editing, setEditing] = useState<PriceItem | null>(null);
   const [creating, setCreating] = useState(false);
   const [quoteError, setQuoteError] = useState("");
@@ -807,7 +809,7 @@ function PriceListPanel({ data, search, refresh, notify, preferredCampaignId, on
   const query = search.trim().toLowerCase();
   const visibleItems = data.priceItems.filter((item) => `${item.name} ${item.dimensions} ${priceTypeLabels[item.item_type] ?? ""} ${item.included_services ?? ""}`.toLowerCase().includes(query));
   const selectedItems = data.priceItems.filter((item) => (quantities[item.id] ?? 0) > 0);
-  const selectedCents = selectedItems.reduce((sum, item) => sum + lineCents(item, quantities[item.id] ?? 0, months), 0);
+  const selectedCents = selectedItems.reduce((sum, item) => sum + lineCents(item, quantities[item.id] ?? 0, months, gifts[item.id] === true), 0);
   const discountBps = selectedCampaign?.discount_bps ?? Math.round(discountPercent * 100);
   const discountCents = Math.round(selectedCents * discountBps / 10_000);
   const taxRate = priceList.tax_rate_bps / 10_000;
@@ -845,11 +847,12 @@ function PriceListPanel({ data, search, refresh, notify, preferredCampaignId, on
           discountPercent: canApplyManualDiscount && !selectedCampaign ? discountPercent : 0,
           discountReason: canApplyManualDiscount && !selectedCampaign ? discountReason : "",
           customerNote,
-          items: selectedItems.map((item) => ({ priceItemId: item.id, quantity: quantities[item.id] })),
+          items: selectedItems.map((item) => ({ priceItemId: item.id, quantity: quantities[item.id], ...(item.giftable === 1 && gifts[item.id] ? { complimentary: true } : {}) })),
         }),
       });
       notify(`Preventivo ${result.quoteNumber} generato e archiviato.`);
       setQuantities({});
+      setGifts({});
       setDiscountPercent(0);
       setDiscountReason("");
       setDiscountCampaignId("");
@@ -877,7 +880,7 @@ function PriceListPanel({ data, search, refresh, notify, preferredCampaignId, on
         <div className="pricing-notice"><strong>Prezzi base netti</strong><span>{priceList.prices_include_tax ? `${priceList.tax_name} incluso` : `${priceList.tax_name} escluso`} · validi per Tenerife, Gran Canaria, Lanzarote, Fuerteventura e La Palma.</span></div>
         {categories.map((group) => <section className="price-group" key={group.category}><header><div><span>{String(group.items.length).padStart(2, "0")}</span><h2>{priceTypeLabels[group.category]}</h2></div><small>Prezzo netto</small></header><div className="price-grid">{group.items.map((item) => {
           const quantity = quantities[item.id] ?? 0;
-          return <article className={`price-card ${quantity ? "selected" : ""}`} key={item.id}><div className="price-card-top"><span className="price-code">{item.code}</span>{canManagePricing && <button className="price-edit" onClick={() => canManageCatalog ? setCatalogForm(item) : setEditing(item)}>Modifica</button>}</div><h3>{item.name}</h3><p className="price-size">{item.dimensions}</p><strong className="price-value">{money(item.monthly_price_cents)}<small>{pricingModelUnit[item.pricing_model]}</small></strong>{item.included_services && <ul>{item.included_services.split("\n").filter(Boolean).map((service) => <li key={service}>{service}</li>)}</ul>}<div className="quantity-control"><button aria-label={`Riduci ${item.name}`} onClick={() => setQuantity(item.id, quantity - 1)}>−</button><input aria-label={`Quantità ${item.name}`} type="number" min="0" max="99" value={quantity} onChange={(event) => setQuantity(item.id, Number(event.target.value))} /><button aria-label={`Aumenta ${item.name}`} onClick={() => setQuantity(item.id, quantity + 1)}>＋</button></div></article>;
+          return <article className={`price-card ${quantity ? "selected" : ""}`} key={item.id}><div className="price-card-top"><span className="price-code">{item.code}</span>{canManagePricing && <button className="price-edit" onClick={() => canManageCatalog ? setCatalogForm(item) : setEditing(item)}>Modifica</button>}</div><h3>{item.name}{item.giftable === 1 && <span className="gift-badge">Anche in omaggio</span>}</h3><p className="price-size">{item.dimensions}</p><strong className="price-value">{money(item.monthly_price_cents)}<small>{pricingModelUnit[item.pricing_model]}</small></strong>{item.included_services && <ul>{item.included_services.split("\n").filter(Boolean).map((service) => <li key={service}>{service}</li>)}</ul>}<div className="quantity-control"><button aria-label={`Riduci ${item.name}`} onClick={() => setQuantity(item.id, quantity - 1)}>−</button><input aria-label={`Quantità ${item.name}`} type="number" min="0" max="99" value={quantity} onChange={(event) => setQuantity(item.id, Number(event.target.value))} /><button aria-label={`Aumenta ${item.name}`} onClick={() => setQuantity(item.id, quantity + 1)}>＋</button></div>{item.giftable === 1 && quantity > 0 && <label className="inline-check gift-toggle"><input type="checkbox" checked={gifts[item.id] === true} onChange={(event) => setGifts((current) => ({ ...current, [item.id]: event.target.checked }))} /> Offri in omaggio al cliente</label>}</article>;
         })}</div></section>)}
         {!categories.length && <div className="data-card"><Empty title="Nessun formato trovato" text="Modifica la ricerca per visualizzare il listino." /></div>}
       </div>
@@ -889,12 +892,12 @@ function PriceListPanel({ data, search, refresh, notify, preferredCampaignId, on
         {selectedCampaign && <div className="campaign-selected"><strong>−{(selectedCampaign.discount_bps / 100).toLocaleString("it-IT")}% · {selectedCampaign.title}</strong><span>{selectedCampaign.message}</span><small>Valida fino al {dateOnly(selectedCampaign.ends_on)}. Lo sconto sarà congelato nel PDF.</small></div>}
         {canApplyManualDiscount && !selectedCampaign ? <><label>Sconto manuale %<input type="number" min="0" max="100" step="0.01" value={discountPercent} onChange={(event) => setDiscountPercent(Math.min(100, Math.max(0, Number(event.target.value) || 0)))} /></label>{discountPercent > 0 && <label>Motivo sconto<input maxLength={300} value={discountReason} onChange={(event) => setDiscountReason(event.target.value)} required placeholder="Motivazione commerciale" /></label>}</> : !selectedCampaign && <div className="discount-lock"><strong>Nessuna promozione applicata</strong><span>Seleziona una promozione autorizzata quando disponibile.</span></div>}
         <label>Nota al cliente<textarea rows={2} maxLength={700} value={customerNote} onChange={(event) => setCustomerNote(event.target.value)} placeholder="Facoltativa" /></label>
-        <div className="quote-lines">{selectedItems.map((item) => <div key={item.id}><span>{quantities[item.id]} × {item.name}<small>{item.pricing_model === "one_time" ? "una tantum" : `${months} ${months === 1 ? "uscita" : "uscite"}`}</small></span><strong>{money(lineCents(item, quantities[item.id] ?? 0, months))}</strong></div>)}{!selectedItems.length && <p>Seleziona almeno un formato dal listino.</p>}</div>
+        <div className="quote-lines">{selectedItems.map((item) => <div key={item.id}><span>{quantities[item.id]} × {item.name}<small>{item.pricing_model === "one_time" ? "una tantum" : `${months} ${months === 1 ? "uscita" : "uscite"}`}</small></span><strong>{gifts[item.id] ? "Omaggio" : money(lineCents(item, quantities[item.id] ?? 0, months))}</strong></div>)}{!selectedItems.length && <p>Seleziona almeno un formato dal listino.</p>}</div>
         <dl><div><dt>Subtotale netto</dt><dd>{money(selectedCents)}</dd></div>{discountCents > 0 && <div className="discount-total"><dt>Sconto {(discountBps / 100).toLocaleString("it-IT")}%</dt><dd>−{money(discountCents)}</dd></div>}<div><dt>Imponibile</dt><dd>{money(netCents)}</dd></div><div><dt>{priceList.tax_name} {(priceList.tax_rate_bps / 100).toLocaleString("it-IT")}%</dt><dd>{money(taxCents)}</dd></div><div className="quote-total"><dt>Totale</dt><dd>{money(totalCents)}</dd></div></dl>
         <small className="quote-scope">{selectedClient?.island ?? "Seleziona un cliente"} · prezzi netti · {priceList.tax_name} escluso</small>
         {quoteError && <div className="quote-error">{quoteError}</div>}
         <button className="primary quote-submit" disabled={creating || !selectedClient || !selectedItems.length || (!selectedCampaign && discountPercent > 0 && !discountReason.trim())} onClick={() => void createQuote()}>{creating ? "Generazione PDF…" : "Genera preventivo PDF"}</button>
-        {selectedItems.length > 0 && <button className="clear-quote" onClick={() => setQuantities({})}>Azzera calcolo</button>}
+        {selectedItems.length > 0 && <button className="clear-quote" onClick={() => { setQuantities({}); setGifts({}); }}>Azzera calcolo</button>}
       </aside>
     </div>
     {catalogForm && <CatalogItemModal item={catalogForm === "new" ? null : catalogForm} onClose={() => setCatalogForm(null)} onSaved={async (message) => { setCatalogForm(null); notify(message); await refresh(); }} />}
@@ -1116,6 +1119,7 @@ function CatalogItemModal({ item, onClose, onSaved }: { item: PriceItem | null; 
     const payload: Record<string, unknown> = {
       name: form.get("name"), dimensions: form.get("dimensions"), itemType: form.get("itemType"), pricingModel: form.get("pricingModel"),
       priceEuros: form.get("priceEuros"), includedServices: form.get("includedServices") || null,
+      giftable: form.get("giftable") === "on",
     };
     try {
       if (item) {
@@ -1136,6 +1140,7 @@ function CatalogItemModal({ item, onClose, onSaved }: { item: PriceItem | null; 
       <label className="span-2">{itemType === "ad_space" ? "Formato / dimensioni" : "Descrizione breve"}<input name="dimensions" required maxLength={160} defaultValue={item?.dimensions ?? ""} placeholder={itemType === "ad_space" ? "259 x 330 mm" : "Pagina intera"} /></label>
       <label className="span-2">Prezzo netto €<input name="priceEuros" type="number" min="0" max="1000000" step="0.01" required defaultValue={item ? (item.monthly_price_cents / 100).toFixed(2) : ""} /></label>
       <label className="span-2">Servizi inclusi (uno per riga)<textarea name="includedServices" rows={3} maxLength={1200} defaultValue={item?.included_services ?? ""} /></label>
+      <label className="span-2 inline-check"><input type="checkbox" name="giftable" defaultChecked={item?.giftable === 1} /> Disponibile anche in omaggio al cliente (nel preventivo compare a 0 €, con la dicitura «Omaggio»)</label>
       <p className="form-hint span-2">Mensile e per uscita si moltiplicano per la durata del preventivo; una tantum no. I preventivi e i contratti già emessi restano invariati. Solo il Super Admin può creare, archiviare o cambiare il modello di prezzo.</p>
       {error && <div className="form-error span-2">{error}</div>}
       <div className="modal-actions span-2">
@@ -1216,10 +1221,10 @@ function ContractEditModal({ contract, catalog, onClose, onSaved }: { contract: 
   let initial: Record<string, unknown> = {};
   try { initial = contract.contract_data_json ? JSON.parse(contract.contract_data_json) : {}; } catch { initial = {}; }
   const field = (key: string) => String((initial as Record<string, unknown>)[key] ?? "");
-  type ContractLine = { key: string; code: string; name: string; dimensions: string; priceCents: number; pricingModel: PricingModel; quantity: number; refresh: boolean; priceItemId?: string };
+  type ContractLine = { key: string; code: string; name: string; dimensions: string; priceCents: number; pricingModel: PricingModel; quantity: number; refresh: boolean; complimentary: boolean; giftable: boolean; priceItemId?: string };
   const [lines, setLines] = useState<ContractLine[]>(() => {
     const items = Array.isArray((initial as { items?: unknown }).items) ? (initial as { items: Array<Record<string, unknown>> }).items : [];
-    return items.map((item) => ({ key: String(item.code), code: String(item.code), name: String(item.name), dimensions: String(item.dimensions ?? ""), priceCents: Number(item.monthlyPriceCents), pricingModel: (item.pricingModel as PricingModel) ?? "per_issue", quantity: Number(item.quantity) || 1, refresh: false }));
+    return items.map((item) => ({ key: String(item.code), code: String(item.code), name: String(item.name), dimensions: String(item.dimensions ?? ""), priceCents: Number(item.monthlyPriceCents), pricingModel: (item.pricingModel as PricingModel) ?? "per_issue", quantity: Number(item.quantity) || 1, refresh: false, complimentary: item.complimentary === true, giftable: item.complimentary === true }));
   });
   const [months, setMonths] = useState(Number((initial as { months?: unknown }).months) || 1);
   const [addId, setAddId] = useState("");
@@ -1227,7 +1232,7 @@ function ContractEditModal({ contract, catalog, onClose, onSaved }: { contract: 
   const discountBps = Number((initial as { discountBps?: unknown }).discountBps) || 0;
   const catalogByCode = new Map(catalog.map((item) => [item.code, item]));
   const effectivePrice = (line: ContractLine) => line.refresh ? (catalogByCode.get(line.code)?.monthly_price_cents ?? line.priceCents) : line.priceCents;
-  const subtotal = lines.reduce((sum, line) => sum + effectivePrice(line) * line.quantity * (line.pricingModel === "one_time" ? 1 : months), 0);
+  const subtotal = lines.reduce((sum, line) => sum + (line.complimentary ? 0 : effectivePrice(line)) * line.quantity * (line.pricingModel === "one_time" ? 1 : months), 0);
   const discount = Math.round(subtotal * discountBps / 10_000);
   const net = subtotal - discount;
   const total = net + Math.round(net * taxRateBps / 10_000);
@@ -1235,14 +1240,14 @@ function ContractEditModal({ contract, catalog, onClose, onSaved }: { contract: 
   function addLine() {
     const item = catalog.find((candidate) => candidate.id === addId);
     if (!item) return;
-    setLines((current) => [...current, { key: item.code, code: item.code, name: item.name, dimensions: item.dimensions, priceCents: item.monthly_price_cents, pricingModel: item.pricing_model, quantity: 1, refresh: false, priceItemId: item.id }]);
+    setLines((current) => [...current, { key: item.code, code: item.code, name: item.name, dimensions: item.dimensions, priceCents: item.monthly_price_cents, pricingModel: item.pricing_model, quantity: 1, refresh: false, complimentary: false, giftable: item.giftable === 1, priceItemId: item.id }]);
     setAddId("");
   }
   async function submitData(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusyData(true); setErrorData("");
     const form = new FormData(event.currentTarget);
     try {
-      const payload = { ...Object.fromEntries(form.entries()), ...(lines.length ? { months } : {}), ...(lines.length ? { items: lines.map((line) => ({ code: line.code, quantity: line.quantity, ...(line.priceItemId ? { priceItemId: line.priceItemId } : {}), ...(line.refresh ? { refresh: true } : {}) })) } : {}) };
+      const payload = { ...Object.fromEntries(form.entries()), ...(lines.length ? { months } : {}), ...(lines.length ? { items: lines.map((line) => ({ code: line.code, quantity: line.quantity, ...(line.priceItemId ? { priceItemId: line.priceItemId } : {}), ...(line.refresh ? { refresh: true } : {}), ...(line.complimentary ? { complimentary: true } : {}) })) } : {}) };
       await api(`/api/contracts/${contract.id}/update-data`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
       await onSaved();
     } catch (cause) { setErrorData(cause instanceof Error ? cause.message : "Aggiornamento non riuscito."); setBusyData(false); }
@@ -1276,6 +1281,7 @@ function ContractEditModal({ contract, catalog, onClose, onSaved }: { contract: 
         {lines.map((line) => <div key={line.key} className="contract-line"><span><strong>{line.name}</strong><small>{line.dimensions} · {money(effectivePrice(line))}{pricingModelUnit[line.pricingModel]}</small></span>
           <input aria-label={`Quantità ${line.name}`} type="number" min="1" max="99" value={line.quantity} onChange={(event) => setLines((current) => current.map((item) => item.key === line.key ? { ...item, quantity: Math.min(99, Math.max(1, Number(event.target.value) || 1)) } : item))} />
           {catalogByCode.has(line.code) && !line.priceItemId && <label className="inline-check"><input type="checkbox" checked={line.refresh} onChange={(event) => setLines((current) => current.map((item) => item.key === line.key ? { ...item, refresh: event.target.checked } : item))} /> Allinea al listino</label>}
+          {(line.giftable || catalogByCode.get(line.code)?.giftable === 1 || line.complimentary) && <label className="inline-check"><input type="checkbox" checked={line.complimentary} onChange={(event) => setLines((current) => current.map((item) => item.key === line.key ? { ...item, complimentary: event.target.checked } : item))} /> Omaggio</label>}
           <button type="button" disabled={lines.length === 1} onClick={() => setLines((current) => current.filter((item) => item.key !== line.key))}>Rimuovi</button></div>)}
         <div className="contract-line"><select value={addId} onChange={(event) => setAddId(event.target.value)}><option value="">Aggiungi prodotto dal listino…</option>{addable.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.dimensions} · {money(item.monthly_price_cents)}</option>)}</select><button type="button" disabled={!addId} onClick={addLine}>Aggiungi</button></div>
       </div>

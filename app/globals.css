@@ -1414,3 +1414,6 @@ input[type="file"]::file-selector-button {
 .contract-line input[type="number"] { width: 70px; }
 .contract-line select { flex: 1 1 220px; }
 .inline-check { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+
+.gift-badge { display: inline-block; margin-left: 8px; padding: 2px 7px; border-radius: 999px; background: #e8f4ec; color: #1f6b3a; font: 700 9px/1.4 system-ui, sans-serif; letter-spacing: .04em; text-transform: uppercase; vertical-align: middle; }
+.gift-toggle { margin-top: 10px; color: #1f6b3a; font-weight: 600; }

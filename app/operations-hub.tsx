@@ -567,6 +567,7 @@ function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, subm
   const freeConfirmationPoints = data.distributionPoints;
   const nowMs = Date.now();
   const isOverdue = (row: RecordRow) => Boolean(row.next_check_due_at) && new Date(String(row.next_check_due_at)).getTime() <= nowMs;
+  const [pointDetail, setPointDetail] = useState<RecordRow | null>(null);
   return <div className="hub-stack">
     <DailyRouteCard deliveries={deliveries} user={user} />
     {user.role === "distributor" && <DistributorPointsBoard points={freeConfirmationPoints} deliveries={deliveries} photoAudits={data.photoAudits} busy={busy} run={run} submitPointRegistration={submitPointRegistration} submitRefill={submitPhotoAudit} submitDeliveryCheck={submitDeliveryCheck} submitAssignedDelivery={submitPhotoAudit} submitPointLocation={submitPointLocation} submitPhotoAuditReplace={submitPhotoAuditReplace} />}
@@ -593,14 +594,15 @@ function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, subm
           const pending = row.location_status === "pending";
           return <div className="hub-list-row" key={String(row.id)} style={{ flexWrap: "wrap" }}>
             {pending && <PointPhotoThumb pointId={String(row.id)} size={72} />}
-            <div style={{ flex: "1 1 220px" }}>
+            <button type="button" className="point-row-trigger" onClick={() => setPointDetail(row)} style={{ flex: "1 1 220px", textAlign: "left", background: "none", border: "none", padding: 0, cursor: "pointer" }}>
               <strong>{row.name}</strong>
               <small>{pending ? `${row.area ?? "Zona non indicata"} · ${row.island}` : `${row.address} · ${row.island}`}{Number(row.self_registered) === 1 ? " · registrato da distributore" : ""}</small>
               {pending
                 ? <small className="ai-review">POSIZIONE DA COMPLETARE · assegnato a {row.assigned_distributor_name ?? row.assigned_distributor_email ?? "distributore"}</small>
                 : row.next_check_due_at && <small className={isOverdue(row) ? "ai-review" : ""}>{isOverdue(row) ? "Da controllare" : `Controllo entro ${when(row.next_check_due_at)}`}</small>}
-            </div>
+            </button>
             <b className={!pending && Number(row.stock) <= Math.max(5, Number(row.capacity) * .15) ? "low-stock" : ""}>{row.stock}/{row.capacity}</b>
+            <button type="button" className="mini-link" onClick={() => setPointDetail(row)}>Scheda →</button>
             {pending && <form style={{ flexBasis: "100%" }} onSubmit={submitPointLocation}>
               <input type="hidden" name="id" value={String(row.id)} />
               <input name="name" defaultValue={String(row.name ?? "")} placeholder="Nome del locale" required maxLength={120} />
@@ -615,7 +617,49 @@ function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, subm
       <DataCard title="Audit fotografici" count={data.photoAudits.length}>{data.photoAudits.length ? data.photoAudits.map((row) => { const ai = photoAiSummary(row); const auditId = String(row.id); return <div className="hub-list-row audit-row" key={auditId} style={{ flexWrap: "wrap", alignItems: "flex-start" }}><PhotoAuditThumb auditId={auditId} size={64} /><div><strong>{row.distributor_name}</strong><small>{row.island} · {when(row.created_at)} · distanza {row.geofence_distance_m ?? "—"} m</small>{ai && <small className={ai.verdict === "compliant_candidate" ? "ai-pass" : "ai-review"}>AI: {ai.magazinesDetected || ai.displayDetected ? "riviste/espositore rilevati" : "contenuto da verificare"} · {ai.possibleDuplicate ? "possibile duplicato" : "nessun duplicato rilevato"} · confidenza {ai.confidence}%</small>}{row.duplicate_of_audit_id && <small className="ai-review">Hash identico a una foto già registrata.</small>}</div><b>Qualità {row.quality_score}%</b><span className={`module-status ${row.status}`}>{row.status}</span>{canManage && row.status === "pending" && <div className="inline-actions"><button disabled={busy} onClick={() => void run(() => post("/api/operations/photo-audits/review", { id: row.id, status: "approved" }), "Foto approvata.")}>Approva</button><button disabled={busy} onClick={() => void run(() => post("/api/operations/photo-audits/review", { id: row.id, status: "rejected" }), "Foto rifiutata.")}>Rifiuta</button></div>}{canManage && <PhotoAuditEditActions auditId={auditId} busy={busy} run={run} onReplace={submitPhotoAuditReplace} />}</div>; }) : <MiniEmpty text="Nessuna foto da verificare." />}</DataCard>
     </div>
     <DataCard title="Controlli ritiro" count={data.deliveryChecks.length}>{data.deliveryChecks.length ? data.deliveryChecks.map((row) => <div className="hub-list-row" key={String(row.id)}><div><strong>{row.point_name}</strong><small>{row.distributor_name ? `${row.distributor_name} · ` : ""}{when(row.created_at)} · distanza {row.geofence_distance_m ?? "—"} m</small></div><b>{row.quantity_found}/{row.quantity_left}</b><span className="module-status">prese {row.quantity_taken}</span></div>) : <MiniEmpty text="Nessun controllo di ritiro registrato." />}</DataCard>
+    {pointDetail && <DistributionPointDetailModal point={pointDetail} deliveries={deliveries} deliveryChecks={data.deliveryChecks} onClose={() => setPointDetail(null)} />}
   </div>;
+}
+
+function DistributionPointDetailModal({ point, deliveries, deliveryChecks, onClose }: {
+  point: RecordRow;
+  deliveries: Delivery[];
+  deliveryChecks: RecordRow[];
+  onClose: () => void;
+}) {
+  const pointId = String(point.id);
+  const pointDeliveries = deliveries
+    .filter((delivery) => String(delivery.distribution_point_id ?? "") === pointId)
+    .sort((a, b) => String(b.scheduled_for ?? "").localeCompare(String(a.scheduled_for ?? "")));
+  const pointChecks = deliveryChecks
+    .filter((check) => String(check.distribution_point_id ?? "") === pointId)
+    .sort((a, b) => String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")));
+  const totalDelivered = pointDeliveries
+    .filter((delivery) => delivery.status === "delivered")
+    .reduce((sum, delivery) => sum + Number(delivery.quantity ?? 0), 0);
+  const totalTaken = pointChecks.reduce((sum, check) => sum + Number(check.quantity_taken ?? 0), 0);
+  const pending = point.location_status === "pending";
+  const statusLabels: Record<string, string> = { assigned: "Assegnata", in_progress: "In corso", delivered: "Consegnata", issue: "Problema" };
+  return <PointDetailModal title={String(point.name ?? "Punto di distribuzione")} subtitle={pending ? `${point.area ?? "Zona non indicata"} · ${point.island}` : `${point.address ?? ""} · ${point.island}`} onClose={onClose}>
+    <div className="metric-grid" style={{ padding: "18px 24px 0", marginBottom: 6, gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
+      <HubMetric label="Stock attuale" value={`${point.stock ?? 0}/${point.capacity ?? 0}`} note="copie presenti ora" />
+      <HubMetric label="Copie consegnate" value={totalDelivered} note="totale su tutte le consegne" />
+      <HubMetric label="Copie prese dai lettori" value={totalTaken} note="dai controlli di ritiro" />
+    </div>
+    <h3 className="point-detail-heading">Storico consegne</h3>
+    <div className="simple-list">
+      {pointDeliveries.length ? pointDeliveries.map((delivery) => <div key={delivery.id}><strong>{delivery.scheduled_for ? when(delivery.scheduled_for) : "Data non indicata"}</strong><small>{delivery.distributor_name ?? "Distributore non indicato"} · {delivery.quantity ?? 0} {delivery.unit ?? "copie"}</small><span className={`delivery-status ${delivery.status}`}>{statusLabels[delivery.status] ?? delivery.status}</span></div>) : <MiniEmpty text="Nessuna consegna registrata per questo punto." />}
+    </div>
+    <h3 className="point-detail-heading">Controlli di ritiro</h3>
+    <div className="simple-list">
+      {pointChecks.length ? pointChecks.map((check) => <div key={String(check.id)}><strong>{when(check.created_at)}</strong><small>{check.distributor_name ?? "Distributore non indicato"} · lasciate {check.quantity_left} · trovate {check.quantity_found}</small><span className="module-status">prese {check.quantity_taken}</span></div>) : <MiniEmpty text="Nessun controllo di ritiro registrato per questo punto." />}
+    </div>
+    <div className="modal-actions" style={{ padding: "0 24px 20px" }}><button type="button" onClick={onClose}>Chiudi</button></div>
+  </PointDetailModal>;
+}
+
+function PointDetailModal({ title, subtitle, onClose, children }: { title: string; subtitle: string; onClose: () => void; children: React.ReactNode }) {
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="ops-modal" role="dialog" aria-modal="true" aria-label={title}><header><div><h2>{title}</h2><p>{subtitle}</p></div><button onClick={onClose} aria-label="Chiudi">×</button></header>{children}</section></div>;
 }
 
 function DistributorPointsBoard({ points, deliveries, photoAudits, busy, run, submitPointRegistration, submitRefill, submitDeliveryCheck, submitAssignedDelivery, submitPointLocation, submitPhotoAuditReplace }: {

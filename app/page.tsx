@@ -45,8 +45,11 @@ type PriceList = {
   id: string; name: string; version: string; currency: string; tax_name: string; tax_rate_bps: number;
   prices_include_tax: number; valid_from: string | null; active: number; notes: string | null; updated_at: string;
 };
+type PriceItemType = "ad_space" | "article" | "service";
+type PricingModel = "monthly" | "per_issue" | "one_time";
 type PriceItem = {
-  id: string; price_list_id: string; code: string; category: "ad_space" | "sponsored_article";
+  id: string; price_list_id: string; code: string; category: string;
+  item_type: PriceItemType; pricing_model: PricingModel;
   name: string; dimensions: string; monthly_price_cents: number; included_services: string | null;
   active: number; sort_order: number; version: number; updated_at: string;
 };
@@ -78,7 +81,7 @@ type SalesApplication = {
 };
 type Bootstrap = {
   user: User; clients: Client[]; contracts: Contract[]; quotes: Quote[]; deliveries: Delivery[]; distributionPoints: DistributionPoint[]; templates: Template[]; users: User[];
-  audit: AuditEvent[]; emailOutbox: EmailOutboxItem[]; priceList: PriceList | null; priceItems: PriceItem[]; demoMode?: boolean;
+  audit: AuditEvent[]; emailOutbox: EmailOutboxItem[]; priceList: PriceList | null; priceItems: PriceItem[]; archivedPriceItems?: PriceItem[]; demoMode?: boolean;
   discountCampaigns: DiscountCampaign[]; podcastAppointments: PodcastAppointment[]; podcastInterviewers: User[];
   salesApplications: SalesApplication[];
   sessionActor?: User;
@@ -94,7 +97,12 @@ const statusLabels: Record<string, string> = { draft: "Bozza", awaiting_signatur
 const quoteStatusLabels: Record<Quote["status"], string> = { issued: "Emesso", converted: "Convertito" };
 const deliveryStatusLabels: Record<Delivery["status"], string> = { assigned: "Assegnata", in_progress: "In corso", delivered: "Consegnata", issue: "Problema" };
 const roleLabels: Record<Role, string> = { super_admin: "Super Admin", admin: "Admin operativo", sales_manager: "Sales Manager", sales: "Sales", distributor: "Distributore" };
-const priceCategoryLabels: Record<PriceItem["category"], string> = { ad_space: "Spazi pubblicitari", sponsored_article: "Articoli sponsorizzati" };
+const priceTypeLabels: Record<PriceItemType, string> = { ad_space: "Spazi pubblicitari", article: "Articoli", service: "Servizi" };
+const pricingModelLabels: Record<PricingModel, string> = { monthly: "Mensile", per_issue: "Per uscita", one_time: "Una tantum" };
+const pricingModelUnit: Record<PricingModel, string> = { monthly: "/mese", per_issue: "/uscita", one_time: " una tantum" };
+function lineCents(item: PriceItem, quantity: number, months: number) {
+  return item.monthly_price_cents * quantity * (item.pricing_model === "one_time" ? 1 : months);
+}
 const BRAND_LOGO = "/brand/viv-le-canarie-icon.svg";
 const WHATSAPP_URL = "https://wa.me/34602576044?text=Buongiorno%2C%20contatto%20CRMVLC%20per%20un%27informazione.";
 const PODCAST_PACKAGES = {
@@ -785,6 +793,8 @@ function PriceListPanel({ data, search, refresh, notify, preferredCampaignId, on
   const priceList = data.priceList;
   const canApplyManualDiscount = ["super_admin", "admin", "sales_manager", "sales"].includes(data.user.role);
   const canManagePricing = ["super_admin", "admin"].includes(data.user.role);
+  const canManageCatalog = data.user.role === "super_admin";
+  const [catalogForm, setCatalogForm] = useState<PriceItem | "new" | null>(null);
   const validCampaigns = (data.discountCampaigns ?? []).filter((campaign) => campaign.active === 1 && campaign.starts_on <= canaryToday() && campaign.ends_on >= canaryToday());
   const selectedCampaign = validCampaigns.find((campaign) => campaign.id === discountCampaignId) ?? null;
 
@@ -795,9 +805,9 @@ function PriceListPanel({ data, search, refresh, notify, preferredCampaignId, on
   if (!priceList) return <section className="ops-page"><PageHeading eyebrow="Vendita pubblicitaria" title="Listino" subtitle="Nessun listino attivo disponibile." action={<span className="admin-badge">Da configurare</span>} /><div className="data-card"><Empty title="Listino non disponibile" text="Il Super Admin deve attivare una versione del listino." /></div></section>;
 
   const query = search.trim().toLowerCase();
-  const visibleItems = data.priceItems.filter((item) => `${item.name} ${item.dimensions} ${priceCategoryLabels[item.category]} ${item.included_services ?? ""}`.toLowerCase().includes(query));
+  const visibleItems = data.priceItems.filter((item) => `${item.name} ${item.dimensions} ${priceTypeLabels[item.item_type] ?? ""} ${item.included_services ?? ""}`.toLowerCase().includes(query));
   const selectedItems = data.priceItems.filter((item) => (quantities[item.id] ?? 0) > 0);
-  const selectedCents = selectedItems.reduce((sum, item) => sum + item.monthly_price_cents * (quantities[item.id] ?? 0) * months, 0);
+  const selectedCents = selectedItems.reduce((sum, item) => sum + lineCents(item, quantities[item.id] ?? 0, months), 0);
   const discountBps = selectedCampaign?.discount_bps ?? Math.round(discountPercent * 100);
   const discountCents = Math.round(selectedCents * discountBps / 10_000);
   const taxRate = priceList.tax_rate_bps / 10_000;
@@ -805,6 +815,14 @@ function PriceListPanel({ data, search, refresh, notify, preferredCampaignId, on
   const taxCents = Math.round(netCents * taxRate);
   const totalCents = netCents + taxCents;
   const selectedClient = data.clients.find((client) => client.id === clientId) ?? data.clients[0];
+
+  async function restoreItem(item: PriceItem) {
+    try {
+      await api(`/api/price-items/${item.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ active: true, version: item.version }) });
+      notify("Prodotto riattivato.");
+      await refresh();
+    } catch (cause) { setQuoteError(cause instanceof Error ? cause.message : "Riattivazione non riuscita."); }
+  }
 
   function setQuantity(itemId: string, value: number) {
     const quantity = Math.min(99, Math.max(0, Math.floor(value || 0)));
@@ -845,8 +863,8 @@ function PriceListPanel({ data, search, refresh, notify, preferredCampaignId, on
     }
   }
 
-  const categories = (["ad_space", "sponsored_article"] as PriceItem["category"][])
-    .map((category) => ({ category, items: visibleItems.filter((item) => item.category === category) }))
+  const categories = (["ad_space", "article", "service"] as PriceItemType[])
+    .map((category) => ({ category, items: visibleItems.filter((item) => item.item_type === category) }))
     .filter((group) => group.items.length);
 
   return <section className="ops-page pricing-page">
@@ -854,10 +872,12 @@ function PriceListPanel({ data, search, refresh, notify, preferredCampaignId, on
     {canManagePricing && <DiscountCampaignAdmin campaigns={data.discountCampaigns ?? []} refresh={refresh} notify={notify} />}
     <div className="pricing-layout">
       <div className="pricing-catalog">
-        <div className="pricing-notice"><strong>Prezzi base per uscita</strong><span>{priceList.prices_include_tax ? `${priceList.tax_name} incluso` : `${priceList.tax_name} escluso`} · validi per Tenerife, Gran Canaria, Lanzarote, Fuerteventura e La Palma.</span></div>
-        {categories.map((group) => <section className="price-group" key={group.category}><header><div><span>{String(group.items.length).padStart(2, "0")}</span><h2>{priceCategoryLabels[group.category]}</h2></div><small>Prezzo netto / uscita</small></header><div className="price-grid">{group.items.map((item) => {
+        {canManageCatalog && <div className="pricing-notice"><strong>Catalogo prodotti</strong><span>Crea spazi, articoli e servizi con il modello di prezzo giusto.</span><button className="primary" onClick={() => setCatalogForm("new")}>Nuovo prodotto</button></div>}
+        {canManageCatalog && (data.archivedPriceItems ?? []).length > 0 && <details className="pricing-notice"><summary>Prodotti archiviati ({(data.archivedPriceItems ?? []).length})</summary>{(data.archivedPriceItems ?? []).map((item) => <div key={item.id}><span>{item.code} · {item.name}</span> <button className="price-edit" onClick={() => void restoreItem(item)}>Riattiva</button></div>)}</details>}
+        <div className="pricing-notice"><strong>Prezzi base netti</strong><span>{priceList.prices_include_tax ? `${priceList.tax_name} incluso` : `${priceList.tax_name} escluso`} · validi per Tenerife, Gran Canaria, Lanzarote, Fuerteventura e La Palma.</span></div>
+        {categories.map((group) => <section className="price-group" key={group.category}><header><div><span>{String(group.items.length).padStart(2, "0")}</span><h2>{priceTypeLabels[group.category]}</h2></div><small>Prezzo netto</small></header><div className="price-grid">{group.items.map((item) => {
           const quantity = quantities[item.id] ?? 0;
-          return <article className={`price-card ${quantity ? "selected" : ""}`} key={item.id}><div className="price-card-top"><span className="price-code">{item.code}</span>{canManagePricing && <button className="price-edit" onClick={() => setEditing(item)}>Modifica</button>}</div><h3>{item.name}</h3><p className="price-size">{item.dimensions}</p><strong className="price-value">{money(item.monthly_price_cents)}<small>/uscita</small></strong>{item.included_services && <ul>{item.included_services.split("\n").filter(Boolean).map((service) => <li key={service}>{service}</li>)}</ul>}<div className="quantity-control"><button aria-label={`Riduci ${item.name}`} onClick={() => setQuantity(item.id, quantity - 1)}>−</button><input aria-label={`Quantità ${item.name}`} type="number" min="0" max="99" value={quantity} onChange={(event) => setQuantity(item.id, Number(event.target.value))} /><button aria-label={`Aumenta ${item.name}`} onClick={() => setQuantity(item.id, quantity + 1)}>＋</button></div></article>;
+          return <article className={`price-card ${quantity ? "selected" : ""}`} key={item.id}><div className="price-card-top"><span className="price-code">{item.code}</span>{canManagePricing && <button className="price-edit" onClick={() => canManageCatalog ? setCatalogForm(item) : setEditing(item)}>Modifica</button>}</div><h3>{item.name}</h3><p className="price-size">{item.dimensions}</p><strong className="price-value">{money(item.monthly_price_cents)}<small>{pricingModelUnit[item.pricing_model]}</small></strong>{item.included_services && <ul>{item.included_services.split("\n").filter(Boolean).map((service) => <li key={service}>{service}</li>)}</ul>}<div className="quantity-control"><button aria-label={`Riduci ${item.name}`} onClick={() => setQuantity(item.id, quantity - 1)}>−</button><input aria-label={`Quantità ${item.name}`} type="number" min="0" max="99" value={quantity} onChange={(event) => setQuantity(item.id, Number(event.target.value))} /><button aria-label={`Aumenta ${item.name}`} onClick={() => setQuantity(item.id, quantity + 1)}>＋</button></div></article>;
         })}</div></section>)}
         {!categories.length && <div className="data-card"><Empty title="Nessun formato trovato" text="Modifica la ricerca per visualizzare il listino." /></div>}
       </div>
@@ -869,7 +889,7 @@ function PriceListPanel({ data, search, refresh, notify, preferredCampaignId, on
         {selectedCampaign && <div className="campaign-selected"><strong>−{(selectedCampaign.discount_bps / 100).toLocaleString("it-IT")}% · {selectedCampaign.title}</strong><span>{selectedCampaign.message}</span><small>Valida fino al {dateOnly(selectedCampaign.ends_on)}. Lo sconto sarà congelato nel PDF.</small></div>}
         {canApplyManualDiscount && !selectedCampaign ? <><label>Sconto manuale %<input type="number" min="0" max="100" step="0.01" value={discountPercent} onChange={(event) => setDiscountPercent(Math.min(100, Math.max(0, Number(event.target.value) || 0)))} /></label>{discountPercent > 0 && <label>Motivo sconto<input maxLength={300} value={discountReason} onChange={(event) => setDiscountReason(event.target.value)} required placeholder="Motivazione commerciale" /></label>}</> : !selectedCampaign && <div className="discount-lock"><strong>Nessuna promozione applicata</strong><span>Seleziona una promozione autorizzata quando disponibile.</span></div>}
         <label>Nota al cliente<textarea rows={2} maxLength={700} value={customerNote} onChange={(event) => setCustomerNote(event.target.value)} placeholder="Facoltativa" /></label>
-        <div className="quote-lines">{selectedItems.map((item) => <div key={item.id}><span>{quantities[item.id]} × {item.name}<small>{months} {months === 1 ? "uscita" : "uscite"}</small></span><strong>{money(item.monthly_price_cents * (quantities[item.id] ?? 0) * months)}</strong></div>)}{!selectedItems.length && <p>Seleziona almeno un formato dal listino.</p>}</div>
+        <div className="quote-lines">{selectedItems.map((item) => <div key={item.id}><span>{quantities[item.id]} × {item.name}<small>{item.pricing_model === "one_time" ? "una tantum" : `${months} ${months === 1 ? "uscita" : "uscite"}`}</small></span><strong>{money(lineCents(item, quantities[item.id] ?? 0, months))}</strong></div>)}{!selectedItems.length && <p>Seleziona almeno un formato dal listino.</p>}</div>
         <dl><div><dt>Subtotale netto</dt><dd>{money(selectedCents)}</dd></div>{discountCents > 0 && <div className="discount-total"><dt>Sconto {(discountBps / 100).toLocaleString("it-IT")}%</dt><dd>−{money(discountCents)}</dd></div>}<div><dt>Imponibile</dt><dd>{money(netCents)}</dd></div><div><dt>{priceList.tax_name} {(priceList.tax_rate_bps / 100).toLocaleString("it-IT")}%</dt><dd>{money(taxCents)}</dd></div><div className="quote-total"><dt>Totale</dt><dd>{money(totalCents)}</dd></div></dl>
         <small className="quote-scope">{selectedClient?.island ?? "Seleziona un cliente"} · prezzi netti · {priceList.tax_name} escluso</small>
         {quoteError && <div className="quote-error">{quoteError}</div>}
@@ -877,6 +897,7 @@ function PriceListPanel({ data, search, refresh, notify, preferredCampaignId, on
         {selectedItems.length > 0 && <button className="clear-quote" onClick={() => setQuantities({})}>Azzera calcolo</button>}
       </aside>
     </div>
+    {catalogForm && <CatalogItemModal item={catalogForm === "new" ? null : catalogForm} onClose={() => setCatalogForm(null)} onSaved={async (message) => { setCatalogForm(null); notify(message); await refresh(); }} />}
     {editing && <PriceEditModal item={editing} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); notify("Prezzo aggiornato e registrato nell’audit."); await refresh(); }} />}
   </section>;
 }
@@ -1083,6 +1104,47 @@ function ContractGenerationModal({ quote, client, busy, onClose, onGenerate }: {
     {error && <div className="form-error span-2">{error}</div>}
     <div className="modal-actions span-2"><button type="button" onClick={onClose}>Annulla</button><button className="primary" disabled={busy}>{busy ? "Generazione PDF…" : "Genera contratto"}</button></div>
   </form></Modal>;
+}
+
+function CatalogItemModal({ item, onClose, onSaved }: { item: PriceItem | null; onClose: () => void; onSaved: (message: string) => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [itemType, setItemType] = useState<PriceItemType>(item?.item_type ?? "ad_space");
+  async function submit(event: FormEvent<HTMLFormElement>, archive = false) {
+    event.preventDefault(); setBusy(true); setError("");
+    const form = new FormData(event.currentTarget);
+    const payload: Record<string, unknown> = {
+      name: form.get("name"), dimensions: form.get("dimensions"), itemType: form.get("itemType"), pricingModel: form.get("pricingModel"),
+      priceEuros: form.get("priceEuros"), includedServices: form.get("includedServices") || null,
+    };
+    try {
+      if (item) {
+        await api(`/api/price-items/${item.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...payload, ...(archive ? { active: false } : {}), version: item.version }) });
+        await onSaved(archive ? "Prodotto archiviato: non compare più nei nuovi preventivi." : "Prodotto aggiornato e registrato nell’audit.");
+      } else {
+        await api("/api/price-items", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...payload, code: form.get("code") }) });
+        await onSaved("Prodotto creato e disponibile nei preventivi.");
+      }
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Salvataggio non riuscito."); setBusy(false); }
+  }
+  return <Modal title={item ? "Modifica prodotto" : "Nuovo prodotto"} subtitle={item ? `${item.code} · ${item.name}` : "Spazio pubblicitario, articolo o servizio da vendere nei preventivi."} onClose={onClose}>
+    <form className="form-grid" onSubmit={(event) => void submit(event)}>
+      <label>Tipo<select name="itemType" value={itemType} onChange={(event) => setItemType(event.target.value as PriceItemType)}>{(Object.keys(priceTypeLabels) as PriceItemType[]).map((type) => <option key={type} value={type}>{priceTypeLabels[type]}</option>)}</select></label>
+      <label>Modello di prezzo<select name="pricingModel" defaultValue={item?.pricing_model ?? "per_issue"}>{(Object.keys(pricingModelLabels) as PricingModel[]).map((model) => <option key={model} value={model}>{pricingModelLabels[model]}</option>)}</select></label>
+      {!item && <label>Codice<input name="code" required maxLength={40} placeholder="ART-INTERVISTA-MEZZA" /></label>}
+      <label className={item ? "span-2" : ""}>Nome<input name="name" required maxLength={120} defaultValue={item?.name ?? ""} /></label>
+      <label className="span-2">{itemType === "ad_space" ? "Formato / dimensioni" : "Descrizione breve"}<input name="dimensions" required maxLength={160} defaultValue={item?.dimensions ?? ""} placeholder={itemType === "ad_space" ? "259 x 330 mm" : "Pagina intera"} /></label>
+      <label className="span-2">Prezzo netto €<input name="priceEuros" type="number" min="0" max="1000000" step="0.01" required defaultValue={item ? (item.monthly_price_cents / 100).toFixed(2) : ""} /></label>
+      <label className="span-2">Servizi inclusi (uno per riga)<textarea name="includedServices" rows={3} maxLength={1200} defaultValue={item?.included_services ?? ""} /></label>
+      <p className="form-hint span-2">Mensile e per uscita si moltiplicano per la durata del preventivo; una tantum no. I preventivi e i contratti già emessi restano invariati. Solo il Super Admin può creare, archiviare o cambiare il modello di prezzo.</p>
+      {error && <div className="form-error span-2">{error}</div>}
+      <div className="modal-actions span-2">
+        {item && <button type="button" disabled={busy} onClick={(event) => { const form = event.currentTarget.form; if (form?.reportValidity()) void submit({ preventDefault() {}, currentTarget: form } as unknown as FormEvent<HTMLFormElement>, true); }}>Archivia</button>}
+        <button type="button" onClick={onClose}>Annulla</button>
+        <button className="primary" disabled={busy}>{busy ? "Salvataggio…" : item ? "Salva modifiche" : "Crea prodotto"}</button>
+      </div>
+    </form>
+  </Modal>;
 }
 
 function PriceEditModal({ item, onClose, onSaved }: { item: PriceItem; onClose: () => void; onSaved: () => Promise<void> }) {

@@ -8,6 +8,7 @@ import {
   canManageDeliveries,
   canManageDiscountCampaigns,
   canManagePriceList,
+  canManageCatalog,
   canImpersonateUsers,
   canCreateUserWithRole,
   canReadPodcastCalendar,
@@ -26,7 +27,7 @@ import {
 } from "./authorization.js";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 import { timingSafeEqual } from "node:crypto";
-import { calculateQuoteTotals, formatQuoteNumber } from "./quote-calculations.js";
+import { calculateQuoteTotals, formatQuoteNumber, PRICING_MODELS } from "./quote-calculations.js";
 import { buildQuotePdf } from "./quote-pdf.js";
 import { buildContractPdf } from "./contract-pdf.js";
 import { handleOperationsApi, handlePublicOperationsApi } from "./operations-api.js";
@@ -195,7 +196,9 @@ type PriceItemRow = {
   id: string;
   price_list_id: string;
   code: string;
-  category: "cover" | "internal_high" | "internal_low" | "back_cover";
+  category: string;
+  item_type: "ad_space" | "article" | "service";
+  pricing_model: "monthly" | "per_issue" | "one_time";
   name: string;
   dimensions: string;
   monthly_price_cents: number;
@@ -433,6 +436,9 @@ export async function handleCrmApi(
       return updateDelivery(request, deliveryMatch[1], user, env);
     }
 
+    if (url.pathname === "/api/price-items" && request.method === "POST") {
+      return createPriceItem(request, user, env);
+    }
     const priceItemMatch = url.pathname.match(/^\/api\/price-items\/([^/]+)$/);
     if (priceItemMatch && request.method === "PATCH") {
       return updatePriceItem(request, priceItemMatch[1], user, env);
@@ -978,14 +984,20 @@ async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Resp
 
   let priceList: PriceListRow | null = null;
   let priceItems: PriceItemRow[] = [];
+  let archivedPriceItems: PriceItemRow[] = [];
   if (canReadPriceList(user)) {
     priceList = await env.DB.prepare(
       "SELECT id, name, version, currency, tax_name, tax_rate_bps, prices_include_tax, valid_from, active, notes, updated_at FROM price_lists WHERE active = 1 ORDER BY updated_at DESC LIMIT 1",
     ).first<PriceListRow>();
     if (priceList) {
       priceItems = (await env.DB.prepare(
-        "SELECT id, price_list_id, code, category, name, dimensions, monthly_price_cents, included_services, active, sort_order, version, updated_at FROM price_items WHERE price_list_id = ? AND active = 1 ORDER BY sort_order, name",
+        "SELECT id, price_list_id, code, category, item_type, pricing_model, name, dimensions, monthly_price_cents, included_services, active, sort_order, version, updated_at FROM price_items WHERE price_list_id = ? AND active = 1 ORDER BY sort_order, name",
       ).bind(priceList.id).all<PriceItemRow>()).results;
+      if (canManageCatalog(user)) {
+        archivedPriceItems = (await env.DB.prepare(
+          "SELECT id, price_list_id, code, category, item_type, pricing_model, name, dimensions, monthly_price_cents, included_services, active, sort_order, version, updated_at FROM price_items WHERE price_list_id = ? AND active = 0 ORDER BY sort_order, name",
+        ).bind(priceList.id).all<PriceItemRow>()).results;
+      }
     }
   }
 
@@ -1054,6 +1066,7 @@ async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Resp
     emailOutbox,
     priceList,
     priceItems,
+    archivedPriceItems,
     discountCampaigns,
     podcastAppointments,
     podcastInterviewers,
@@ -1063,31 +1076,104 @@ async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Resp
   });
 }
 
+const PRICE_ITEM_TYPES = ["ad_space", "article", "service"] as const;
+const PRICE_ITEM_COLUMNS = "id, price_list_id, code, category, item_type, pricing_model, name, dimensions, monthly_price_cents, included_services, active, sort_order, version, updated_at";
+
+function categoryForItemType(itemType: string): string {
+  return itemType === "article" ? "sponsored_article" : itemType === "service" ? "service" : "ad_space";
+}
+
+function parsePriceEuros(value: unknown): number {
+  const euros = Number(value);
+  if (!Number.isFinite(euros) || euros < 0 || euros > 1_000_000) throw new ApiError(400, "invalid_price", "Inserisci un prezzo valido.");
+  return Math.round(euros * 100);
+}
+
+function parseItemType(value: unknown): PriceItemRow["item_type"] {
+  const itemType = String(value ?? "");
+  if (!(PRICE_ITEM_TYPES as readonly string[]).includes(itemType)) throw new ApiError(400, "invalid_item_type", "Tipo di prodotto non valido.");
+  return itemType as PriceItemRow["item_type"];
+}
+
+function parsePricingModel(value: unknown): PriceItemRow["pricing_model"] {
+  const model = String(value ?? "");
+  if (!PRICING_MODELS.includes(model)) throw new ApiError(400, "invalid_pricing_model", "Modello di prezzo non valido.");
+  return model as PriceItemRow["pricing_model"];
+}
+
+async function createPriceItem(request: Request, user: UserRow, env: RuntimeEnv): Promise<Response> {
+  if (!canManageCatalog(user)) throw new ApiError(403, "catalog_manager_required", "Solo il Super Admin può creare nuovi prodotti.");
+  const body = await readJson<Record<string, unknown>>(request);
+  const name = cleanText(body.name, 120);
+  const code = cleanText(body.code, 40).toUpperCase().replace(/[^A-Z0-9-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+  const dimensions = cleanText(body.dimensions, 160);
+  const itemType = parseItemType(body.itemType);
+  const pricingModel = parsePricingModel(body.pricingModel);
+  const priceCents = parsePriceEuros(body.priceEuros);
+  const includedServices = cleanOptionalText(body.includedServices, 1200);
+  if (!name || !code || !dimensions) throw new ApiError(400, "invalid_price_item", "Nome, codice e formato/descrizione sono obbligatori.");
+  const priceList = await env.DB.prepare("SELECT id FROM price_lists WHERE active = 1 ORDER BY updated_at DESC LIMIT 1").first<{ id: string }>();
+  if (!priceList) throw new ApiError(409, "price_list_missing", "Non esiste un listino attivo.");
+  const duplicate = await env.DB.prepare("SELECT id FROM price_items WHERE code = ? LIMIT 1").bind(code).first();
+  if (duplicate) throw new ApiError(409, "duplicate_code", "Esiste già un prodotto con questo codice.");
+  const maxSort = await env.DB.prepare("SELECT COALESCE(MAX(sort_order), 0) AS max_sort FROM price_items WHERE price_list_id = ?").bind(priceList.id).first<{ max_sort: number }>();
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    "INSERT INTO price_items (id, price_list_id, code, category, item_type, pricing_model, name, dimensions, monthly_price_cents, included_services, active, sort_order, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, ?, ?)",
+  ).bind(id, priceList.id, code, categoryForItemType(itemType), itemType, pricingModel, name, dimensions, priceCents, includedServices, Number(maxSort?.max_sort ?? 0) + 10, now, now).run();
+  await env.DB.prepare("UPDATE price_lists SET updated_at = ? WHERE id = ?").bind(now, priceList.id).run();
+  await appendAudit(env, request, user, "price_item.created", "price_item", id, { code, name, itemType, pricingModel, priceCents });
+  return json({ id }, 201);
+}
+
 async function updatePriceItem(request: Request, itemId: string, user: UserRow, env: RuntimeEnv): Promise<Response> {
   if (!canManagePriceList(user)) throw new ApiError(403, "price_list_manager_required", "Solo Super Admin e Admin possono modificare il listino.");
-  const current = await env.DB.prepare(
-    "SELECT id, price_list_id, code, category, name, dimensions, monthly_price_cents, included_services, active, sort_order, version, updated_at FROM price_items WHERE id = ? LIMIT 1",
-  ).bind(itemId).first<PriceItemRow>();
+  const current = await env.DB.prepare(`SELECT ${PRICE_ITEM_COLUMNS} FROM price_items WHERE id = ? LIMIT 1`).bind(itemId).first<PriceItemRow>();
   if (!current) throw new ApiError(404, "price_item_not_found", "Voce di listino non trovata.");
 
   const body = await readJson<Record<string, unknown>>(request);
   const version = Number(body.version);
-  if (version !== current.version) throw new ApiError(409, "version_conflict", "Il prezzo è stato modificato da un altro utente. Ricarica i dati.");
-  const monthlyPriceEuros = Number(body.monthlyPriceEuros);
-  if (!Number.isFinite(monthlyPriceEuros) || monthlyPriceEuros < 0 || monthlyPriceEuros > 1_000_000) {
-    throw new ApiError(400, "invalid_price", "Inserisci un prezzo mensile valido.");
-  }
-  const monthlyPriceCents = Math.round(monthlyPriceEuros * 100);
+  if (version !== current.version) throw new ApiError(409, "version_conflict", "Il prodotto è stato modificato da un altro utente. Ricarica i dati.");
+
+  // Il prezzo puo' essere aggiornato da Admin e Super Admin; struttura, modello di prezzo e archiviazione solo dal Super Admin.
+  const structural = ["name", "dimensions", "includedServices", "itemType", "pricingModel", "active"].some((key) => body[key] !== undefined);
+  if (structural && !canManageCatalog(user)) throw new ApiError(403, "catalog_manager_required", "Solo il Super Admin può modificare la struttura dei prodotti.");
+
+  const next = {
+    priceCents: current.monthly_price_cents,
+    name: current.name,
+    dimensions: current.dimensions,
+    includedServices: current.included_services,
+    itemType: current.item_type,
+    pricingModel: current.pricing_model,
+    active: current.active,
+  };
+  const priceInput = body.priceEuros ?? body.monthlyPriceEuros;
+  if (priceInput !== undefined) next.priceCents = parsePriceEuros(priceInput);
+  if (body.name !== undefined) next.name = cleanText(body.name, 120);
+  if (body.dimensions !== undefined) next.dimensions = cleanText(body.dimensions, 160);
+  if (body.includedServices !== undefined) next.includedServices = cleanOptionalText(body.includedServices, 1200);
+  if (body.itemType !== undefined) next.itemType = parseItemType(body.itemType);
+  if (body.pricingModel !== undefined) next.pricingModel = parsePricingModel(body.pricingModel);
+  if (body.active !== undefined) next.active = body.active === true || body.active === 1 ? 1 : 0;
+  if (!next.name || !next.dimensions) throw new ApiError(400, "invalid_price_item", "Nome e formato/descrizione sono obbligatori.");
+  const category = next.itemType === current.item_type ? current.category : categoryForItemType(next.itemType);
+
   const now = new Date().toISOString();
   const result = await env.DB.prepare(
-    "UPDATE price_items SET monthly_price_cents = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?",
-  ).bind(monthlyPriceCents, now, current.id, version).run();
+    "UPDATE price_items SET monthly_price_cents = ?, name = ?, dimensions = ?, included_services = ?, item_type = ?, pricing_model = ?, category = ?, active = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?",
+  ).bind(next.priceCents, next.name, next.dimensions, next.includedServices, next.itemType, next.pricingModel, category, next.active, now, current.id, version).run();
   if (Number(result.meta.changes ?? 0) !== 1) throw new ApiError(409, "version_conflict", "Aggiornamento concorrente rilevato.");
   await env.DB.prepare("UPDATE price_lists SET updated_at = ? WHERE id = ?").bind(now, current.price_list_id).run();
   await appendAudit(env, request, user, "price_item.updated", "price_item", current.id, {
     code: current.code,
     previousPriceCents: current.monthly_price_cents,
-    monthlyPriceCents,
+    monthlyPriceCents: next.priceCents,
+    previousPricingModel: current.pricing_model,
+    pricingModel: next.pricingModel,
+    itemType: next.itemType,
+    active: next.active,
     version: version + 1,
   });
   return json({ ok: true });
@@ -1308,7 +1394,7 @@ async function createQuote(request: Request, user: UserRow, env: RuntimeEnv, ctx
 
   const placeholders = requestedItems.map(() => "?").join(", ");
   const priceRows = (await env.DB.prepare(
-    `SELECT id, price_list_id, code, category, name, dimensions, monthly_price_cents, included_services, active, sort_order, version, updated_at FROM price_items WHERE price_list_id = ? AND active = 1 AND id IN (${placeholders})`,
+    `SELECT id, price_list_id, code, category, item_type, pricing_model, name, dimensions, monthly_price_cents, included_services, active, sort_order, version, updated_at FROM price_items WHERE price_list_id = ? AND active = 1 AND id IN (${placeholders})`,
   ).bind(priceList.id, ...requestedItems.map((item) => item.priceItemId)).all<PriceItemRow>()).results;
   if (priceRows.length !== requestedItems.length) throw new ApiError(400, "invalid_quote_items", "Una o più voci non appartengono al listino attivo.");
   const priceById = new Map(priceRows.map((item) => [item.id, item]));
@@ -1321,6 +1407,7 @@ async function createQuote(request: Request, user: UserRow, env: RuntimeEnv, ctx
       name: item.name,
       dimensions: item.dimensions,
       monthlyPriceCents: item.monthly_price_cents,
+      pricingModel: item.pricing_model ?? "per_issue",
       quantity: requested.quantity,
     };
   }), months, priceList.tax_rate_bps, discountBps);
@@ -1370,8 +1457,8 @@ async function createQuote(request: Request, user: UserRow, env: RuntimeEnv, ctx
         "INSERT INTO quotes (id, quote_number, sequence, year, client_id, price_list_id, status, owner_user_id, island, customer_company, customer_contact, customer_email, currency, tax_name, tax_rate_bps, months, subtotal_cents, discount_campaign_id, discount_bps, discount_reason, discount_cents, net_cents, tax_cents, total_cents, customer_note, valid_until, pdf_r2_key, pdf_sha256, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, 'issued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       ).bind(id, quoteNumber, sequence, year, client.id, priceList.id, client.owner_user_id, client.island, client.company_name, client.contact_name, client.email, priceList.currency, priceList.tax_name, priceList.tax_rate_bps, months, totals.subtotalCents, discountCampaignId, discountBps, discountReason, totals.discountCents, totals.netCents, totals.taxCents, totals.totalCents, customerNote, validUntil, pdfKey, pdfSha256, user.id, createdAt),
       ...totals.lines.map((item) => env.DB.prepare(
-        "INSERT INTO quote_items (id, quote_id, price_item_id, code, name, dimensions, monthly_price_cents, quantity, months, line_subtotal_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      ).bind(crypto.randomUUID(), id, item.priceItemId, item.code, item.name, item.dimensions, item.monthlyPriceCents, item.quantity, item.months, item.lineSubtotalCents)),
+        "INSERT INTO quote_items (id, quote_id, price_item_id, code, name, dimensions, monthly_price_cents, quantity, months, line_subtotal_cents, pricing_model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).bind(crypto.randomUUID(), id, item.priceItemId, item.code, item.name, item.dimensions, item.monthlyPriceCents, item.quantity, item.months, item.lineSubtotalCents, item.pricingModel)),
     ];
     await env.DB.batch(statements);
   } catch (error) {
@@ -1435,9 +1522,9 @@ async function convertQuoteToContract(request: Request, quoteId: string, user: U
     throw new ApiError(400, "invalid_destination_url", "L’URL di destinazione deve iniziare con http:// o https://.");
   }
   const items = (await env.DB.prepare(
-    "SELECT code, name, dimensions, monthly_price_cents, quantity, months, line_subtotal_cents FROM quote_items WHERE quote_id = ? ORDER BY rowid",
+    "SELECT code, name, dimensions, monthly_price_cents, quantity, months, line_subtotal_cents, pricing_model FROM quote_items WHERE quote_id = ? ORDER BY rowid",
   ).bind(quote.id).all<{
-    code: string; name: string; dimensions: string; monthly_price_cents: number; quantity: number; months: number; line_subtotal_cents: number;
+    code: string; name: string; dimensions: string; monthly_price_cents: number; quantity: number; months: number; line_subtotal_cents: number; pricing_model: string;
   }>()).results;
   if (!items.length) throw new ApiError(409, "quote_items_missing", "Il preventivo non contiene prodotti convertibili.");
 
@@ -1486,6 +1573,7 @@ async function convertQuoteToContract(request: Request, quoteId: string, user: U
       monthlyPriceCents: item.monthly_price_cents,
       quantity: item.quantity,
       months: item.months,
+      pricingModel: item.pricing_model,
       lineSubtotalCents: item.line_subtotal_cents,
     })),
   };

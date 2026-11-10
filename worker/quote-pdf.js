@@ -51,9 +51,9 @@ export async function buildQuotePdf(quote) {
 
   for (const item of quote.items) {
     page.drawText(safeText(item.name), { x: MARGIN + 8, y, size: 8.5, font: bold, color: dark, maxWidth: 268 });
-    page.drawText(safeText(item.dimensions), { x: MARGIN + 8, y: y - 11, size: 7, font, color: muted, maxWidth: 268 });
+    page.drawText(safeText(`${item.dimensions}${item.pricingModel === "one_time" ? " · pago único" : ""}`), { x: MARGIN + 8, y: y - 11, size: 7, font, color: muted, maxWidth: 268 });
     page.drawText(String(item.quantity), { x: 352, y: y - 4, size: 8.5, font, color: dark });
-    page.drawText(String(item.months), { x: 390, y: y - 4, size: 8.5, font, color: dark });
+    page.drawText(item.pricingModel === "one_time" ? "-" : String(item.months), { x: 390, y: y - 4, size: 8.5, font, color: dark });
     drawRight(page, font, money(item.monthlyPriceCents), 491, y - 4, 8.5, dark);
     drawRight(page, bold, money(item.lineSubtotalCents), 549, y - 4, 8.5, dark);
     page.drawLine({ start: { x: MARGIN, y: y - 18 }, end: { x: PAGE_WIDTH - MARGIN, y: y - 18 }, thickness: 0.6, color: line });

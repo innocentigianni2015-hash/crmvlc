@@ -1,3 +1,5 @@
+export const PRICING_MODELS = ["monthly", "per_issue", "one_time"];
+
 export function calculateQuoteTotals(lines, months, taxRateBps, discountBps) {
   if (!Array.isArray(lines) || lines.length === 0) throw new Error("quote lines are required");
   if (!Number.isInteger(months) || months < 1 || months > 36) throw new Error("invalid quote duration");
@@ -9,9 +11,13 @@ export function calculateQuoteTotals(lines, months, taxRateBps, discountBps) {
     const quantity = Number(line.quantity);
     if (!Number.isSafeInteger(monthlyPriceCents) || monthlyPriceCents < 0) throw new Error("invalid monthly price");
     if (!Number.isInteger(quantity) || quantity < 1 || quantity > 99) throw new Error("invalid quantity");
-    const lineSubtotalCents = monthlyPriceCents * quantity * months;
+    const pricingModel = line.pricingModel ?? "per_issue";
+    if (!PRICING_MODELS.includes(pricingModel)) throw new Error("invalid pricing model");
+    // Le voci "una tantum" non dipendono dalla durata del preventivo: prezzo x quantita.
+    const lineMonths = pricingModel === "one_time" ? 1 : months;
+    const lineSubtotalCents = monthlyPriceCents * quantity * lineMonths;
     if (!Number.isSafeInteger(lineSubtotalCents)) throw new Error("quote amount is too large");
-    return { ...line, monthlyPriceCents, quantity, months, lineSubtotalCents };
+    return { ...line, pricingModel, monthlyPriceCents, quantity, months: lineMonths, lineSubtotalCents };
   });
 
   const subtotalCents = calculatedLines.reduce((sum, line) => sum + line.lineSubtotalCents, 0);

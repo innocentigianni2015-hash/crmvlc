@@ -101,6 +101,11 @@ export function canManagePriceList(user) {
   return user.role === "super_admin" || user.role === "admin";
 }
 
+// Creare, archiviare o cambiare struttura/modello di prezzo dei prodotti e' riservato al Super Admin.
+export function canManageCatalog(user) {
+  return user.role === "super_admin";
+}
+
 export function canManageDiscountCampaigns(user) {
   return user.role === "super_admin" || user.role === "admin";
 }

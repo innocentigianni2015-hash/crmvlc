@@ -251,7 +251,7 @@ function keyValues(ctx, rows) {
 function productTable(ctx, items) {
   tableHeader(ctx);
   for (const item of items) {
-    const description = `${item.name} · ${item.dimensions}`;
+    const description = `${item.name} · ${item.dimensions}${item.pricingModel === "one_time" ? " · pago único" : ""}`;
     const lines = wrap(latin(description), ctx.font, 8.2, 247);
     const height = Math.max(29, lines.length * 10 + 9);
     ensure(ctx, height + 20);
@@ -263,7 +263,7 @@ function productTable(ctx, items) {
       lineY -= 10;
     }
     centerText(ctx, String(item.quantity), 333, 365, ctx.y - 17, 8.2);
-    centerText(ctx, String(item.months), 365, 402, ctx.y - 17, 8.2);
+    centerText(ctx, item.pricingModel === "one_time" ? "-" : String(item.months), 365, 402, ctx.y - 17, 8.2);
     rightText(ctx, money(item.monthlyPriceCents), 470, ctx.y - 17, 8.2, ctx.font);
     rightText(ctx, money(item.lineSubtotalCents), PAGE_WIDTH - MARGIN - 7, ctx.y - 17, 8.2, ctx.bold);
     ctx.y -= height;

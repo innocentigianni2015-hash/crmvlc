@@ -33,3 +33,15 @@ test("rejects empty quotes and invalid discounts", () => {
   assert.throws(() => calculateQuoteTotals([], 1, 700, 0), /required/);
   assert.throws(() => calculateQuoteTotals([{ monthlyPriceCents: 100, quantity: 1 }], 1, 700, 10_001), /discount/);
 });
+
+test("one-time products ignore the quote duration while per-issue products multiply by it", () => {
+  const result = calculateQuoteTotals([
+    { priceItemId: "a", monthlyPriceCents: 10_000, quantity: 2, pricingModel: "per_issue" },
+    { priceItemId: "b", monthlyPriceCents: 25_000, quantity: 1, pricingModel: "one_time" },
+    { priceItemId: "c", monthlyPriceCents: 5_000, quantity: 1 },
+  ], 3, 700, 0);
+  assert.deepEqual(result.lines.map((line) => line.lineSubtotalCents), [60_000, 25_000, 15_000]);
+  assert.equal(result.lines[1].months, 1);
+  assert.equal(result.subtotalCents, 100_000);
+  assert.throws(() => calculateQuoteTotals([{ monthlyPriceCents: 1, quantity: 1, pricingModel: "weekly" }], 1, 700, 0), /pricing model/);
+});

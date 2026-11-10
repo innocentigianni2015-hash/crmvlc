@@ -569,7 +569,7 @@ export default function Home() {
       {contractModal && <ContractModal data={data} onClose={() => setContractModal(false)} onSaved={async () => { setContractModal(false); notify("Contratto archiviato come bozza."); await refresh(); }} />}
       {signing && <SignatureModal contract={signing} onClose={() => setSigning(null)} onSaved={async () => { setSigning(null); notify("Firma registrata con evidenza OTP."); await refresh(); }} />}
       {superseding && <SupersedeModal contract={superseding} onClose={() => setSuperseding(null)} onSaved={async () => { setSuperseding(null); notify("Contratto annullato e nuova versione creata."); await refresh(); }} />}
-      {editingContract && <ContractEditModal contract={editingContract} onClose={() => setEditingContract(null)} onSaved={async () => { setEditingContract(null); notify("Contratto aggiornato."); await refresh(); }} />}
+      {editingContract && <ContractEditModal contract={editingContract} catalog={data.priceItems} onClose={() => setEditingContract(null)} onSaved={async () => { setEditingContract(null); notify("Contratto aggiornato."); await refresh(); }} />}
       {deliveryModal && <DeliveryModal data={data} delivery={deliveryModal === "new" ? null : deliveryModal} onClose={() => setDeliveryModal(null)} onSaved={async () => { setDeliveryModal(null); notify(deliveryModal === "new" ? "Consegna assegnata." : "Consegna aggiornata."); await refresh(); }} />}
       {profileModal && <ProfileModal user={data.user} onClose={() => setProfileModal(false)} onSaved={async (message) => { setProfileModal(false); notify(message); await refresh(); }} />}
       {impersonationModal && <ImpersonationModal role={impersonationModal} users={data.impersonationUsers ?? []} currentUserId={data.impersonation ? data.user.id : null} onClose={() => setImpersonationModal(null)} onStarted={impersonationStarted} />}
@@ -1209,18 +1209,41 @@ function SupersedeModal({ contract, onClose, onSaved }: { contract: Contract; on
   return <Modal title="Annulla e crea nuova versione" subtitle="Il contratto firmato resterà conservato e marcato come annullato." onClose={onClose}><form className="form-grid" onSubmit={submit}><label className="span-2">Motivazione obbligatoria<textarea name="reason" required rows={3} maxLength={500} /></label><label className="span-2">Titolo nuova versione<input name="title" defaultValue={contract.title} required /></label><label className="span-2">Nuovo PDF<input type="file" name="file" accept="application/pdf" required /></label><label className="confirmation span-2 document-language-confirmation"><input type="checkbox" name="documentLanguage" value="es" required /><span><strong>Documento esclusivamente in spagnolo</strong>Confermo che tutto il contenuto del nuovo PDF è redatto in spagnolo.</span></label>{error && <div className="form-error span-2">{error}</div>}<div className="modal-actions span-2"><button type="button" onClick={onClose}>Annulla</button><button className="danger-solid" disabled={busy}>{busy ? "Creazione…" : "Annulla e crea versione"}</button></div></form></Modal>;
 }
 
-function ContractEditModal({ contract, onClose, onSaved }: { contract: Contract; onClose: () => void; onSaved: () => Promise<void> }) {
+function ContractEditModal({ contract, catalog, onClose, onSaved }: { contract: Contract; catalog: PriceItem[]; onClose: () => void; onSaved: () => Promise<void> }) {
   const [busyData, setBusyData] = useState(false); const [errorData, setErrorData] = useState("");
   const [busyNotes, setBusyNotes] = useState(false); const [errorNotes, setErrorNotes] = useState("");
   const editable = contract.status === "draft" && Boolean(contract.contract_data_json);
   let initial: Record<string, unknown> = {};
   try { initial = contract.contract_data_json ? JSON.parse(contract.contract_data_json) : {}; } catch { initial = {}; }
   const field = (key: string) => String((initial as Record<string, unknown>)[key] ?? "");
+  type ContractLine = { key: string; code: string; name: string; dimensions: string; priceCents: number; pricingModel: PricingModel; quantity: number; refresh: boolean; priceItemId?: string };
+  const [lines, setLines] = useState<ContractLine[]>(() => {
+    const items = Array.isArray((initial as { items?: unknown }).items) ? (initial as { items: Array<Record<string, unknown>> }).items : [];
+    return items.map((item) => ({ key: String(item.code), code: String(item.code), name: String(item.name), dimensions: String(item.dimensions ?? ""), priceCents: Number(item.monthlyPriceCents), pricingModel: (item.pricingModel as PricingModel) ?? "per_issue", quantity: Number(item.quantity) || 1, refresh: false }));
+  });
+  const [months, setMonths] = useState(Number((initial as { months?: unknown }).months) || 1);
+  const [addId, setAddId] = useState("");
+  const taxRateBps = Number((initial as { taxRateBps?: unknown }).taxRateBps) || 0;
+  const discountBps = Number((initial as { discountBps?: unknown }).discountBps) || 0;
+  const catalogByCode = new Map(catalog.map((item) => [item.code, item]));
+  const effectivePrice = (line: ContractLine) => line.refresh ? (catalogByCode.get(line.code)?.monthly_price_cents ?? line.priceCents) : line.priceCents;
+  const subtotal = lines.reduce((sum, line) => sum + effectivePrice(line) * line.quantity * (line.pricingModel === "one_time" ? 1 : months), 0);
+  const discount = Math.round(subtotal * discountBps / 10_000);
+  const net = subtotal - discount;
+  const total = net + Math.round(net * taxRateBps / 10_000);
+  const addable = catalog.filter((item) => !lines.some((line) => line.code === item.code));
+  function addLine() {
+    const item = catalog.find((candidate) => candidate.id === addId);
+    if (!item) return;
+    setLines((current) => [...current, { key: item.code, code: item.code, name: item.name, dimensions: item.dimensions, priceCents: item.monthly_price_cents, pricingModel: item.pricing_model, quantity: 1, refresh: false, priceItemId: item.id }]);
+    setAddId("");
+  }
   async function submitData(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusyData(true); setErrorData("");
     const form = new FormData(event.currentTarget);
     try {
-      await api(`/api/contracts/${contract.id}/update-data`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(Object.fromEntries(form.entries())) });
+      const payload = { ...Object.fromEntries(form.entries()), ...(lines.length ? { months } : {}), ...(lines.length ? { items: lines.map((line) => ({ code: line.code, quantity: line.quantity, ...(line.priceItemId ? { priceItemId: line.priceItemId } : {}), ...(line.refresh ? { refresh: true } : {}) })) } : {}) };
+      await api(`/api/contracts/${contract.id}/update-data`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
       await onSaved();
     } catch (cause) { setErrorData(cause instanceof Error ? cause.message : "Aggiornamento non riuscito."); setBusyData(false); }
   }
@@ -1248,6 +1271,16 @@ function ContractEditModal({ contract, onClose, onSaved }: { contract: Contract;
       <label>Tiratura prevista<input name="printRun" type="number" min="1" max="10000000" required defaultValue={field("printRun")} /></label>
       <label className="span-2">Zona e canali di distribuzione<textarea name="distribution" rows={2} required maxLength={500} defaultValue={field("distribution")} /></label>
       <label className="span-2">Servizio omaggio (opzionale, non modifica il contratto)<textarea name="complimentaryNote" rows={2} maxLength={500} defaultValue={field("complimentaryNote")} placeholder="Es. un mese extra di pubblicità incluso a titolo di cortesia" /></label>
+      <div className="contract-wizard-note span-2"><strong>Prodotti e prezzi</strong><span>I prezzi restano quelli concordati: spunta «Allinea al listino» per applicare il prezzo attuale. Il preventivo collegato non cambia.</span></div>
+      <div className="span-2 contract-lines">
+        {lines.map((line) => <div key={line.key} className="contract-line"><span><strong>{line.name}</strong><small>{line.dimensions} · {money(effectivePrice(line))}{pricingModelUnit[line.pricingModel]}</small></span>
+          <input aria-label={`Quantità ${line.name}`} type="number" min="1" max="99" value={line.quantity} onChange={(event) => setLines((current) => current.map((item) => item.key === line.key ? { ...item, quantity: Math.min(99, Math.max(1, Number(event.target.value) || 1)) } : item))} />
+          {catalogByCode.has(line.code) && !line.priceItemId && <label className="inline-check"><input type="checkbox" checked={line.refresh} onChange={(event) => setLines((current) => current.map((item) => item.key === line.key ? { ...item, refresh: event.target.checked } : item))} /> Allinea al listino</label>}
+          <button type="button" disabled={lines.length === 1} onClick={() => setLines((current) => current.filter((item) => item.key !== line.key))}>Rimuovi</button></div>)}
+        <div className="contract-line"><select value={addId} onChange={(event) => setAddId(event.target.value)}><option value="">Aggiungi prodotto dal listino…</option>{addable.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.dimensions} · {money(item.monthly_price_cents)}</option>)}</select><button type="button" disabled={!addId} onClick={addLine}>Aggiungi</button></div>
+      </div>
+      <label>Durata (uscite/mesi)<input type="number" min="1" max="36" value={months} onChange={(event) => setMonths(Math.min(36, Math.max(1, Number(event.target.value) || 1)))} /></label>
+      <div className="contract-summary"><span>Imponibile <strong>{money(net)}</strong></span><span>Totale con imposte <strong>{money(total)}</strong></span></div>
       <p className="form-hint span-2">Le condizioni di pagamento (acconto unico o rate per pacchetti da 6/12 uscite) sono calcolate automaticamente in base alla durata e stampate nel PDF secondo il regolamento standard.</p>
       {errorData && <div className="form-error span-2">{errorData}</div>}
       <div className="modal-actions span-2"><button className="primary" disabled={busyData}>{busyData ? "Salvataggio…" : "Salva e rigenera PDF"}</button></div>

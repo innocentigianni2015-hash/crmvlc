@@ -2150,10 +2150,59 @@ async function updateContractData(request: Request, contractId: string, user: Us
     throw new ApiError(400, "invalid_destination_url", "L'URL di destinazione deve iniziare con http:// o https://.");
   }
 
-  const months = Number(existing.months ?? 1);
+  let months = Number(existing.months ?? 1);
+  let productFields: Record<string, unknown> = {};
+  if (body.items !== undefined) {
+    // Solo le bozze: prodotti, quantita e durata si possono cambiare; i prezzi restano congelati
+    // a meno che la riga chieda esplicitamente di allinearsi al listino attuale.
+    if (!Array.isArray(body.items) || body.items.length === 0 || body.items.length > 30) {
+      throw new ApiError(400, "invalid_contract_items", "Il contratto deve contenere da 1 a 30 prodotti.");
+    }
+    months = body.months !== undefined ? positiveInteger(body.months, 36) : months;
+    const existingItems = (Array.isArray(existing.items) ? existing.items : []) as Array<Record<string, unknown>>;
+    const seenCodes = new Set<string>();
+    const lines: Array<{ code: string; name: string; dimensions: string; monthlyPriceCents: number; pricingModel: string; quantity: number }> = [];
+    for (const raw of body.items) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new ApiError(400, "invalid_contract_items", "Prodotto non valido.");
+      const entry = raw as Record<string, unknown>;
+      const quantity = positiveInteger(entry.quantity, 99);
+      const code = cleanText(entry.code, 100);
+      const priceItemId = cleanText(entry.priceItemId, 100);
+      const refresh = entry.refresh === true;
+      const current = existingItems.find((item) => item.code === code);
+      let catalogRow: PriceItemRow | null = null;
+      if (priceItemId) {
+        catalogRow = await env.DB.prepare(`SELECT ${PRICE_ITEM_COLUMNS} FROM price_items WHERE id = ? AND active = 1 LIMIT 1`).bind(priceItemId).first<PriceItemRow>();
+        if (!catalogRow) throw new ApiError(400, "invalid_contract_items", "Prodotto non presente nel listino attivo.");
+      } else if (refresh) {
+        catalogRow = await env.DB.prepare(`SELECT ${PRICE_ITEM_COLUMNS} FROM price_items WHERE code = ? LIMIT 1`).bind(code).first<PriceItemRow>();
+        if (!catalogRow) throw new ApiError(400, "invalid_contract_items", `Il prodotto ${code} non esiste più nel listino.`);
+      } else if (!current) {
+        throw new ApiError(400, "invalid_contract_items", "Prodotto non presente nel contratto.");
+      }
+      const line = catalogRow
+        ? { code: catalogRow.code, name: catalogRow.name, dimensions: catalogRow.dimensions, monthlyPriceCents: catalogRow.monthly_price_cents, pricingModel: catalogRow.pricing_model ?? "per_issue", quantity }
+        : { code: String(current?.code), name: String(current?.name), dimensions: String(current?.dimensions), monthlyPriceCents: Number(current?.monthlyPriceCents), pricingModel: String(current?.pricingModel ?? "per_issue"), quantity };
+      if (seenCodes.has(line.code)) throw new ApiError(400, "invalid_contract_items", "Ogni prodotto può comparire una sola volta.");
+      seenCodes.add(line.code);
+      lines.push(line);
+    }
+    const totals = calculateQuoteTotals(lines, months, Number(existing.taxRateBps ?? 0), Number(existing.discountBps ?? 0));
+    productFields = {
+      months,
+      items: totals.lines.map((line) => ({ code: line.code, name: line.name, dimensions: line.dimensions, monthlyPriceCents: line.monthlyPriceCents, quantity: line.quantity, months: line.months, pricingModel: line.pricingModel, lineSubtotalCents: line.lineSubtotalCents })),
+      subtotalCents: totals.subtotalCents,
+      discountCents: totals.discountCents,
+      netCents: totals.netCents,
+      taxCents: totals.taxCents,
+      totalCents: totals.totalCents,
+      itemsEditedAt: new Date().toISOString(),
+    };
+  }
   const campaignEndDate = contractEndDate(campaignStartDate, months);
   const contractData = {
     ...existing,
+    ...productFields,
     customerCompany,
     customerPhone,
     taxId,

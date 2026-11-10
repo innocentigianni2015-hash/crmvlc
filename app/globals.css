@@ -1406,3 +1406,11 @@ input[type="file"]::file-selector-button {
   .report-print-area .hub-list-row{break-inside:avoid}
   .module-card{box-shadow:none;border:1px solid #ccc;break-inside:auto}
 }
+
+.contract-lines { display: grid; gap: 8px; }
+.contract-line { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: white; }
+.contract-line > span { flex: 1 1 200px; display: grid; }
+.contract-line small { color: var(--muted, #6b7280); }
+.contract-line input[type="number"] { width: 70px; }
+.contract-line select { flex: 1 1 220px; }
+.inline-check { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }

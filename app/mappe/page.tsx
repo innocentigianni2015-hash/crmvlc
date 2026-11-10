@@ -34,6 +34,10 @@ export default function PublicDistributionMap() {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<LeafletMap | null>(null);
   const markersRef = useRef<Map<string, LeafletMarker>>(new Map());
+  const initialPointIdRef = useRef<string | null>(
+    typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("point") : null,
+  );
+  const appliedInitialPointRef = useRef(false);
 
   const load = useCallback(async (showLoading = true) => {
     if (showLoading) setLoading(true);
@@ -104,9 +108,19 @@ export default function PublicDistributionMap() {
         marker.bindPopup(
           `<strong>${escapeHtml(point.name)}</strong><br>${escapeHtml(point.address)}<br><a href="https://www.google.com/maps/search/?api=1&query=${point.latitude},${point.longitude}" target="_blank" rel="noopener noreferrer">${t.directions} ↗</a>`,
         );
-        marker.on("click", () => setSelectedPointId(point.id));
+        marker.on("click", () => focusPoint(point));
         markersRef.current.set(point.id, marker);
       });
+
+      if (!appliedInitialPointRef.current && initialPointIdRef.current) {
+        appliedInitialPointRef.current = true;
+        const target = data.points.find((point) => point.id === initialPointIdRef.current);
+        if (target) {
+          focusPoint(target, true);
+          return;
+        }
+      }
+
       if (data.points.length === 1) {
         map.setView([data.points[0].latitude, data.points[0].longitude], 15);
       } else if (data.points.length > 1) {
@@ -119,7 +133,10 @@ export default function PublicDistributionMap() {
     return () => { cancelled = true; };
   }, [data.points, t.directions]);
 
-  function selectPoint(point: Point) {
+  // Centers/pans to a point and opens its popup; on narrow (mobile) viewports also
+  // scrolls the map canvas into view, since the list sits below the map there and
+  // tapping a list row otherwise gives no visible feedback that anything happened.
+  function focusPoint(point: Point, scrollIntoView = false) {
     setSelectedPointId(point.id);
     const map = mapRef.current;
     const marker = markersRef.current.get(point.id);
@@ -127,6 +144,13 @@ export default function PublicDistributionMap() {
       map.setView([point.latitude, point.longitude], Math.max(map.getZoom(), 14));
       marker.openPopup();
     }
+    if (scrollIntoView && typeof window !== "undefined" && window.matchMedia("(max-width: 760px)").matches) {
+      mapContainerRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }
+
+  function selectPoint(point: Point) {
+    focusPoint(point, true);
   }
 
   return <main className="public-map-page">

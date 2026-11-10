@@ -453,15 +453,18 @@ export default function PublicLanding() {
                       onChange={(event) => {
                         const url = event.target.value;
                         event.target.value = "";
-                        if (url) window.open(url, "_blank", "noopener,noreferrer");
+                        // Same-tab navigation, not window.open: on mobile browsers a
+                        // native <select> change event can lose "user activation" by
+                        // the time it fires, which gets window.open() silently blocked
+                        // as a popup. A plain navigation is never blocked, and sends
+                        // the visitor straight to the internal map with this point
+                        // already selected, instead of bouncing out to Google Maps.
+                        if (url) window.location.href = url;
                       }}
                     >
                       <option value="" disabled>{t.pointsSearchPrefix} {island} ({points.length})</option>
                       {points.map((point) => (
-                        <option
-                          key={point.id}
-                          value={point.latitude != null && point.longitude != null ? `https://www.google.com/maps/search/?api=1&query=${point.latitude},${point.longitude}` : ""}
-                        >
+                        <option key={point.id} value={`/mappe?point=${encodeURIComponent(point.id)}`}>
                           {point.name}
                         </option>
                       ))}

@@ -169,14 +169,7 @@ function section(ctx, text, guardHeight = 0) {
   // guardHeight reserves room for the content that will follow this heading (capped at
   // one page's worth), so the heading is never stranded alone at the bottom of a page
   // with its content pushed entirely onto the next one.
-  if (ctx.contract) {
-    ctx.contract.__debug = ctx.contract.__debug || [];
-    ctx.contract.__debug.push(`${text} | y=${ctx.y.toFixed(1)} guard=${guardHeight.toFixed ? guardHeight.toFixed(1) : guardHeight} page=${ctx.pageNumber}`);
-  }
   ensure(ctx, 35 + Math.min(guardHeight, 560));
-  if (ctx.contract) {
-    ctx.contract.__debug.push(`${text} | after-ensure y=${ctx.y.toFixed(1)} page=${ctx.pageNumber}`);
-  }
   ctx.y -= 6;
   ctx.page.drawText(latin(text), { x: MARGIN, y: ctx.y, size: 16, font: ctx.bold, color: ctx.colors.teal });
   ctx.y -= 24;

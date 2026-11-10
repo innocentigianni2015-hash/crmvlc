@@ -2095,7 +2095,7 @@ async function updateContractData(request: Request, contractId: string, user: Us
   await env.DB.prepare("UPDATE clients SET phone = ?, tax_id = ?, fiscal_address = ?, billing_email = ?, legal_signer_name = ?, legal_signer_role = ?, version = version + 1, updated_at = ? WHERE id = ?")
     .bind(customerPhone, taxId, fiscalAddress, billingEmail, legalSignerName, legalSignerRole, now, contract.client_id).run();
   await appendAudit(env, request, user, "contract.data_updated", "contract", contract.id, { documentSha256, contractData });
-  return json({ ok: true, documentSha256, __debug: contractData.__debug });
+  return json({ ok: true, documentSha256 });
 }
 
 async function deleteDraftContract(request: Request, contractId: string, user: UserRow, env: RuntimeEnv, ctx: ExecutionContext): Promise<Response> {

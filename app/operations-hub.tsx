@@ -617,14 +617,18 @@ function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, subm
       <DataCard title="Audit fotografici" count={data.photoAudits.length}>{data.photoAudits.length ? data.photoAudits.map((row) => { const ai = photoAiSummary(row); const auditId = String(row.id); return <div className="hub-list-row audit-row" key={auditId} style={{ flexWrap: "wrap", alignItems: "flex-start" }}><PhotoAuditThumb auditId={auditId} size={64} /><div><strong>{row.distributor_name}</strong><small>{row.island} · {when(row.created_at)} · distanza {row.geofence_distance_m ?? "—"} m</small>{ai && <small className={ai.verdict === "compliant_candidate" ? "ai-pass" : "ai-review"}>AI: {ai.magazinesDetected || ai.displayDetected ? "riviste/espositore rilevati" : "contenuto da verificare"} · {ai.possibleDuplicate ? "possibile duplicato" : "nessun duplicato rilevato"} · confidenza {ai.confidence}%</small>}{row.duplicate_of_audit_id && <small className="ai-review">Hash identico a una foto già registrata.</small>}</div><b>Qualità {row.quality_score}%</b><span className={`module-status ${row.status}`}>{row.status}</span>{canManage && row.status === "pending" && <div className="inline-actions"><button disabled={busy} onClick={() => void run(() => post("/api/operations/photo-audits/review", { id: row.id, status: "approved" }), "Foto approvata.")}>Approva</button><button disabled={busy} onClick={() => void run(() => post("/api/operations/photo-audits/review", { id: row.id, status: "rejected" }), "Foto rifiutata.")}>Rifiuta</button></div>}{canManage && <PhotoAuditEditActions auditId={auditId} busy={busy} run={run} onReplace={submitPhotoAuditReplace} />}</div>; }) : <MiniEmpty text="Nessuna foto da verificare." />}</DataCard>
     </div>
     <DataCard title="Controlli ritiro" count={data.deliveryChecks.length}>{data.deliveryChecks.length ? data.deliveryChecks.map((row) => <div className="hub-list-row" key={String(row.id)}><div><strong>{row.point_name}</strong><small>{row.distributor_name ? `${row.distributor_name} · ` : ""}{when(row.created_at)} · distanza {row.geofence_distance_m ?? "—"} m</small></div><b>{row.quantity_found}/{row.quantity_left}</b><span className="module-status">prese {row.quantity_taken}</span></div>) : <MiniEmpty text="Nessun controllo di ritiro registrato." />}</DataCard>
-    {pointDetail && <DistributionPointDetailModal point={pointDetail} deliveries={deliveries} deliveryChecks={data.deliveryChecks} onClose={() => setPointDetail(null)} />}
+    {pointDetail && <DistributionPointDetailModal point={pointDetail} deliveries={deliveries} deliveryChecks={data.deliveryChecks} photoAudits={data.photoAudits} canManage={canManage} busy={busy} run={run} onClose={() => setPointDetail(null)} />}
   </div>;
 }
 
-function DistributionPointDetailModal({ point, deliveries, deliveryChecks, onClose }: {
+function DistributionPointDetailModal({ point, deliveries, deliveryChecks, photoAudits, canManage, busy, run, onClose }: {
   point: RecordRow;
   deliveries: Delivery[];
   deliveryChecks: RecordRow[];
+  photoAudits: RecordRow[];
+  canManage: boolean;
+  busy: boolean;
+  run: (action: () => Promise<unknown>, success: string, form?: HTMLFormElement) => Promise<void>;
   onClose: () => void;
 }) {
   const pointId = String(point.id);
@@ -634,6 +638,9 @@ function DistributionPointDetailModal({ point, deliveries, deliveryChecks, onClo
   const pointChecks = deliveryChecks
     .filter((check) => String(check.distribution_point_id ?? "") === pointId)
     .sort((a, b) => String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")));
+  const deliveryIds = new Set(pointDeliveries.map((delivery) => String(delivery.id)));
+  const pointAudits = photoAudits.filter((audit) => deliveryIds.has(String(audit.delivery_id ?? "")));
+  const hasPointPhoto = Number(point.has_photo) === 1;
   const totalDelivered = pointDeliveries
     .filter((delivery) => delivery.status === "delivered")
     .reduce((sum, delivery) => sum + Number(delivery.quantity ?? 0), 0);
@@ -646,6 +653,31 @@ function DistributionPointDetailModal({ point, deliveries, deliveryChecks, onClo
       <HubMetric label="Copie consegnate" value={totalDelivered} note="totale su tutte le consegne" />
       <HubMetric label="Copie prese dai lettori" value={totalTaken} note="dai controlli di ritiro" />
     </div>
+    <h3 className="point-detail-heading">Foto</h3>
+    <div className="simple-list">
+      {hasPointPhoto && <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+        <PointPhotoThumb pointId={pointId} size={96} />
+        <div style={{ flex: "1 1 160px" }}><strong>Foto del locale</strong><small style={{ display: "block" }}>Usata per riconoscere il punto.</small></div>
+        {canManage && <button type="button" disabled={busy} onClick={() => {
+          if (window.confirm("Eliminare la foto del locale? L'operazione non si può annullare.")) {
+            void run(async () => { await post("/api/operations/distribution-points/delete-photo", { id: pointId }); onClose(); }, "Foto del locale eliminata.");
+          }
+        }}>Elimina foto</button>}
+      </div>}
+      {pointAudits.map((audit) => {
+        const auditId = String(audit.id);
+        return <div key={auditId} style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <PhotoAuditThumb auditId={auditId} size={72} />
+          <div style={{ flex: "1 1 160px" }}><strong>{audit.distributor_name ?? "Distributore"}</strong><small style={{ display: "block" }}>{when(audit.created_at)} · {String(audit.status)}</small></div>
+          <button type="button" disabled={busy} onClick={() => {
+            if (window.confirm("Eliminare questa foto? L'operazione non si può annullare.")) {
+              void run(() => post("/api/operations/photo-audits/delete", { id: auditId }), "Foto eliminata.");
+            }
+          }}>Elimina</button>
+        </div>;
+      })}
+      {!hasPointPhoto && !pointAudits.length && <MiniEmpty text="Nessuna foto collegata a questa scheda." />}
+    </div>
     <h3 className="point-detail-heading">Storico consegne</h3>
     <div className="simple-list">
       {pointDeliveries.length ? pointDeliveries.map((delivery) => <div key={delivery.id}><strong>{delivery.scheduled_for ? when(delivery.scheduled_for) : "Data non indicata"}</strong><small>{delivery.distributor_name ?? "Distributore non indicato"} · {delivery.quantity ?? 0} {delivery.unit ?? "copie"}</small><span className={`delivery-status ${delivery.status}`}>{statusLabels[delivery.status] ?? delivery.status}</span></div>) : <MiniEmpty text="Nessuna consegna registrata per questo punto." />}
@@ -654,7 +686,14 @@ function DistributionPointDetailModal({ point, deliveries, deliveryChecks, onClo
     <div className="simple-list">
       {pointChecks.length ? pointChecks.map((check) => <div key={String(check.id)}><strong>{when(check.created_at)}</strong><small>{check.distributor_name ?? "Distributore non indicato"} · lasciate {check.quantity_left} · trovate {check.quantity_found}</small><span className="module-status">prese {check.quantity_taken}</span></div>) : <MiniEmpty text="Nessun controllo di ritiro registrato per questo punto." />}
     </div>
-    <div className="modal-actions" style={{ padding: "0 24px 20px" }}><button type="button" onClick={onClose}>Chiudi</button></div>
+    <div className="modal-actions" style={{ padding: "0 24px 20px" }}>
+      {canManage && <button type="button" disabled={busy} onClick={() => {
+        if (window.confirm(`Eliminare definitivamente la scheda «${String(point.name ?? "")}»? Vengono cancellati anche la foto del locale e i controlli di ritiro; lo storico consegne resta senza punto collegato. L'operazione non si può annullare.`)) {
+          void run(async () => { await post("/api/operations/distribution-points/delete", { id: pointId }); onClose(); }, "Scheda eliminata.");
+        }
+      }}>Elimina scheda</button>}
+      <button type="button" onClick={onClose}>Chiudi</button>
+    </div>
   </PointDetailModal>;
 }
 
@@ -802,7 +841,7 @@ function DistributorPointsBoard({ points, deliveries, deliveryChecks, photoAudit
         })}
     </ActionCard>
     <PointsRouteBuilder points={points} />
-    {pointDetail && <DistributionPointDetailModal point={pointDetail} deliveries={deliveries} deliveryChecks={deliveryChecks} onClose={() => setPointDetail(null)} />}
+    {pointDetail && <DistributionPointDetailModal point={pointDetail} deliveries={deliveries} deliveryChecks={deliveryChecks} photoAudits={photoAudits} canManage={false} busy={busy} run={run} onClose={() => setPointDetail(null)} />}
   </div>;
 }
 

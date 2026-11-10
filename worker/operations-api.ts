@@ -128,6 +128,12 @@ export async function handleOperationsApi(
     if (pointPhotoMatch && request.method === "GET") {
       return await servePointPhoto(env, pointPhotoMatch[1], user);
     }
+    if (url.pathname === "/api/operations/distribution-points/delete-photo" && request.method === "POST") {
+      return await deletePointPhoto(request, env, user);
+    }
+    if (url.pathname === "/api/operations/distribution-points/delete" && request.method === "POST") {
+      return await deleteDistributionPoint(request, env, user);
+    }
     if (url.pathname === "/api/operations/distribution-points/stock" && request.method === "POST") {
       return await updateDistributionStock(request, env, user);
     }
@@ -218,10 +224,10 @@ async function operationsSnapshot(env: RuntimeEnv, user: OperationsUser): Promis
   const nowIsoForDue = new Date().toISOString();
   const distributionPoints = user.role === "distributor"
     ? (await env.DB.prepare(
-      "SELECT x.id, x.client_id, c.company_name AS client_company, x.name, x.island, x.address, x.latitude_e6, x.longitude_e6, x.capacity, x.stock, x.public_visible, x.self_registered, x.created_by, x.next_check_due_at, x.area, x.location_status, x.assigned_distributor_user_id, u.name AS assigned_distributor_name, u.email AS assigned_distributor_email, x.updated_at FROM distribution_points x LEFT JOIN clients c ON c.id = x.client_id LEFT JOIN users u ON u.id = x.assigned_distributor_user_id WHERE x.island = ? AND (x.public_visible = 1 OR (x.location_status = 'pending' AND x.assigned_distributor_user_id = ?)) ORDER BY CASE x.location_status WHEN 'pending' THEN 0 ELSE 1 END, (x.next_check_due_at IS NOT NULL AND x.next_check_due_at <= ?) DESC, x.next_check_due_at IS NULL, x.next_check_due_at, x.name LIMIT 300",
+      "SELECT x.id, x.client_id, c.company_name AS client_company, x.name, x.island, x.address, x.latitude_e6, x.longitude_e6, x.capacity, x.stock, x.public_visible, x.self_registered, x.created_by, x.next_check_due_at, x.area, (x.point_photo_r2_key IS NOT NULL) AS has_photo, x.location_status, x.assigned_distributor_user_id, u.name AS assigned_distributor_name, u.email AS assigned_distributor_email, x.updated_at FROM distribution_points x LEFT JOIN clients c ON c.id = x.client_id LEFT JOIN users u ON u.id = x.assigned_distributor_user_id WHERE x.island = ? AND (x.public_visible = 1 OR (x.location_status = 'pending' AND x.assigned_distributor_user_id = ?)) ORDER BY CASE x.location_status WHEN 'pending' THEN 0 ELSE 1 END, (x.next_check_due_at IS NOT NULL AND x.next_check_due_at <= ?) DESC, x.next_check_due_at IS NULL, x.next_check_due_at, x.name LIMIT 300",
     ).bind(String(user.island ?? ""), user.id, nowIsoForDue).all()).results
     : (await env.DB.prepare(
-      `SELECT x.id, x.client_id, c.company_name AS client_company, x.name, x.island, x.address, x.latitude_e6, x.longitude_e6, x.capacity, x.stock, x.public_visible, x.self_registered, x.created_by, x.next_check_due_at, x.area, x.location_status, x.assigned_distributor_user_id, u.name AS assigned_distributor_name, u.email AS assigned_distributor_email, x.updated_at FROM distribution_points x LEFT JOIN clients c ON c.id = x.client_id LEFT JOIN users u ON u.id = x.assigned_distributor_user_id WHERE 1 = 1${islandScope.sql} ORDER BY CASE x.location_status WHEN 'pending' THEN 0 ELSE 1 END, x.island, x.stock, x.name LIMIT 300`,
+      `SELECT x.id, x.client_id, c.company_name AS client_company, x.name, x.island, x.address, x.latitude_e6, x.longitude_e6, x.capacity, x.stock, x.public_visible, x.self_registered, x.created_by, x.next_check_due_at, x.area, (x.point_photo_r2_key IS NOT NULL) AS has_photo, x.location_status, x.assigned_distributor_user_id, u.name AS assigned_distributor_name, u.email AS assigned_distributor_email, x.updated_at FROM distribution_points x LEFT JOIN clients c ON c.id = x.client_id LEFT JOIN users u ON u.id = x.assigned_distributor_user_id WHERE 1 = 1${islandScope.sql} ORDER BY CASE x.location_status WHEN 'pending' THEN 0 ELSE 1 END, x.island, x.stock, x.name LIMIT 300`,
     ).bind(...islandScope.values).all()).results;
 
   const checkScope = isGlobalOperator(user) ? { sql: "", values: [] as string[] }
@@ -1052,6 +1058,49 @@ async function deletePhotoAudit(request: Request, env: RuntimeEnv, user: Operati
   ]);
   await appendOperationsAudit(env, request, user, "photo_audit.deleted", "photo_audit", id, { previousStatus: row.status, r2Key: row.r2_key });
   return json({ id, deleted: true });
+}
+
+async function managedPoint(env: RuntimeEnv, user: OperationsUser, rawId: unknown) {
+  requireManager(user);
+  const id = clean(rawId, 80);
+  if (!id) throw new OperationsError(400, "invalid_id", "Punto non valido.");
+  const point = await env.DB.prepare("SELECT id, name, island, point_photo_r2_key FROM distribution_points WHERE id = ? LIMIT 1")
+    .bind(id).first<{ id: string; name: string; island: string; point_photo_r2_key: string | null }>();
+  if (!point || !canAccessIsland(user, point.island)) throw new OperationsError(404, "point_not_found", "Punto di distribuzione non trovato.");
+  return point;
+}
+
+async function deletePointPhoto(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  const body = await readJson<Record<string, unknown>>(request);
+  const point = await managedPoint(env, user, body.id);
+  if (!point.point_photo_r2_key) throw new OperationsError(404, "photo_not_found", "Questo punto non ha una foto.");
+  const now = new Date().toISOString();
+  await env.DB.batch([
+    env.DB.prepare("UPDATE distribution_points SET point_photo_r2_key = NULL, updated_at = ? WHERE id = ?").bind(now, point.id),
+    env.DB.prepare("INSERT OR IGNORE INTO r2_deletion_queue (r2_key, source, created_at, attempts) VALUES (?, 'point_photo_deleted', ?, 0)").bind(point.point_photo_r2_key, now),
+  ]);
+  await appendOperationsAudit(env, request, user, "distribution_point.photo_deleted", "distribution_point", point.id, { name: point.name, r2Key: point.point_photo_r2_key });
+  return json({ id: point.id, photoDeleted: true });
+}
+
+async function deleteDistributionPoint(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  const body = await readJson<Record<string, unknown>>(request);
+  const point = await managedPoint(env, user, body.id);
+  const open = await env.DB.prepare("SELECT COUNT(*) AS n FROM deliveries WHERE distribution_point_id = ? AND status != 'delivered'").bind(point.id).first<{ n: number }>();
+  if ((open?.n ?? 0) > 0) {
+    throw new OperationsError(409, "point_has_open_deliveries", `Il punto ha ${open?.n} consegne ancora aperte: chiudile o riassegnale prima di eliminare la scheda.`);
+  }
+  const checks = (await env.DB.prepare("SELECT r2_key FROM delivery_checks WHERE distribution_point_id = ?").bind(point.id).all<{ r2_key: string }>()).results;
+  const now = new Date().toISOString();
+  const keys = [...new Set([...(point.point_photo_r2_key ? [point.point_photo_r2_key] : []), ...checks.map((check) => check.r2_key)])];
+  await env.DB.batch([
+    ...keys.map((key) => env.DB.prepare("INSERT OR IGNORE INTO r2_deletion_queue (r2_key, source, created_at, attempts) VALUES (?, 'point_deleted', ?, 0)").bind(key, now)),
+    env.DB.prepare("DELETE FROM delivery_checks WHERE distribution_point_id = ?").bind(point.id),
+    env.DB.prepare("UPDATE deliveries SET distribution_point_id = NULL, updated_at = ? WHERE distribution_point_id = ?").bind(now, point.id),
+    env.DB.prepare("DELETE FROM distribution_points WHERE id = ?").bind(point.id),
+  ]);
+  await appendOperationsAudit(env, request, user, "distribution_point.deleted", "distribution_point", point.id, { name: point.name, island: point.island, removedChecks: checks.length });
+  return json({ id: point.id, deleted: true });
 }
 
 async function replacePhotoAudit(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {

@@ -28,51 +28,55 @@ export async function buildContractPdf(contract) {
 
   callout(ctx, "EL ACUERDO EN 30 SEGUNDOS", `${contract.customerCompany} contrata los productos publicitarios enumerados en este acuerdo durante ${contract.months} ${contract.months === 1 ? "mes" : "meses"}. Importe total: ${money(contract.totalCents)}, impuestos incluidos.`);
 
-  section(ctx, "Quién firma");
-  keyValues(ctx, [
+  const signerRows = [
     ["Editor", "CANARY 360 & COMUNICATION S.L. · NIF B56378318 · Avenida Las Américas 8, Local 396-E, 38640 Arona, Tenerife"],
     ["Firmante del Editor", "Marco Notarbartolo · Director Canarias"],
     ["Cliente", contract.customerCompany],
     ["Datos fiscales del Cliente", `${contract.taxId} · ${contract.fiscalAddress}`],
     ["Firmante del Cliente", `${contract.legalSignerName} · ${contract.legalSignerRole}`],
-  ]);
+  ];
+  section(ctx, "Quién firma", keyValuesHeight(ctx, signerRows));
+  keyValues(ctx, signerRows);
   paragraph(ctx, "El Cliente confirma que contrata los servicios para su actividad comercial o profesional.", { after: 12 });
 
-  section(ctx, "Productos y precio acordados");
+  section(ctx, "Productos y precio acordados", 90);
   productTable(ctx, contract.items);
   totals(ctx, contract);
 
   const plan = paymentPlan(contract.months, contract.netCents);
 
-  section(ctx, "Fechas y ejecución");
-  keyValues(ctx, [
+  const scheduleRows = [
     ["Fecha prevista de inicio", formatDate(contract.campaignStartDate)],
     ["Fecha prevista de finalización", formatDate(contract.campaignEndDate)],
     ["Duración comercial", `${contract.months} ${contract.months === 1 ? "mes" : "meses"}`],
     ["Pago", plan.summaryLine],
     ["Inicio", "Tras la recepción del pago, los materiales y la aprobación del Cliente"],
     ["Impuestos", `${contract.taxName} al ${formatPercent(contract.taxRateBps)} aplicado sobre la base imponible`],
-  ]);
+  ];
+  section(ctx, "Fechas y ejecución", keyValuesHeight(ctx, scheduleRows));
+  keyValues(ctx, scheduleRows);
 
-  section(ctx, "Condiciones de pago");
-  numbered(ctx, [
+  const paymentTerms = [
     "Pago de las inserciones publicitarias. Para una salida única o un paquete de 3 salidas, el importe íntegro debe abonarse antes de la primera publicación. Los artículos relacionados, si los hubiera, deben abonarse antes de la salida en la que se publiquen.",
     "Pago de los paquetes de 6 y 12 salidas. El paquete de 6 salidas se abona en 2 cuotas, cada una equivalente a 3 salidas: una antes de la salida n.º 1 y otra antes de la salida n.º 4. El paquete de 12 salidas se abona en 4 cuotas, cada una equivalente a 3 salidas, antes de las salidas n.º 1, 4, 7 y 10. Cada cuota se calcula sobre el importe imponible (sin impuestos) del acuerdo. Los plazos siguen las salidas programadas, aunque no sean consecutivas, y no los trimestres naturales. El compromiso de compra del paquete completo se mantiene en cualquier caso. La publicación queda supeditada a la recepción del pago correspondiente y a la aprobación del material.",
     "Aprobación de calidad de las piezas gráficas. Todas las piezas gráficas, incluidas las sustituciones, deben cumplir los estándares de calidad de la publicación y ser aprobadas antes de su publicación. La evaluación considera legibilidad, resolución de las imágenes, maquetación, dimensiones e idoneidad para impresión.",
     "Envío del material antes del pago. Se recomienda enviar la pieza gráfica con antelación para verificar su idoneidad y evitar el pago de una inserción cuyo material aún no haya sido aprobado. El pago no implica la aprobación de la pieza gráfica.",
     "Servicio de diseño gráfico con presupuesto separado. Si la calidad no es adecuada, la publicación pone a disposición su propio servicio de diseño gráfico. Este servicio tiene coste adicional, no incluido en los precios de las inserciones y los paquetes, y se inicia únicamente tras la aceptación de un presupuesto separado con costes, plazos y condiciones de pago.",
-  ]);
+  ];
+  section(ctx, "Condiciones de pago", firstListItemHeight(ctx, paymentTerms));
+  numbered(ctx, paymentTerms);
   callout(ctx, "CALENDARIO DE PAGO DE ESTE ACUERDO", plan.schedule.join(" "));
 
-  section(ctx, "Datos operativos de la campaña");
-  keyValues(ctx, [
+  const campaignRows = [
     ["Enlace de destino", contract.destinationUrl],
     ["Edición impresa", contract.printEdition],
     ["Tirada prevista", `${contract.printRun} ejemplares`],
     ["Distribución", contract.distribution],
     ["Isla comercial", contract.island],
     ["Referencia", contract.quoteNumber],
-  ]);
+  ];
+  section(ctx, "Datos operativos de la campaña", keyValuesHeight(ctx, campaignRows));
+  keyValues(ctx, campaignRows);
 
   if (contract.complimentaryNote) {
     callout(
@@ -82,28 +86,31 @@ export async function buildContractPdf(contract) {
     );
   }
 
-  section(ctx, "Cómo empezamos");
-  numbered(ctx, [
+  const onboardingSteps = [
     "El Cliente envía el logotipo, las imágenes, los textos, el enlace y los datos de contacto al menos 7 días laborables antes de la fecha de inicio.",
     "El Editor revisa los materiales y prepara las piezas correspondientes a los productos contratados.",
     "El Cliente aprueba las piezas por correo electrónico. Se incluyen dos rondas de cambios, salvo condición distinta indicada expresamente en el presupuesto.",
     "La ejecución comienza cuando se han recibido el pago, los materiales y la aprobación final.",
     "Si el Cliente entrega o aprueba con retraso, las fechas se desplazan por el mismo periodo sin incumplimiento del Editor.",
-  ]);
+  ];
+  section(ctx, "Cómo empezamos", firstListItemHeight(ctx, onboardingSteps));
+  numbered(ctx, onboardingSteps);
 
-  section(ctx, "Requisitos de materiales");
-  bulletList(ctx, [
+  const materialRequirements = [
     "Los archivos deberán entregarse en JPG, PNG, WebP o PDF con resolución y dimensiones adecuadas al producto adquirido.",
     "El Cliente facilitará textos, identidad visual, datos de contacto y URL de destino correctos y actualizados.",
     "Las adaptaciones razonables para visualización móvil están incluidas cuando el formato contratado tenga versión digital.",
     "Los requisitos técnicos específicos indicados en el presupuesto o por el equipo de producción forman parte del acuerdo.",
-  ]);
+  ];
+  section(ctx, "Requisitos de materiales", firstListItemHeight(ctx, materialRequirements));
+  bulletList(ctx, materialRequirements);
 
-  section(ctx, "Alcance y resultados");
-  paragraph(ctx, "El Editor garantiza la prestación y publicación de los espacios o servicios descritos en el presente acuerdo. No garantiza ventas, contactos, facturación, posicionamiento en buscadores ni otros resultados comerciales. Las métricas se facilitarán únicamente cuando el soporte contratado permita obtenerlas.");
+  const scopeIntro = "El Editor garantiza la prestación y publicación de los espacios o servicios descritos en el presente acuerdo. No garantiza ventas, contactos, facturación, posicionamiento en buscadores ni otros resultados comerciales. Las métricas se facilitarán únicamente cuando el soporte contratado permita obtenerlas.";
+  section(ctx, "Alcance y resultados", paragraphHeight(ctx, scopeIntro));
+  paragraph(ctx, scopeIntro);
   paragraph(ctx, "Cuando exista contenido patrocinado, se identificará claramente como publicidad o colaboración comercial. La permanencia, rotación y ubicación serán las descritas en el producto contratado y en el presupuesto vinculado.");
 
-  section(ctx, "Condiciones comerciales");
+  section(ctx, "Condiciones comerciales", legalParagraphHeight(ctx, "Contenidos y derechos.", "El Cliente garantiza que los textos, imágenes, marcas, enlaces y mensajes entregados son lícitos, veraces y pueden utilizarse. El Editor podrá rechazar contenidos ilícitos, engañosos, discriminatorios o perjudiciales."));
   legalParagraph(ctx, "Contenidos y derechos.", "El Cliente garantiza que los textos, imágenes, marcas, enlaces y mensajes entregados son lícitos, veraces y pueden utilizarse. El Editor podrá rechazar contenidos ilícitos, engañosos, discriminatorios o perjudiciales.");
   legalParagraph(ctx, "Uso de los contenidos.", "Una vez efectuado el pago, el Cliente podrá volver a publicar las piezas finales creadas específicamente para la campaña en sus propios canales, citando a Vivi le Canarie cuando corresponda y respetando derechos de terceros.");
   legalParagraph(ctx, "Cambios y aprobaciones.", "Los cambios, fechas y aprobaciones deberán constar por escrito, incluido el correo electrónico. Las solicitudes que excedan las rondas incluidas podrán presupuestarse por separado.");
@@ -117,15 +124,17 @@ export async function buildContractPdf(contract) {
   callout(ctx, "ACLARACIÓN IMPORTANTE", "El contacto comercial puede gestionar el proyecto, pero el documento debe firmarlo una persona con poder suficiente para obligar legalmente al Cliente.");
 
   addPage(ctx);
-  section(ctx, "Contactos");
-  keyValues(ctx, [
+  const contactRows = [
     ["Contacto del Editor", "Marco Notarbartolo · Director Canarias"],
     ["Contacto del Cliente", `${contract.legalSignerName} · ${contract.customerEmail} · ${contract.customerPhone}`],
     ["Correo de facturación", contract.billingEmail],
-  ]);
+  ];
+  section(ctx, "Contactos", keyValuesHeight(ctx, contactRows));
+  keyValues(ctx, contactRows);
 
-  section(ctx, "Confirmación y firmas");
-  paragraph(ctx, "Las Partes confirman que han leído y aceptan el presente acuerdo comercial y el presupuesto vinculado.", { after: 20 });
+  const confirmationIntro = "Las Partes confirman que han leído y aceptan el presente acuerdo comercial y el presupuesto vinculado.";
+  section(ctx, "Confirmación y firmas", paragraphHeight(ctx, confirmationIntro, 9.5) + 150);
+  paragraph(ctx, confirmationIntro, { after: 20 });
   signatureBlocks(ctx, contract);
 
   paragraph(ctx, "La firma del Cliente se completará mediante código OTP enviado por correo electrónico, firma manuscrita en pantalla y confirmación presencial del agente. CRMVLC añadirá al PDF firmado el certificado técnico y conservará la evidencia de auditoría.", { size: 8.5, color: colors.muted, after: 0 });
@@ -156,8 +165,18 @@ function heading(ctx, text, size, color) {
   ctx.y -= size + 13;
 }
 
-function section(ctx, text) {
-  ensure(ctx, 35);
+function section(ctx, text, guardHeight = 0) {
+  // guardHeight reserves room for the content that will follow this heading (capped at
+  // one page's worth), so the heading is never stranded alone at the bottom of a page
+  // with its content pushed entirely onto the next one.
+  if (ctx.contract) {
+    ctx.contract.__debug = ctx.contract.__debug || [];
+    ctx.contract.__debug.push(`${text} | y=${ctx.y.toFixed(1)} guard=${guardHeight.toFixed ? guardHeight.toFixed(1) : guardHeight} page=${ctx.pageNumber}`);
+  }
+  ensure(ctx, 35 + Math.min(guardHeight, 560));
+  if (ctx.contract) {
+    ctx.contract.__debug.push(`${text} | after-ensure y=${ctx.y.toFixed(1)} page=${ctx.pageNumber}`);
+  }
   ctx.y -= 6;
   ctx.page.drawText(latin(text), { x: MARGIN, y: ctx.y, size: 16, font: ctx.bold, color: ctx.colors.teal });
   ctx.y -= 24;
@@ -189,11 +208,36 @@ function callout(ctx, title, text) {
   ctx.y -= height + 15;
 }
 
-function keyValues(ctx, rows) {
-  const prepared = rows.map(([label, value]) => {
+function keyValuesRows(ctx, rows) {
+  return rows.map(([label, value]) => {
     const valueRows = wrap(latin(value), ctx.font, 8.7, CONTENT_WIDTH - 165);
     return { label, valueRows, height: Math.max(24, valueRows.length * 11 + 9) };
   });
+}
+
+function keyValuesHeight(ctx, rows) {
+  return keyValuesRows(ctx, rows).reduce((sum, row) => sum + row.height, 0) + 12;
+}
+
+function firstListItemHeight(ctx, items, size = 9.2, indent = 32) {
+  if (!items.length) return 0;
+  const rows = wrap(latin(items[0]), ctx.font, size, CONTENT_WIDTH - indent);
+  return rows.length * 12 + 7;
+}
+
+function paragraphHeight(ctx, text, size = 9.5) {
+  const lineHeight = size + 3.2;
+  const rows = wrap(latin(text), ctx.font, size, CONTENT_WIDTH);
+  return rows.length * lineHeight + 9;
+}
+
+function legalParagraphHeight(ctx, title, text) {
+  const rows = wrap(latin(`${title} ${text}`), ctx.font, 9.2, CONTENT_WIDTH);
+  return rows.length * 12 + 9;
+}
+
+function keyValues(ctx, rows) {
+  const prepared = keyValuesRows(ctx, rows);
   const totalHeight = prepared.reduce((sum, row) => sum + row.height, 0) + 12;
   if (totalHeight < 560) ensure(ctx, totalHeight);
   for (const { label, valueRows, height } of prepared) {

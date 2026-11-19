@@ -1,4 +1,5 @@
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import { documentLineFigures, PROMOTIONAL_SERVICE_CLAUSE, PROMOTIONAL_SERVICE_LABEL } from "./quote-calculations.js";
 
 const PAGE_WIDTH = 595.28;
 const PAGE_HEIGHT = 841.89;
@@ -33,68 +34,98 @@ export async function buildQuotePdf(quote) {
   page.drawText(`Fecha: ${formatDate(quote.createdAt)}`, { x: 350, y, size: 9, font, color: dark });
   y -= 17;
   page.drawText(safeText(quote.customerContact), { x: MARGIN, y, size: 9, font, color: muted, maxWidth: 270 });
-  page.drawText(`Valido hasta: ${formatDate(quote.validUntil)}`, { x: 350, y, size: 9, font, color: dark });
+  page.drawText(`Válido hasta: ${formatDate(quote.validUntil)}`, { x: 350, y, size: 9, font, color: dark });
   y -= 15;
   page.drawText(safeText(quote.customerEmail), { x: MARGIN, y, size: 9, font, color: muted, maxWidth: 270 });
   page.drawText(`Isla: ${safeText(quote.island)}`, { x: 350, y, size: 9, font, color: dark });
   y -= 15;
-  page.drawText(`Duracion comercial: ${quote.months} ${quote.months === 1 ? "mes" : "meses"}`, { x: 350, y, size: 9, font, color: dark });
+  page.drawText(`Duración comercial: ${quote.months} ${quote.months === 1 ? "mes" : "meses"}`, { x: 350, y, size: 9, font, color: dark });
 
   y = 602;
-  page.drawRectangle({ x: MARGIN, y, width: PAGE_WIDTH - (MARGIN * 2), height: 24, color: pale });
-  page.drawText("DESCRIPCION", { x: MARGIN + 8, y: y + 8, size: 7.5, font: bold, color: muted });
-  page.drawText("CANT.", { x: 348, y: y + 8, size: 7.5, font: bold, color: muted });
-  page.drawText("MESI", { x: 383, y: y + 8, size: 7.5, font: bold, color: muted });
-  page.drawText("PRECIO/MES", { x: 423, y: y + 8, size: 7.5, font: bold, color: muted });
-  page.drawText("TOTALE", { x: 512, y: y + 8, size: 7.5, font: bold, color: muted });
+  const figures = documentLineFigures(quote.items, quote.discountBps, quote.discountCents);
+  const tableHeader = (target, top) => {
+    target.drawRectangle({ x: MARGIN, y: top, width: PAGE_WIDTH - (MARGIN * 2), height: 24, color: pale });
+    target.drawText("DESCRIPCIÓN", { x: MARGIN + 8, y: top + 8, size: 7.2, font: bold, color: muted });
+    target.drawText("CANT.", { x: 286, y: top + 8, size: 7.2, font: bold, color: muted });
+    target.drawText("MESES", { x: 317, y: top + 8, size: 7.2, font: bold, color: muted });
+    drawRight(target, bold, "PRECIO/MES", 418, top + 8, 7.2, muted);
+    drawRight(target, bold, "IMPORTE", 482, top + 8, 7.2, muted);
+    drawRight(target, bold, "DTO.", PAGE_WIDTH - MARGIN, top + 8, 7.2, muted);
+  };
+  let current = page;
+  const newPage = () => {
+    current = pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+    return PAGE_HEIGHT - 70;
+  };
+  tableHeader(current, y);
   y -= 23;
 
-  for (const item of quote.items) {
-    page.drawText(safeText(item.name), { x: MARGIN + 8, y, size: 8.5, font: bold, color: dark, maxWidth: 268 });
-    page.drawText(safeText(`${item.dimensions}${item.pricingModel === "one_time" ? " · pago único" : ""}${item.complimentary ? " · incluido como obsequio" : ""}`), { x: MARGIN + 8, y: y - 11, size: 7, font, color: muted, maxWidth: 268 });
-    page.drawText(String(item.quantity), { x: 352, y: y - 4, size: 8.5, font, color: dark });
-    page.drawText(item.pricingModel === "one_time" ? "-" : String(item.months), { x: 390, y: y - 4, size: 8.5, font, color: dark });
-    drawRight(page, font, money(item.monthlyPriceCents), 491, y - 4, 8.5, dark);
-    drawRight(page, bold, item.complimentary ? "OMAGGIO" : money(item.lineSubtotalCents), 549, y - 4, 8.5, dark);
-    page.drawLine({ start: { x: MARGIN, y: y - 18 }, end: { x: PAGE_WIDTH - MARGIN, y: y - 18 }, thickness: 0.6, color: line });
-    y -= 31;
+  for (const item of figures.lines) {
+    const detail = `${item.dimensions}${item.pricingModel === "one_time" ? " · pago único" : ""}${item.complimentary ? " ·" : ""}`;
+    const detailRows = wrapWidth(safeText(detail), font, 7, 225);
+    const plainRows = detailRows.length;
+    if (item.complimentary) detailRows.push(...wrapWidth(safeText(PROMOTIONAL_SERVICE_LABEL), font, 7, 225));
+    const rowHeight = Math.max(31, 22 + detailRows.length * 9);
+    if (y - rowHeight < 90) { y = newPage(); tableHeader(current, y); y -= 23; }
+    current.drawText(safeText(item.name), { x: MARGIN + 8, y, size: 8.5, font: bold, color: dark, maxWidth: 230 });
+    detailRows.forEach((row, index) => current.drawText(row, { x: MARGIN + 8, y: y - 11 - index * 9, size: 7, font, color: index >= plainRows ? coral : muted }));
+    current.drawText(String(item.quantity), { x: 292, y: y - 4, size: 8.5, font, color: dark });
+    current.drawText(item.pricingModel === "one_time" ? "-" : String(item.months), { x: 323, y: y - 4, size: 8.5, font, color: dark });
+    drawRight(current, font, money(item.monthlyPriceCents), 418, y - 4, 8.2, dark);
+    drawRight(current, font, money(item.grossCents), 482, y - 4, 8.2, dark);
+    if (item.discountCents > 0 || item.complimentary) {
+      drawRight(current, bold, percent(item.discountBps), PAGE_WIDTH - MARGIN, y - 4, 8.2, coral);
+      drawRight(current, font, `-${money(item.discountCents)}`, PAGE_WIDTH - MARGIN, y - 13, 6.6, muted);
+    } else {
+      drawRight(current, font, "-", PAGE_WIDTH - MARGIN, y - 4, 8.2, muted);
+    }
+    current.drawLine({ start: { x: MARGIN, y: y - rowHeight + 13 }, end: { x: PAGE_WIDTH - MARGIN, y: y - rowHeight + 13 }, thickness: 0.6, color: line });
+    y -= rowHeight;
   }
 
-  const totalsTop = Math.max(126, y - 2);
-  const totalsX = 356;
-  drawTotal(page, font, muted, "Subtotal", money(quote.subtotalCents), totalsX, totalsTop);
-  let totalsY = totalsTop - 18;
-  if (quote.discountCents > 0) {
-    drawTotal(page, font, coral, `Descuento ${(quote.discountBps / 100).toLocaleString("es-ES")}%`, `-${money(quote.discountCents)}`, totalsX, totalsY);
+  const totalRows = [["Importe bruto", money(figures.grossCents), muted]];
+  if (figures.commercialDiscountCents > 0) totalRows.push([`Descuento comercial ${percent(figures.commercialDiscountBps)}`, `-${money(figures.commercialDiscountCents)}`, coral]);
+  if (figures.promotionalCents > 0) totalRows.push(["Bonificación promocional 100 %", `-${money(figures.promotionalCents)}`, coral]);
+  if (figures.totalDiscountCents > 0) totalRows.push(["Total descuentos", `-${money(figures.totalDiscountCents)}`, coral]);
+  totalRows.push(["Base imponible", money(quote.netCents), muted]);
+  totalRows.push([`${safeText(quote.taxName)} ${percent(quote.taxRateBps)}`, money(quote.taxCents), muted]);
+  const totalsHeight = totalRows.length * 18 + 30;
+  if (y - 2 - totalsHeight < 80) y = newPage();
+  const totalsX = 330;
+  let totalsY = y - 2;
+  for (const [label, value, color] of totalRows) {
+    drawTotal(current, label === "Total descuentos" ? bold : font, color, safeText(label), value, totalsX, totalsY);
     totalsY -= 18;
   }
-  drawTotal(page, font, muted, "Base imponible", money(quote.netCents), totalsX, totalsY);
-  totalsY -= 18;
-  drawTotal(page, font, muted, `${safeText(quote.taxName)} ${(quote.taxRateBps / 100).toLocaleString("es-ES")}%`, money(quote.taxCents), totalsX, totalsY);
-  totalsY -= 27;
-  page.drawLine({ start: { x: totalsX, y: totalsY + 18 }, end: { x: PAGE_WIDTH - MARGIN, y: totalsY + 18 }, thickness: 1, color: dark });
-  page.drawText("TOTALE", { x: totalsX, y: totalsY, size: 11, font: bold, color: dark });
-  drawRight(page, bold, money(quote.totalCents), PAGE_WIDTH - MARGIN, totalsY, 15, coral);
+  totalsY -= 9;
+  current.drawLine({ start: { x: totalsX, y: totalsY + 18 }, end: { x: PAGE_WIDTH - MARGIN, y: totalsY + 18 }, thickness: 1, color: dark });
+  current.drawText("TOTAL", { x: totalsX, y: totalsY, size: 11, font: bold, color: dark });
+  drawRight(current, bold, money(quote.totalCents), PAGE_WIDTH - MARGIN, totalsY, 15, coral);
 
   const notes = [];
   if (quote.customerNote) notes.push(`Notas: ${quote.customerNote}`);
-  if (quote.discountReason) notes.push(`Motivo del descuento: ${quote.discountReason}`);
+  if (quote.discountReason && figures.commercialDiscountCents > 0) notes.push(`Motivo del descuento: ${quote.discountReason}`);
+  if (figures.hasPromotional) notes.push(PROMOTIONAL_SERVICE_CLAUSE);
   notes.push(`Precios netos. ${quote.taxName} aplicado por separado.`);
-  notes.push("La conversion en el CRM genera un borrador contractual que debe verificarse y someterse a firma con OTP.");
-  let noteY = Math.min(178, totalsY - 8);
+  notes.push("La conversión en el CRM genera un borrador contractual que debe verificarse y someterse a firma con OTP.");
+  let noteY = totalsY - 26;
   for (const paragraph of notes) {
-    for (const row of wrapText(safeText(paragraph), 72)) {
-      page.drawText(row, { x: MARGIN, y: noteY, size: 7.5, font, color: muted });
+    const rows = wrapWidth(safeText(paragraph), font, 7.5, PAGE_WIDTH - MARGIN * 2);
+    if (noteY - rows.length * 10 < 70) noteY = newPage();
+    for (const row of rows) {
+      current.drawText(row, { x: MARGIN, y: noteY, size: 7.5, font, color: muted });
       noteY -= 10;
     }
     noteY -= 3;
   }
 
-  page.drawLine({ start: { x: MARGIN, y: 55 }, end: { x: PAGE_WIDTH - MARGIN, y: 55 }, thickness: 0.7, color: line });
-  page.drawText("Canary 360 & Comunication SL · B56378318 · Avenida Las Americas 8, Local 396E, Arona, Santa Cruz de Tenerife", { x: MARGIN, y: 42, size: 6.2, font, color: muted });
-  page.drawText("+34 822 140 134 · info@vivilecanarie.com · crmvlc.com", { x: MARGIN, y: 31, size: 6.2, font, color: muted });
-  page.drawText("Plataforma creada, desarrollada y propiedad de Canary 360 & Comunication SL.", { x: MARGIN, y: 20, size: 5.6, font, color: muted });
-  drawRight(page, font, safeText(quote.quoteNumber), PAGE_WIDTH - MARGIN, 31, 6.2, muted);
+  for (const target of pdf.getPages()) {
+    target.drawLine({ start: { x: MARGIN, y: 55 }, end: { x: PAGE_WIDTH - MARGIN, y: 55 }, thickness: 0.7, color: line });
+    target.drawText("Canary 360 & Comunication SL · B56378318 · Avenida Las Américas 8, Local 396E, Arona, Santa Cruz de Tenerife", { x: MARGIN, y: 42, size: 6.2, font, color: muted });
+    target.drawText("+34 822 140 134 · info@vivilecanarie.com · crmvlc.com", { x: MARGIN, y: 31, size: 6.2, font, color: muted });
+    target.drawText("Plataforma creada, desarrollada y propiedad de Canary 360 & Comunication SL.", { x: MARGIN, y: 20, size: 5.6, font, color: muted });
+    drawRight(target, font, safeText(quote.quoteNumber), PAGE_WIDTH - MARGIN, 31, 6.2, muted);
+  }
 
   pdf.setTitle(`Presupuesto ${safeText(quote.quoteNumber)}`);
   pdf.setAuthor("Canary 360 & Comunication SL");
@@ -117,7 +148,12 @@ function drawTotal(page, font, color, label, value, x, y) {
 }
 
 function money(cents) {
-  return `${(Number(cents) / 100).toLocaleString("es-ES", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} EUR`;
+  // Formato spagnolo con separatore delle migliaia anche sotto 10.000 (es. 1.632,00 EUR).
+  const value = Number(cents) || 0;
+  const sign = value < 0 ? "-" : "";
+  const absolute = Math.abs(Math.round(value));
+  const units = String(Math.floor(absolute / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  return `${sign}${units},${String(absolute % 100).padStart(2, "0")} EUR`;
 }
 
 function formatDate(value) {
@@ -126,21 +162,31 @@ function formatDate(value) {
 }
 
 function safeText(value) {
-  return String(value ?? "").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^\x20-\x7E\xA0-\xFF]/g, "?");
+  return String(value ?? "")
+    .normalize("NFC")
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2013\u2014]/g, "-")
+    .replace(/[\u2000-\u200F\u2060\uFEFF]/g, "")
+    .replace(/[^\x20-\x7E\xA0-\xFF]/g, "?");
 }
 
-function wrapText(value, maxCharacters) {
-  const words = value.split(/\s+/).filter(Boolean);
+function percent(bps) {
+  return `${(Number(bps) / 100).toLocaleString("es-ES", { maximumFractionDigits: 2 })} %`;
+}
+
+function wrapWidth(value, font, size, maxWidth) {
+  const words = String(value).split(/\s+/).filter(Boolean);
   const rows = [];
   let row = "";
   for (const word of words) {
     const candidate = row ? `${row} ${word}` : word;
-    if (candidate.length <= maxCharacters) row = candidate;
+    if (font.widthOfTextAtSize(candidate, size) <= maxWidth) row = candidate;
     else {
       if (row) rows.push(row);
-      row = word.slice(0, maxCharacters);
+      row = word;
     }
   }
   if (row) rows.push(row);
-  return rows.slice(0, 5);
+  return rows;
 }

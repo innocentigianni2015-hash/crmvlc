@@ -1,9 +1,12 @@
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import { documentLineFigures, PROMOTIONAL_SERVICE_CLAUSE, PROMOTIONAL_SERVICE_LABEL } from "./quote-calculations.js";
 
 const PAGE_WIDTH = 595.28;
 const PAGE_HEIGHT = 841.89;
 const MARGIN = 46;
 const CONTENT_WIDTH = PAGE_WIDTH - MARGIN * 2;
+// Nei documenti compaiono solo nome e cognome, senza qualifiche.
+const EDITOR_SIGNER_NAME = "Marco Notarbartolo";
 
 export async function buildContractPdf(contract) {
   const pdf = await PDFDocument.create();
@@ -30,18 +33,19 @@ export async function buildContractPdf(contract) {
 
   const signerRows = [
     ["Editor", "CANARY 360 & COMUNICATION S.L. · NIF B56378318 · Avenida Las Américas 8, Local 396-E, 38640 Arona, Tenerife"],
-    ["Firmante del Editor", "Marco Notarbartolo · Director Canarias"],
+    ["Firmante del Editor", EDITOR_SIGNER_NAME],
     ["Cliente", contract.customerCompany],
     ["Datos fiscales del Cliente", `${contract.taxId} · ${contract.fiscalAddress}`],
-    ["Firmante del Cliente", `${contract.legalSignerName} · ${contract.legalSignerRole}`],
+    ["Firmante del Cliente", contract.legalSignerName],
   ];
   section(ctx, "Quién firma", keyValuesHeight(ctx, signerRows));
   keyValues(ctx, signerRows);
   paragraph(ctx, "El Cliente confirma que contrata los servicios para su actividad comercial o profesional.", { after: 12 });
 
   section(ctx, "Productos y precio acordados", 90);
-  productTable(ctx, contract.items);
-  totals(ctx, contract);
+  const figures = documentLineFigures(contract.items, contract.discountBps, contract.discountCents);
+  productTable(ctx, figures.lines);
+  totals(ctx, contract, figures);
 
   const plan = paymentPlan(contract.months, contract.netCents);
 
@@ -68,7 +72,7 @@ export async function buildContractPdf(contract) {
   callout(ctx, "CALENDARIO DE PAGO DE ESTE ACUERDO", plan.schedule.join(" "));
 
   const campaignRows = [
-    ["Enlace de destino", contract.destinationUrl],
+    ["Enlace de destino", String(contract.destinationUrl ?? "").replace(/\/$/, "")],
     ["Edición impresa", contract.printEdition],
     ["Tirada prevista", `${contract.printRun} ejemplares`],
     ["Distribución", contract.distribution],
@@ -78,7 +82,13 @@ export async function buildContractPdf(contract) {
   section(ctx, "Datos operativos de la campaña", keyValuesHeight(ctx, campaignRows));
   keyValues(ctx, campaignRows);
 
-  if (contract.complimentaryNote) {
+  if (figures.hasPromotional) {
+    callout(
+      ctx,
+      "SERVICIO PROMOCIONAL INCLUIDO",
+      `${contract.complimentaryNote ? `${contract.complimentaryNote} ` : ""}${PROMOTIONAL_SERVICE_CLAUSE}`,
+    );
+  } else if (contract.complimentaryNote) {
     callout(
       ctx,
       "SERVICIO DE CORTESÍA (NO CONTRACTUAL)",
@@ -125,7 +135,7 @@ export async function buildContractPdf(contract) {
 
   addPage(ctx);
   const contactRows = [
-    ["Contacto del Editor", "Marco Notarbartolo · Director Canarias"],
+    ["Contacto del Editor", EDITOR_SIGNER_NAME],
     ["Contacto del Cliente", `${contract.legalSignerName} · ${contract.customerEmail} · ${contract.customerPhone}`],
     ["Correo de facturación", contract.billingEmail],
   ];
@@ -251,9 +261,10 @@ function keyValues(ctx, rows) {
 function productTable(ctx, items) {
   tableHeader(ctx);
   for (const item of items) {
-    const description = `${item.name} · ${item.dimensions}${item.pricingModel === "one_time" ? " · pago único" : ""}${item.complimentary ? " · incluido como obsequio" : ""}`;
-    const lines = wrap(latin(description), ctx.font, 8.2, 247);
-    const height = Math.max(29, lines.length * 10 + 9);
+    const headline = `${item.name} · ${item.dimensions}${item.pricingModel === "one_time" ? " · pago único" : ""}${item.complimentary ? " ·" : ""}`;
+    const lines = wrap(latin(headline), ctx.font, 8.2, 212);
+    const promoLines = item.complimentary ? wrap(latin(PROMOTIONAL_SERVICE_LABEL), ctx.bold, 7.6, 212) : [];
+    const height = Math.max(31, (lines.length + promoLines.length) * 10 + 11);
     ensure(ctx, height + 20);
     if (ctx.y > PAGE_HEIGHT - 100) tableHeader(ctx);
     ctx.page.drawLine({ start: { x: MARGIN, y: ctx.y - height }, end: { x: PAGE_WIDTH - MARGIN, y: ctx.y - height }, thickness: 0.5, color: ctx.colors.line });
@@ -262,10 +273,20 @@ function productTable(ctx, items) {
       ctx.page.drawText(line, { x: MARGIN + 7, y: lineY, size: 8.2, font: ctx.font, color: ctx.colors.dark });
       lineY -= 10;
     }
-    centerText(ctx, String(item.quantity), 333, 365, ctx.y - 17, 8.2);
-    centerText(ctx, item.pricingModel === "one_time" ? "-" : String(item.months), 365, 402, ctx.y - 17, 8.2);
-    rightText(ctx, money(item.monthlyPriceCents), 470, ctx.y - 17, 8.2, ctx.font);
-    rightText(ctx, item.complimentary ? "OBSEQUIO" : money(item.lineSubtotalCents), PAGE_WIDTH - MARGIN - 7, ctx.y - 17, 8.2, ctx.bold);
+    for (const line of promoLines) {
+      ctx.page.drawText(line, { x: MARGIN + 7, y: lineY, size: 7.6, font: ctx.bold, color: ctx.colors.teal });
+      lineY -= 10;
+    }
+    centerText(ctx, String(item.quantity), 262, 292, ctx.y - 17, 8.2);
+    centerText(ctx, item.pricingModel === "one_time" ? "-" : String(item.months), 292, 324, ctx.y - 17, 8.2);
+    rightText(ctx, money(item.monthlyPriceCents), 392, ctx.y - 17, 8, ctx.font);
+    rightText(ctx, money(item.grossCents), 466, ctx.y - 17, 8, ctx.font);
+    if (item.discountCents > 0 || item.complimentary) {
+      rightText(ctx, formatPercent(item.discountBps), PAGE_WIDTH - MARGIN - 7, ctx.y - 17, 8, ctx.bold, ctx.colors.teal);
+      rightText(ctx, `-${money(item.discountCents)}`, PAGE_WIDTH - MARGIN - 7, ctx.y - 26, 6.6, ctx.font, ctx.colors.muted);
+    } else {
+      rightText(ctx, "-", PAGE_WIDTH - MARGIN - 7, ctx.y - 17, 8, ctx.font, ctx.colors.muted);
+    }
     ctx.y -= height;
   }
   ctx.y -= 10;
@@ -274,23 +295,28 @@ function productTable(ctx, items) {
 function tableHeader(ctx) {
   ensure(ctx, 28);
   ctx.page.drawRectangle({ x: MARGIN, y: ctx.y - 24, width: CONTENT_WIDTH, height: 24, color: ctx.colors.soft });
-  const labels = [["DESCRIPCIÓN", MARGIN + 7], ["CANT.", 334], ["MESES", 368], ["PRECIO/MES", 411], ["TOTAL", 511]];
-  for (const [label, x] of labels) ctx.page.drawText(label, { x, y: ctx.y - 15, size: 7, font: ctx.bold, color: ctx.colors.muted });
+  const labels = [["DESCRIPCIÓN", MARGIN + 7], ["CANT.", 266], ["MESES", 295]];
+  for (const [label, x] of labels) ctx.page.drawText(latin(label), { x, y: ctx.y - 15, size: 7, font: ctx.bold, color: ctx.colors.muted });
+  for (const [label, right] of [["PRECIO/MES", 392], ["IMPORTE", 466], ["DTO.", PAGE_WIDTH - MARGIN - 7]]) {
+    rightText(ctx, label, right, ctx.y - 15, 7, ctx.bold, ctx.colors.muted);
+  }
   ctx.y -= 24;
 }
 
-function totals(ctx, data) {
-  const rows = [["Subtotal", data.subtotalCents]];
-  if (data.discountCents > 0) rows.push([`Descuento ${formatPercent(data.discountBps)}`, -data.discountCents]);
-  rows.push(["Base imponible", data.netCents], [`${data.taxName} ${formatPercent(data.taxRateBps)}`, data.taxCents]);
+function totals(ctx, data, figures) {
+  const rows = [["Importe bruto", figures.grossCents, false]];
+  if (figures.commercialDiscountCents > 0) rows.push([`Descuento comercial ${formatPercent(figures.commercialDiscountBps)}`, -figures.commercialDiscountCents, false]);
+  if (figures.promotionalCents > 0) rows.push(["Bonificación promocional 100 %", -figures.promotionalCents, false]);
+  if (figures.totalDiscountCents > 0) rows.push(["Total descuentos", -figures.totalDiscountCents, true]);
+  rows.push(["Base imponible", data.netCents, false], [`${data.taxName} ${formatPercent(data.taxRateBps)}`, data.taxCents, false]);
   ensure(ctx, rows.length * 17 + 35);
-  for (const [label, value] of rows) {
-    ctx.page.drawText(latin(label), { x: 345, y: ctx.y, size: 8.5, font: ctx.font, color: ctx.colors.muted });
-    rightText(ctx, `${value < 0 ? "-" : ""}${money(Math.abs(value))}`, PAGE_WIDTH - MARGIN, ctx.y, 8.5, ctx.font);
+  for (const [label, value, strong] of rows) {
+    ctx.page.drawText(latin(label), { x: 330, y: ctx.y, size: 8.5, font: strong ? ctx.bold : ctx.font, color: ctx.colors.muted });
+    rightText(ctx, `${value < 0 ? "-" : ""}${money(Math.abs(value))}`, PAGE_WIDTH - MARGIN, ctx.y, 8.5, strong ? ctx.bold : ctx.font);
     ctx.y -= 17;
   }
-  ctx.page.drawLine({ start: { x: 345, y: ctx.y + 7 }, end: { x: PAGE_WIDTH - MARGIN, y: ctx.y + 7 }, thickness: 1, color: ctx.colors.teal });
-  ctx.page.drawText("TOTAL", { x: 345, y: ctx.y - 9, size: 10, font: ctx.bold, color: ctx.colors.dark });
+  ctx.page.drawLine({ start: { x: 330, y: ctx.y + 7 }, end: { x: PAGE_WIDTH - MARGIN, y: ctx.y + 7 }, thickness: 1, color: ctx.colors.teal });
+  ctx.page.drawText("TOTAL", { x: 330, y: ctx.y - 9, size: 10, font: ctx.bold, color: ctx.colors.dark });
   rightText(ctx, money(data.totalCents), PAGE_WIDTH - MARGIN, ctx.y - 9, 12, ctx.bold, ctx.colors.teal);
   ctx.y -= 35;
 }
@@ -334,14 +360,13 @@ function signatureBlocks(ctx, data) {
   const gap = 24;
   const width = (CONTENT_WIDTH - gap) / 2;
   const blocks = [
-    { x: MARGIN, title: "POR EL EDITOR", name: "Marco Notarbartolo", role: "Director Canarias", note: "Aceptación del Editor" },
-    { x: MARGIN + width + gap, title: "POR EL CLIENTE", name: data.legalSignerName, role: data.legalSignerRole, note: "Firma OTP pendiente" },
+    { x: MARGIN, title: "POR EL EDITOR", name: EDITOR_SIGNER_NAME, note: "Aceptación del Editor" },
+    { x: MARGIN + width + gap, title: "POR EL CLIENTE", name: data.legalSignerName, note: "Firma OTP pendiente" },
   ];
   for (const block of blocks) {
     ctx.page.drawText(block.title, { x: block.x, y: ctx.y, size: 9.5, font: ctx.bold, color: ctx.colors.teal });
     ctx.page.drawText(latin(`Nombre: ${block.name}`), { x: block.x, y: ctx.y - 25, size: 8.7, font: ctx.font, color: ctx.colors.dark, maxWidth: width });
-    ctx.page.drawText(latin(`Cargo: ${block.role}`), { x: block.x, y: ctx.y - 42, size: 8.7, font: ctx.font, color: ctx.colors.dark, maxWidth: width });
-    ctx.page.drawText(`Fecha: ${formatDate(data.generatedAt)}`, { x: block.x, y: ctx.y - 59, size: 8.7, font: ctx.font, color: ctx.colors.dark });
+    ctx.page.drawText(`Fecha: ${formatDate(data.generatedAt)}`, { x: block.x, y: ctx.y - 42, size: 8.7, font: ctx.font, color: ctx.colors.dark });
     ctx.page.drawLine({ start: { x: block.x, y: ctx.y - 104 }, end: { x: block.x + width, y: ctx.y - 104 }, thickness: 0.7, color: ctx.colors.line });
     ctx.page.drawText(block.note, { x: block.x, y: ctx.y - 117, size: 7.5, font: ctx.font, color: ctx.colors.muted });
   }
@@ -410,7 +435,12 @@ function paymentPlan(months, netCents) {
 }
 
 function money(cents) {
-  return `${(Number(cents) / 100).toLocaleString("es-ES", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} EUR`;
+  // Formato spagnolo con separatore delle migliaia anche sotto 10.000 (es. 1.632,00 EUR).
+  const value = Number(cents) || 0;
+  const sign = value < 0 ? "-" : "";
+  const absolute = Math.abs(Math.round(value));
+  const units = String(Math.floor(absolute / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  return `${sign}${units},${String(absolute % 100).padStart(2, "0")} EUR`;
 }
 
 function formatPercent(bps) {

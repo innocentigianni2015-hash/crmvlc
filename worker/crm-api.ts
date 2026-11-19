@@ -2195,6 +2195,11 @@ async function updateContractData(request: Request, contractId: string, user: Us
       const line = catalogRow
         ? { code: catalogRow.code, name: catalogRow.name, dimensions: catalogRow.dimensions, monthlyPriceCents: catalogRow.monthly_price_cents, pricingModel: catalogRow.pricing_model ?? "per_issue", quantity, complimentary }
         : { code: String(current?.code), name: String(current?.name), dimensions: String(current?.dimensions), monthlyPriceCents: Number(current?.monthlyPriceCents), pricingModel: String(current?.pricingModel ?? "per_issue"), quantity, complimentary };
+      if (!catalogRow) {
+        // Il prezzo resta quello concordato, ma nome e descrizione seguono il listino attuale (es. traduzione in spagnolo).
+        const labels = await env.DB.prepare("SELECT name, dimensions FROM price_items WHERE code = ? LIMIT 1").bind(code).first<{ name: string; dimensions: string }>();
+        if (labels) { line.name = labels.name; line.dimensions = labels.dimensions; }
+      }
       if (seenCodes.has(line.code)) throw new ApiError(400, "invalid_contract_items", "Ogni prodotto può comparire una sola volta.");
       seenCodes.add(line.code);
       lines.push(line);

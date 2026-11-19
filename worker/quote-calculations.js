@@ -36,3 +36,45 @@ export function formatQuoteNumber(year, sequence) {
   if (!Number.isInteger(sequence) || sequence < 1 || sequence > 999_999) throw new Error("invalid quote sequence");
   return `VLC-${year}-${String(sequence).padStart(4, "0")}`;
 }
+
+// Righe e totali "da documento" (preventivo e contratto): ogni riga mostra l'importo pieno, lo sconto applicato
+// e il netto. Le righe promozionali (omaggio) hanno importo pieno e bonificazione del 100 %; lo sconto commerciale
+// del documento viene ripartito sulle righe a pagamento in proporzione all'importo, così la somma delle righe
+// coincide sempre con il totale dello sconto. Funziona anche con i documenti già emessi (omaggio salvato a 0).
+export const PROMOTIONAL_SERVICE_LABEL = "Servicio promocional incluido en acuerdo comercial (Bonificación 100%)";
+export const PROMOTIONAL_SERVICE_CLAUSE = "El servicio promocional incluido sin cargo forma parte integrante de la oferta comercial vinculada a la contratación principal.";
+
+export function documentLineFigures(items, discountBps, discountCents) {
+  const commercialBps = Number(discountBps) || 0;
+  const commercialCents = Math.max(0, Number(discountCents) || 0);
+  const lines = (Array.isArray(items) ? items : []).map((item) => {
+    const complimentary = item.complimentary === true || item.complimentary === 1;
+    const months = item.pricingModel === "one_time" ? 1 : Number(item.months) || 1;
+    const grossCents = complimentary
+      ? Number(item.monthlyPriceCents) * Number(item.quantity) * months
+      : Number(item.lineSubtotalCents) || 0;
+    return { ...item, complimentary, grossCents, discountBps: complimentary ? 10_000 : commercialBps, discountCents: complimentary ? grossCents : 0 };
+  });
+  const paid = lines.filter((line) => !line.complimentary);
+  const paidTotal = paid.reduce((sum, line) => sum + line.grossCents, 0);
+  let allocated = 0;
+  paid.forEach((line, index) => {
+    const share = index === paid.length - 1
+      ? commercialCents - allocated
+      : paidTotal > 0 ? Math.floor(commercialCents * line.grossCents / paidTotal) : 0;
+    line.discountCents = share;
+    allocated += share;
+  });
+  for (const line of lines) line.netCents = line.grossCents - line.discountCents;
+  const grossCents = lines.reduce((sum, line) => sum + line.grossCents, 0);
+  const promotionalCents = lines.filter((line) => line.complimentary).reduce((sum, line) => sum + line.grossCents, 0);
+  return {
+    lines,
+    grossCents,
+    commercialDiscountCents: commercialCents,
+    commercialDiscountBps: commercialBps,
+    promotionalCents,
+    totalDiscountCents: commercialCents + promotionalCents,
+    hasPromotional: promotionalCents > 0 || lines.some((line) => line.complimentary),
+  };
+}

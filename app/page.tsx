@@ -1096,11 +1096,11 @@ function ContractGenerationModal({ quote, client, busy, onClose, onGenerate }: {
     <label>Carica del firmatario<input name="legalSignerRole" required maxLength={120} defaultValue={client?.legal_signer_role ?? ""} placeholder="Administrador / Apoderado" /></label>
     <label>Telefono del cliente<input name="customerPhone" type="tel" required maxLength={40} defaultValue={client?.phone ?? ""} /></label>
     <label>Data inizio campagna<input name="campaignStartDate" type="date" required defaultValue={tomorrow.toISOString().slice(0, 10)} /></label>
-    <label className="span-2">URL di destinazione<input name="destinationUrl" type="url" required maxLength={500} placeholder="https://azienda.es" /></label>
+    <label className="span-2">URL di destinazione<input name="destinationUrl" type="url" required maxLength={500} defaultValue="https://www.vivilecanarie.com" /></label>
     <label>Edizione impresa<input name="printEdition" required maxLength={120} placeholder="N. 12 · settembre 2026" /></label>
     <label>Tiratura prevista<input name="printRun" type="number" min="1" max="10000000" required placeholder="10000" /></label>
-    <label className="span-2">Zona e canali di distribuzione<textarea name="distribution" rows={2} required maxLength={500} placeholder="Tenerife · hotel, ristoranti e punti autorizzati" /></label>
-    <label className="span-2">Servizio omaggio (opzionale, non modifica il contratto)<textarea name="complimentaryNote" rows={2} maxLength={500} placeholder="Es. un mese extra di pubblicità incluso a titolo di cortesia" /></label>
+    <label className="span-2">Zona e canali di distribuzione<textarea name="distribution" rows={2} required maxLength={500} defaultValue="Islas Canarias" /></label>
+    <label className="span-2">Nota servizio promozionale / omaggio (in spagnolo: finisce nel PDF)<textarea name="complimentaryNote" rows={2} maxLength={500} placeholder="Ej.: Promoción Pasaporte incluida durante 1 año." /></label>
     <p className="form-hint span-2">Le condizioni di pagamento (acconto unico o rate per pacchetti da 6/12 uscite) sono calcolate automaticamente e stampate nel PDF secondo il regolamento standard.</p>
     <div className="contract-summary span-2"><span>Durata <strong>{quote.months} mesi</strong></span><span>Imponibile <strong>{money(quote.net_cents)}</strong></span><span>{quote.tax_name} <strong>{money(quote.tax_cents)}</strong></span><span>Totale <strong>{money(quote.total_cents)}</strong></span></div>
     <label className="confirmation span-2 document-language-confirmation"><input type="checkbox" required /><span><strong>Confermo i dati contrattuali</strong>Il contratto sarà generato esclusivamente in spagnolo e collegato in modo immutabile al preventivo.</span></label>
@@ -1275,7 +1275,7 @@ function ContractEditModal({ contract, catalog, onClose, onSaved }: { contract: 
       <label>Edizione impresa<input name="printEdition" required maxLength={120} defaultValue={field("printEdition")} /></label>
       <label>Tiratura prevista<input name="printRun" type="number" min="1" max="10000000" required defaultValue={field("printRun")} /></label>
       <label className="span-2">Zona e canali di distribuzione<textarea name="distribution" rows={2} required maxLength={500} defaultValue={field("distribution")} /></label>
-      <label className="span-2">Servizio omaggio (opzionale, non modifica il contratto)<textarea name="complimentaryNote" rows={2} maxLength={500} defaultValue={field("complimentaryNote")} placeholder="Es. un mese extra di pubblicità incluso a titolo di cortesia" /></label>
+      <label className="span-2">Nota servizio promozionale / omaggio (in spagnolo: finisce nel PDF)<textarea name="complimentaryNote" rows={2} maxLength={500} defaultValue={field("complimentaryNote")} placeholder="Ej.: Promoción Pasaporte incluida durante 1 año." /></label>
       <div className="contract-wizard-note span-2"><strong>Prodotti e prezzi</strong><span>I prezzi restano quelli concordati: spunta «Allinea al listino» per applicare il prezzo attuale. Il preventivo collegato non cambia.</span></div>
       <div className="span-2 contract-lines">
         {lines.map((line) => <div key={line.key} className="contract-line"><span><strong>{line.name}</strong><small>{line.dimensions} · {money(effectivePrice(line))}{pricingModelUnit[line.pricingModel]}</small></span>

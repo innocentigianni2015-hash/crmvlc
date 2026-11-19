@@ -138,6 +138,9 @@ export async function handleOperationsApi(
     if (url.pathname === "/api/operations/distribution-points/delete" && request.method === "POST") {
       return await deleteDistributionPoint(request, env, user);
     }
+    if (url.pathname === "/api/operations/distribution-points/past-refill" && request.method === "POST") {
+      return await registerPastRefill(request, env, user);
+    }
     if (url.pathname === "/api/operations/distribution-points/stock" && request.method === "POST") {
       return await updateDistributionStock(request, env, user);
     }
@@ -737,6 +740,7 @@ async function getDistributionPointDetail(env: RuntimeEnv, pointId: string, user
     `SELECT dc.id, dc.delivery_id, dc.quantity_left, dc.quantity_found, dc.quantity_taken, dc.geofence_distance_m, dc.notes, dc.created_at, dc.distributor_user_id, u.name AS distributor_name FROM delivery_checks dc JOIN users u ON u.id = dc.distributor_user_id WHERE dc.distribution_point_id = ?${ownCheck} ORDER BY dc.created_at DESC`,
   ).bind(id, ...ownValues).all<{ quantity_taken: number; created_at: string }>()).results;
   const delivered = deliveries.filter((row) => row.status === "delivered");
+  const isDeclared = (row: Record<string, unknown>) => String(row.notes ?? "").startsWith(PAST_REFILL_NOTE);
   const copiesDelivered = delivered.reduce((sum, row) => sum + Number(row.quantity ?? 0), 0);
   const copiesTaken = checks.reduce((sum, row) => sum + Number(row.quantity_taken ?? 0), 0);
   const refillDates = delivered.map((row) => row.completed_at ?? row.created_at).sort();
@@ -746,7 +750,8 @@ async function getDistributionPointDetail(env: RuntimeEnv, pointId: string, user
     copiesDelivered,
     copiesTaken,
     averagePerRefill: delivered.length ? Math.round(copiesDelivered / delivered.length) : 0,
-    refillsWithoutPhoto: delivered.filter((row) => !row.audit_id).length,
+    refillsWithoutPhoto: delivered.filter((row) => !row.audit_id && !isDeclared(row)).length,
+    declaredRefills: delivered.filter((row) => isDeclared(row)).length,
     checks: checks.length,
     firstRefillAt: refillDates[0] ?? null,
     lastRefillAt: refillDates[refillDates.length - 1] ?? null,
@@ -853,6 +858,55 @@ async function selfRegisterDistributionPoint(request: Request, env: RuntimeEnv, 
 
   await appendOperationsAudit(env, request, user, "distribution_point.self_registered", "distribution_point", pointId, { name, address, quantity, unit, reminderDays, deliveryId, auditId, photoStatus: photoReview.status, autoApproved: photoReview.autoApproved, publicVisible: locationStatus === "complete", locationStatus, locationSource, duplicateOfAuditId: duplicate?.id ?? null, addressVerified, addressDistanceM, geocodedAddress: geocode?.formattedAddress ?? null });
   return json({ id: pointId, deliveryId, auditId, status: photoReview.status, autoApproved: photoReview.autoApproved, publicVisible: locationStatus === "complete", locationStatus, locationSource, nextCheckDueAt, addressVerified, addressDistanceM, geocodedAddress: geocode?.formattedAddress ?? null, addressMismatch }, 201);
+}
+
+const PAST_REFILL_NOTE = "Rifornimento passato dichiarato dal Distributore, senza foto.";
+const PAST_REFILL_MAX_DAYS = 90;
+
+// Rifornimento già consegnato in passato e mai arrivato nel CRM: il distributore lo dichiara con data e copie,
+// senza foto né GPS. Resta riconoscibile come "dichiarato" nello storico e nei totali.
+async function registerPastRefill(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  if (user.role !== "distributor" || !user.island) throw new OperationsError(403, "not_allowed", "La registrazione di rifornimenti passati è riservata ai Distributori.");
+  const body = await readJson<Record<string, unknown>>(request);
+  const pointId = clean(body.distributionPointId, 80);
+  const quantity = positiveInt(body.quantity, 1_000_000);
+  const unit = clean(body.unit, 30) || "copie";
+  const date = clean(body.date, 10);
+  const extraNote = cleanOptional(body.notes, 300);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(Date.parse(`${date}T12:00:00Z`))) throw new OperationsError(400, "invalid_date", "Indica la data della consegna.");
+  const today = canaryDateKey(new Date());
+  if (date > today) throw new OperationsError(400, "future_date", "La data non può essere nel futuro: per le consegne di oggi usa «Rifornisci» con la foto.");
+  const oldest = canaryDateKey(new Date(Date.now() - PAST_REFILL_MAX_DAYS * 86_400_000));
+  if (date < oldest) throw new OperationsError(400, "date_too_old", `Puoi registrare rifornimenti passati fino a ${PAST_REFILL_MAX_DAYS} giorni fa.`);
+
+  const point = await env.DB.prepare(
+    "SELECT p.id, p.client_id, p.name, p.island, p.address, p.created_at, p.public_visible, p.location_status, p.assigned_distributor_user_id, c.contact_name, c.email, c.phone FROM distribution_points p LEFT JOIN clients c ON c.id = p.client_id WHERE p.id = ? AND p.island = ? LIMIT 1",
+  ).bind(pointId, user.island).first<{ id: string; client_id: string | null; name: string; island: string; address: string; created_at: string; public_visible: number; location_status: string | null; assigned_distributor_user_id: string | null; contact_name: string | null; email: string | null; phone: string | null }>();
+  const visible = point && (point.public_visible === 1 || (point.location_status === "pending" && point.assigned_distributor_user_id === user.id));
+  if (!point || !visible) throw new OperationsError(404, "point_not_found", "Scegli un punto di distribuzione valido per la tua isola.");
+  const pointCreatedDay = canaryDateKey(new Date(point.created_at));
+  if (date < pointCreatedDay) throw new OperationsError(400, "before_point_created", `Il punto è stato registrato il ${pointCreatedDay.split("-").reverse().join("/")}: la data non può essere precedente.`);
+
+  const existing = await env.DB.prepare(
+    "SELECT id FROM deliveries WHERE distribution_point_id = ? AND distributor_user_id = ? AND scheduled_for = ? AND quantity = ? LIMIT 1",
+  ).bind(point.id, user.id, date, quantity).first<{ id: string }>();
+  if (existing) throw new OperationsError(409, "already_registered", `Risulta già un rifornimento di ${quantity} ${unit} il ${date.split("-").reverse().join("/")} per questo punto.`);
+
+  // La giacenza sale solo se dopo quella data non c'è stato un controllo di ritiro (che ha già contato le copie presenti).
+  const lastCheck = await env.DB.prepare("SELECT MAX(created_at) AS at FROM delivery_checks WHERE distribution_point_id = ?").bind(point.id).first<{ at: string | null }>();
+  const addToStock = !lastCheck?.at || canaryDateKey(new Date(lastCheck.at)) < date;
+  const id = crypto.randomUUID();
+  const nowIso = new Date().toISOString();
+  const completedAt = `${date}T12:00:00.000Z`;
+  const notes = extraNote ? `${PAST_REFILL_NOTE} ${extraNote}` : PAST_REFILL_NOTE;
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO deliveries (id, client_id, distributor_user_id, distribution_point_id, island, status, quantity, unit, scheduled_for, delivery_contact_name, delivery_contact_email, delivery_contact_phone, delivery_address, notes, version, created_by, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'delivered', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
+    ).bind(id, point.client_id, user.id, point.id, point.island, quantity, unit, date, point.contact_name, point.email, point.phone, point.address, notes, user.id, completedAt, nowIso, nowIso),
+    ...(addToStock ? [env.DB.prepare("UPDATE distribution_points SET stock = stock + ?, updated_at = ? WHERE id = ?").bind(quantity, nowIso, point.id)] : []),
+  ]);
+  await appendOperationsAudit(env, request, user, "delivery.past_refill_registered", "delivery", id, { pointId: point.id, pointName: point.name, date, quantity, unit, addedToStock: addToStock, withoutPhoto: true });
+  return json({ id, date, quantity, unit, addedToStock: addToStock }, 201);
 }
 
 async function createDeliveryCheck(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {

@@ -12,7 +12,7 @@ type Delivery = {
   id: string; client_company?: string | null; island: string; status: string; distributor_user_id?: string; distributor_name?: string;
   scheduled_for?: string | null; quantity?: number; unit?: string; distribution_point_id?: string | null; distribution_point_name?: string | null;
   distribution_point_address?: string | null; distribution_point_latitude_e6?: number | null; distribution_point_longitude_e6?: number | null;
-  created_at?: string; completed_at?: string | null;
+  created_at?: string; completed_at?: string | null; notes?: string | null;
 };
 type RecordRow = Record<string, string | number | null>;
 type BulkUploadMode = "existing" | "pending";
@@ -660,7 +660,7 @@ type PointDetail = {
   checks: RecordRow[];
   totals: {
     refills: number; openDeliveries: number; copiesDelivered: number; copiesTaken: number; averagePerRefill: number;
-    refillsWithoutPhoto: number; checks: number; firstRefillAt: string | null; lastRefillAt: string | null; lastCheckAt: string | null; distributors: string[];
+    refillsWithoutPhoto: number; declaredRefills: number; checks: number; firstRefillAt: string | null; lastRefillAt: string | null; lastCheckAt: string | null; distributors: string[];
   };
   scope: "all" | "own";
 };
@@ -716,6 +716,7 @@ function DistributionPointDetailModal({ point, canManage, busy, run, onClose }: 
       <HubMetric label="Copie prese dai lettori" value={totals ? totals.copiesTaken : "…"} note={totals ? `${totals.checks} controlli di ritiro` : ""} />
       <HubMetric label="Giacenza attuale" value={`${info.stock ?? 0}`} note={info.capacity ? `su ${info.capacity} di capacità` : "copie presenti ora"} />
     </div>
+    {totals && totals.declaredRefills > 0 && <p className="form-microcopy" style={{ margin: "8px 24px 0" }}>{totals.declaredRefills} rifornimenti dichiarati dal distributore senza foto (registrati in un secondo momento).</p>}
     {totals && totals.refillsWithoutPhoto > 0 && <p className="form-microcopy" style={{ margin: "8px 24px 0" }}>{totals.refillsWithoutPhoto} rifornimenti senza foto di consegna: controllali nello storico qui sotto.</p>}
     {detail?.scope === "own" && <p className="form-microcopy" style={{ margin: "8px 24px 0" }}>Vedi i tuoi rifornimenti e controlli su questo punto.</p>}
 
@@ -729,7 +730,7 @@ function DistributionPointDetailModal({ point, canManage, busy, run, onClose }: 
       {!detail ? <MiniEmpty text="Caricamento storico…" /> : detail.deliveries.length ? detail.deliveries.map((delivery) => {
         const auditId = delivery.audit_id ? String(delivery.audit_id) : "";
         return <div key={String(delivery.id)} style={{ gridTemplateColumns: "auto minmax(0, 1fr) auto" }}>
-          {auditId ? <PhotoAuditThumb auditId={auditId} size={52} /> : <span className="ai-review" style={{ fontSize: 9, width: 52, textAlign: "center" }}>senza foto</span>}
+          {auditId ? <PhotoAuditThumb auditId={auditId} size={52} /> : String(delivery.notes ?? "").startsWith("Rifornimento passato dichiarato") ? <span className="module-status" style={{ fontSize: 9, width: 52, textAlign: "center" }}>dichiarato</span> : <span className="ai-review" style={{ fontSize: 9, width: 52, textAlign: "center" }}>senza foto</span>}
           <div><strong>{day(delivery.completed_at ?? delivery.created_at)} · {delivery.quantity ?? 0} {delivery.unit ?? "copie"}</strong><small>{delivery.distributor_name ?? "Distributore"}{delivery.notes ? ` · ${String(delivery.notes).slice(0, 80)}` : ""}</small></div>
           <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
             <span className={`delivery-status ${delivery.status}`}>{statusLabels[String(delivery.status)] ?? String(delivery.status)}</span>
@@ -793,7 +794,7 @@ function DistributorPointsBoard({ points, deliveries, deliveryChecks, photoAudit
   const nowMs = Date.now();
   const isOverdue = (row: RecordRow) => Boolean(row.next_check_due_at) && new Date(String(row.next_check_due_at)).getTime() <= nowMs;
   const [showNewPoint, setShowNewPoint] = useState(points.length === 0);
-  const [expanded, setExpanded] = useState<{ id: string; mode: "refill" | "check" | "stock" } | null>(null);
+  const [expanded, setExpanded] = useState<{ id: string; mode: "refill" | "check" | "stock" | "past" } | null>(null);
   const [pointDetail, setPointDetail] = useState<RecordRow | null>(null);
   const overdueCount = points.filter((row) => row.location_status !== "pending" && isOverdue(row)).length;
   const sorted = [...points].sort((a, b) => {
@@ -809,7 +810,7 @@ function DistributorPointsBoard({ points, deliveries, deliveryChecks, photoAudit
     return String(a.name).localeCompare(String(b.name));
   });
 
-  function toggle(id: string, mode: "refill" | "check" | "stock") {
+  function toggle(id: string, mode: "refill" | "check" | "stock" | "past") {
     setExpanded((current) => (current && current.id === id && current.mode === mode ? null : { id, mode }));
   }
 
@@ -829,7 +830,7 @@ function DistributorPointsBoard({ points, deliveries, deliveryChecks, photoAudit
           .sort((a, b) => String(b.completed_at ?? b.created_at ?? "").localeCompare(String(a.completed_at ?? a.created_at ?? "")))
           .slice(0, 6);
         return recentRefills.length
-          ? <div className="simple-list" style={{ padding: 0 }}>{recentRefills.map((delivery) => <div key={delivery.id} style={{ minHeight: 44, gridTemplateColumns: "minmax(0, 1fr) auto" }}><div><strong>{delivery.distribution_point_name ?? "Punto"} · {delivery.quantity ?? 0} {delivery.unit ?? "copie"}</strong><small>{when(delivery.completed_at ?? delivery.created_at)}</small></div><span className={withPhoto.has(delivery.id) ? "module-status approved" : "ai-review"}>{withPhoto.has(delivery.id) ? "con foto" : "senza foto"}</span></div>)}</div>
+          ? <div className="simple-list" style={{ padding: 0 }}>{recentRefills.map((delivery) => <div key={delivery.id} style={{ minHeight: 44, gridTemplateColumns: "minmax(0, 1fr) auto" }}><div><strong>{delivery.distribution_point_name ?? "Punto"} · {delivery.quantity ?? 0} {delivery.unit ?? "copie"}</strong><small>{when(delivery.completed_at ?? delivery.created_at)}</small></div><span className={withPhoto.has(delivery.id) || String(delivery.notes ?? "").startsWith("Rifornimento passato dichiarato") ? "module-status approved" : "ai-review"}>{withPhoto.has(delivery.id) ? "con foto" : String(delivery.notes ?? "").startsWith("Rifornimento passato dichiarato") ? "dichiarato" : "senza foto"}</span></div>)}</div>
           : <MiniEmpty text="Nessun rifornimento registrato finora." />;
       })()}
     </ActionCard>
@@ -876,6 +877,7 @@ function DistributorPointsBoard({ points, deliveries, deliveryChecks, photoAudit
               <button type="button" disabled={busy} onClick={() => toggle(rowId, "refill")}>Rifornisci</button>
               <button type="button" disabled={busy} onClick={() => toggle(rowId, "check")}>{overdue ? "Fai il controllo" : "Controlla ora"}</button>
               <button type="button" disabled={busy} onClick={() => toggle(rowId, "stock")}>Correggi giacenza</button>
+              <button type="button" disabled={busy} onClick={() => toggle(rowId, "past")}>Rifornimento già fatto</button>
             </div>}
             {pending && <form style={{ flexBasis: "100%" }} onSubmit={submitPointLocation}>
               <input type="hidden" name="id" value={rowId} />
@@ -903,6 +905,20 @@ function DistributorPointsBoard({ points, deliveries, deliveryChecks, photoAudit
               <PhotoPickerField />
               <p className="form-microcopy">Il CRM calcola quante copie sono state prese e fissa da solo il prossimo controllo.</p>
               <button className="primary" disabled={busy}>Registra controllo</button>
+            </form>}
+            {!pending && expanded?.id === rowId && expanded.mode === "past" && <form style={{ flexBasis: "100%" }} onSubmit={(event) => {
+              event.preventDefault();
+              const fd = new FormData(event.currentTarget);
+              void run(async () => {
+                await post("/api/operations/distribution-points/past-refill", { distributionPointId: rowId, date: fd.get("date"), quantity: fd.get("quantity"), unit: fd.get("unit"), notes: fd.get("notes") });
+                setExpanded(null);
+              }, "Rifornimento passato registrato (senza foto).");
+            }}>
+              <label className="form-microcopy" style={{ display: "block" }}>Data della consegna<input name="date" type="date" required max={new Date().toISOString().slice(0, 10)} /></label>
+              <div className="field-pair"><input name="quantity" type="number" min="1" max="1000000" required placeholder="Quante copie avevi lasciato" /><input name="unit" defaultValue="copie" maxLength={30} placeholder="Unità" /></div>
+              <input name="notes" maxLength={300} placeholder="Nota facoltativa (es. foto non salvata)" />
+              <p className="form-microcopy">Solo per consegne già fatte che non risultano nel CRM. Una registrazione per ogni consegna. Senza foto: resta segnata come «dichiarata».</p>
+              <button className="primary" disabled={busy}>Registra rifornimento già fatto</button>
             </form>}
             {!pending && expanded?.id === rowId && expanded.mode === "stock" && <form style={{ flexBasis: "100%" }} onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const fd = new FormData(form); void run(() => post("/api/operations/distribution-points/stock", { id: fd.get("id"), stock: fd.get("stock") }), "Giacenza corretta.", form).then(() => setExpanded(null)); }}>
               <input type="hidden" name="id" value={rowId} />

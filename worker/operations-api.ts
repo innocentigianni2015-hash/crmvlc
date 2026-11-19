@@ -124,6 +124,10 @@ export async function handleOperationsApi(
     if (url.pathname === "/api/operations/distribution-points/complete-location" && request.method === "POST") {
       return await completeDistributionPointLocation(request, env, user);
     }
+    const pointDetailMatch = url.pathname.match(/^\/api\/operations\/distribution-points\/([^/]+)\/detail$/);
+    if (pointDetailMatch && request.method === "GET") {
+      return await getDistributionPointDetail(env, pointDetailMatch[1], user);
+    }
     const pointPhotoMatch = url.pathname.match(/^\/api\/operations\/distribution-points\/([^/]+)\/photo$/);
     if (pointPhotoMatch && request.method === "GET") {
       return await servePointPhoto(env, pointPhotoMatch[1], user);
@@ -708,6 +712,48 @@ async function completeDistributionPointLocation(request: Request, env: RuntimeE
     assignedDistributorUserId: point.assigned_distributor_user_id,
   });
   return json({ id: point.id, name, address, latitude, longitude, geocodedAddress, locationStatus: "complete" });
+}
+
+// Scheda unica del punto vendita: anagrafica, tutti i rifornimenti (senza limiti di paginazione),
+// controlli di ritiro, foto e totali calcolati lato server.
+async function getDistributionPointDetail(env: RuntimeEnv, pointId: string, user: OperationsUser): Promise<Response> {
+  const id = clean(pointId, 80);
+  const point = await env.DB.prepare(
+    "SELECT x.id, x.client_id, c.company_name AS client_company, x.name, x.island, x.address, x.area, x.latitude_e6, x.longitude_e6, x.capacity, x.stock, x.public_visible, x.self_registered, x.location_status, x.next_check_due_at, x.created_at, x.updated_at, x.created_by, cu.name AS created_by_name, x.assigned_distributor_user_id, au.name AS assigned_distributor_name, (x.point_photo_r2_key IS NOT NULL) AS has_photo FROM distribution_points x LEFT JOIN clients c ON c.id = x.client_id LEFT JOIN users cu ON cu.id = x.created_by LEFT JOIN users au ON au.id = x.assigned_distributor_user_id WHERE x.id = ? LIMIT 1",
+  ).bind(id).first<Record<string, unknown> & { id: string; island: string; public_visible: number; location_status: string | null; assigned_distributor_user_id: string | null }>();
+  if (!point) throw new OperationsError(404, "point_not_found", "Punto di distribuzione non trovato.");
+  const manager = isGlobalOperator(user) || (user.role === "sales_manager" && canAccessIsland(user, point.island));
+  const distributor = user.role === "distributor" && canAccessIsland(user, point.island)
+    && (point.public_visible === 1 || (point.location_status === "pending" && point.assigned_distributor_user_id === user.id));
+  if (!manager && !distributor) throw new OperationsError(403, "not_allowed", "Non puoi visualizzare questa scheda.");
+  // Il distributore vede solo i propri rifornimenti e controlli, come nel resto del CRM.
+  const own = manager ? "" : " AND d.distributor_user_id = ?";
+  const ownCheck = manager ? "" : " AND dc.distributor_user_id = ?";
+  const ownValues = manager ? [] : [user.id];
+  const deliveries = (await env.DB.prepare(
+    `SELECT d.id, d.status, d.quantity, d.unit, d.scheduled_for, d.completed_at, d.created_at, d.notes, d.distributor_user_id, u.name AS distributor_name, (SELECT p.id FROM photo_audits p WHERE p.delivery_id = d.id ORDER BY p.created_at DESC LIMIT 1) AS audit_id, (SELECT p.status FROM photo_audits p WHERE p.delivery_id = d.id ORDER BY p.created_at DESC LIMIT 1) AS audit_status FROM deliveries d JOIN users u ON u.id = d.distributor_user_id WHERE d.distribution_point_id = ?${own} ORDER BY COALESCE(d.completed_at, d.created_at) DESC`,
+  ).bind(id, ...ownValues).all<{ id: string; status: string; quantity: number; created_at: string; completed_at: string | null; audit_id: string | null }>()).results;
+  const checks = (await env.DB.prepare(
+    `SELECT dc.id, dc.delivery_id, dc.quantity_left, dc.quantity_found, dc.quantity_taken, dc.geofence_distance_m, dc.notes, dc.created_at, dc.distributor_user_id, u.name AS distributor_name FROM delivery_checks dc JOIN users u ON u.id = dc.distributor_user_id WHERE dc.distribution_point_id = ?${ownCheck} ORDER BY dc.created_at DESC`,
+  ).bind(id, ...ownValues).all<{ quantity_taken: number; created_at: string }>()).results;
+  const delivered = deliveries.filter((row) => row.status === "delivered");
+  const copiesDelivered = delivered.reduce((sum, row) => sum + Number(row.quantity ?? 0), 0);
+  const copiesTaken = checks.reduce((sum, row) => sum + Number(row.quantity_taken ?? 0), 0);
+  const refillDates = delivered.map((row) => row.completed_at ?? row.created_at).sort();
+  const totals = {
+    refills: delivered.length,
+    openDeliveries: deliveries.length - delivered.length,
+    copiesDelivered,
+    copiesTaken,
+    averagePerRefill: delivered.length ? Math.round(copiesDelivered / delivered.length) : 0,
+    refillsWithoutPhoto: delivered.filter((row) => !row.audit_id).length,
+    checks: checks.length,
+    firstRefillAt: refillDates[0] ?? null,
+    lastRefillAt: refillDates[refillDates.length - 1] ?? null,
+    lastCheckAt: checks[0]?.created_at ?? null,
+    distributors: [...new Set(delivered.map((row) => String((row as Record<string, unknown>).distributor_name ?? "")).filter(Boolean))],
+  };
+  return json({ point, deliveries, checks, totals, scope: manager ? "all" : "own" });
 }
 
 async function servePointPhoto(env: RuntimeEnv, pointId: string, user: OperationsUser): Promise<Response> {

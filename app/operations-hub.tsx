@@ -641,78 +641,120 @@ function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, subm
       <DataCard title="Audit fotografici" count={data.photoAudits.length}>{data.photoAudits.length ? data.photoAudits.map((row) => { const ai = photoAiSummary(row); const auditId = String(row.id); return <div className="hub-list-row audit-row" key={auditId} style={{ flexWrap: "wrap", alignItems: "flex-start" }}><PhotoAuditThumb auditId={auditId} size={64} /><div><strong>{row.distributor_name}</strong><small>{row.island} · {when(row.created_at)} · distanza {row.geofence_distance_m ?? "—"} m</small>{ai && <small className={ai.verdict === "compliant_candidate" ? "ai-pass" : "ai-review"}>AI: {ai.magazinesDetected || ai.displayDetected ? "riviste/espositore rilevati" : "contenuto da verificare"} · {ai.possibleDuplicate ? "possibile duplicato" : "nessun duplicato rilevato"} · confidenza {ai.confidence}%</small>}{row.duplicate_of_audit_id && <small className="ai-review">Hash identico a una foto già registrata.</small>}</div><b>Qualità {row.quality_score}%</b><span className={`module-status ${row.status}`}>{row.status}</span>{canManage && row.status === "pending" && <div className="inline-actions"><button disabled={busy} onClick={() => void run(() => post("/api/operations/photo-audits/review", { id: row.id, status: "approved" }), "Foto approvata.")}>Approva</button><button disabled={busy} onClick={() => void run(() => post("/api/operations/photo-audits/review", { id: row.id, status: "rejected" }), "Foto rifiutata.")}>Rifiuta</button></div>}{canManage && <PhotoAuditEditActions auditId={auditId} busy={busy} run={run} onReplace={submitPhotoAuditReplace} />}</div>; }) : <MiniEmpty text="Nessuna foto da verificare." />}</DataCard>
     </div>
     <DataCard title="Controlli ritiro" count={data.deliveryChecks.length}>{data.deliveryChecks.length ? data.deliveryChecks.map((row) => <div className="hub-list-row" key={String(row.id)}><div><strong>{row.point_name}</strong><small>{row.distributor_name ? `${row.distributor_name} · ` : ""}{when(row.created_at)} · distanza {row.geofence_distance_m ?? "—"} m</small></div><b>{row.quantity_found}/{row.quantity_left}</b><span className="module-status">prese {row.quantity_taken}</span></div>) : <MiniEmpty text="Nessun controllo di ritiro registrato." />}</DataCard>
-    {pointDetail && <DistributionPointDetailModal point={pointDetail} deliveries={deliveries} deliveryChecks={data.deliveryChecks} photoAudits={data.photoAudits} canManage={canManage} busy={busy} run={run} onClose={() => setPointDetail(null)} />}
+    {pointDetail && <DistributionPointDetailModal point={pointDetail} canManage={canManage} busy={busy} run={run} onClose={() => setPointDetail(null)} />}
   </div>;
 }
 
-function DistributionPointDetailModal({ point, deliveries, deliveryChecks, photoAudits, canManage, busy, run, onClose }: {
+type PointDetail = {
   point: RecordRow;
-  deliveries: Delivery[];
-  deliveryChecks: RecordRow[];
-  photoAudits: RecordRow[];
+  deliveries: RecordRow[];
+  checks: RecordRow[];
+  totals: {
+    refills: number; openDeliveries: number; copiesDelivered: number; copiesTaken: number; averagePerRefill: number;
+    refillsWithoutPhoto: number; checks: number; firstRefillAt: string | null; lastRefillAt: string | null; lastCheckAt: string | null; distributors: string[];
+  };
+  scope: "all" | "own";
+};
+
+function DistributionPointDetailModal({ point, canManage, busy, run, onClose }: {
+  point: RecordRow;
   canManage: boolean;
   busy: boolean;
   run: (action: () => Promise<unknown>, success: string, form?: HTMLFormElement) => Promise<void>;
   onClose: () => void;
 }) {
   const pointId = String(point.id);
-  const pointDeliveries = deliveries
-    .filter((delivery) => String(delivery.distribution_point_id ?? "") === pointId)
-    .sort((a, b) => String(b.scheduled_for ?? "").localeCompare(String(a.scheduled_for ?? "")));
-  const pointChecks = deliveryChecks
-    .filter((check) => String(check.distribution_point_id ?? "") === pointId)
-    .sort((a, b) => String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")));
-  const deliveryIds = new Set(pointDeliveries.map((delivery) => String(delivery.id)));
-  const pointAudits = photoAudits.filter((audit) => deliveryIds.has(String(audit.delivery_id ?? "")));
-  const hasPointPhoto = Number(point.has_photo) === 1;
-  const totalDelivered = pointDeliveries
-    .filter((delivery) => delivery.status === "delivered")
-    .reduce((sum, delivery) => sum + Number(delivery.quantity ?? 0), 0);
-  const totalTaken = pointChecks.reduce((sum, check) => sum + Number(check.quantity_taken ?? 0), 0);
-  const pending = point.location_status === "pending";
+  const [detail, setDetail] = useState<PointDetail | null>(null);
+  const [error, setError] = useState("");
+  const load = useCallback(async () => {
+    try {
+      setDetail(await request<PointDetail>(`/api/operations/distribution-points/${encodeURIComponent(pointId)}/detail`));
+      setError("");
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Scheda non disponibile."); }
+  }, [pointId]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => { void load(); }, 0);
+    return () => window.clearTimeout(timer);
+  }, [load]);
+
+  const info = detail?.point ?? point;
+  const pending = info.location_status === "pending";
+  const hasPointPhoto = Number(info.has_photo) === 1;
+  const totals = detail?.totals;
   const statusLabels: Record<string, string> = { assigned: "Assegnata", in_progress: "In corso", delivered: "Consegnata", issue: "Problema" };
-  return <PointDetailModal title={String(point.name ?? "Punto di distribuzione")} subtitle={pending ? `${point.area ?? "Zona non indicata"} · ${point.island}` : `${point.address ?? ""} · ${point.island}`} onClose={onClose}>
-    <div className="metric-grid" style={{ padding: "18px 24px 0", marginBottom: 6, gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
-      <HubMetric label="Stock attuale" value={`${point.stock ?? 0}/${point.capacity ?? 0}`} note="copie presenti ora" />
-      <HubMetric label="Copie consegnate" value={totalDelivered} note="totale su tutte le consegne" />
-      <HubMetric label="Copie prese dai lettori" value={totalTaken} note="dai controlli di ritiro" />
+  const latitude = Number(info.latitude_e6) / 1_000_000;
+  const longitude = Number(info.longitude_e6) / 1_000_000;
+  const mapsUrl = !pending && Number.isFinite(latitude) && Number.isFinite(longitude) ? `https://www.google.com/maps/search/?api=1&query=${latitude},${longitude}` : null;
+  const day = (value: unknown) => value ? new Intl.DateTimeFormat(localeTag(), { dateStyle: "medium" }).format(new Date(String(value))) : "—";
+  const infoRows: Array<[string, React.ReactNode]> = [
+    ["Indirizzo", pending ? `${info.area ?? "Zona non indicata"} · posizione da completare` : String(info.address ?? "—")],
+    ["Isola", String(info.island ?? "—")],
+    ["Cliente collegato", String(info.client_company ?? "Nessuno")],
+    ["Posizione", pending ? "Da completare" : mapsUrl ? <a href={mapsUrl} target="_blank" rel="noopener noreferrer">Apri in Google Maps ↗</a> : "—"],
+    ["Mappa pubblica", Number(info.public_visible) === 1 ? "Visibile" : "Non visibile"],
+    ["Registrato", `${day(info.created_at)}${info.created_by_name ? ` · da ${info.created_by_name}` : ""}${Number(info.self_registered) === 1 ? " (distributore)" : ""}`],
+    ["Capacità espositore", info.capacity ? `${info.capacity} copie` : "Non indicata"],
+    ["Prossimo controllo", info.next_check_due_at ? when(info.next_check_due_at) : "Non programmato"],
+    ["Distributori", totals?.distributors.length ? totals.distributors.join(", ") : String(info.assigned_distributor_name ?? "—")],
+  ];
+  const reloadAfter = (action: () => Promise<unknown>) => async () => { await action(); await load(); };
+
+  return <PointDetailModal title={String(info.name ?? "Punto di distribuzione")} subtitle={`Scheda punto vendita · ${info.island ?? ""}`} onClose={onClose}>
+    {error && <div className="form-error" style={{ margin: "16px 24px 0" }}>{error}</div>}
+    <div className="metric-grid" style={{ padding: "18px 24px 0", marginBottom: 6, gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))" }}>
+      <HubMetric label="Rifornimenti" value={totals ? totals.refills : "…"} note={totals?.lastRefillAt ? `ultimo il ${day(totals.lastRefillAt)}` : "nessuno ancora"} />
+      <HubMetric label="Copie consegnate" value={totals ? totals.copiesDelivered : "…"} note={totals ? `media ${totals.averagePerRefill} per rifornimento` : ""} />
+      <HubMetric label="Copie prese dai lettori" value={totals ? totals.copiesTaken : "…"} note={totals ? `${totals.checks} controlli di ritiro` : ""} />
+      <HubMetric label="Giacenza attuale" value={`${info.stock ?? 0}`} note={info.capacity ? `su ${info.capacity} di capacità` : "copie presenti ora"} />
     </div>
-    <h3 className="point-detail-heading">Foto</h3>
+    {totals && totals.refillsWithoutPhoto > 0 && <p className="form-microcopy" style={{ margin: "8px 24px 0" }}>{totals.refillsWithoutPhoto} rifornimenti senza foto di consegna: controllali nello storico qui sotto.</p>}
+    {detail?.scope === "own" && <p className="form-microcopy" style={{ margin: "8px 24px 0" }}>Vedi i tuoi rifornimenti e controlli su questo punto.</p>}
+
+    <h3 className="point-detail-heading">Informazioni</h3>
     <div className="simple-list">
-      {hasPointPhoto && <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+      {infoRows.map(([label, value]) => <div key={label} style={{ minHeight: 40, gridTemplateColumns: "150px minmax(0, 1fr)" }}><small style={{ marginTop: 0 }}>{label}</small><strong style={{ fontWeight: 600 }}>{value}</strong></div>)}
+    </div>
+
+    <h3 className="point-detail-heading">Storico rifornimenti{totals ? ` (${totals.refills + totals.openDeliveries})` : ""}</h3>
+    <div className="simple-list">
+      {!detail ? <MiniEmpty text="Caricamento storico…" /> : detail.deliveries.length ? detail.deliveries.map((delivery) => {
+        const auditId = delivery.audit_id ? String(delivery.audit_id) : "";
+        return <div key={String(delivery.id)} style={{ gridTemplateColumns: "auto minmax(0, 1fr) auto" }}>
+          {auditId ? <PhotoAuditThumb auditId={auditId} size={52} /> : <span className="ai-review" style={{ fontSize: 9, width: 52, textAlign: "center" }}>senza foto</span>}
+          <div><strong>{day(delivery.completed_at ?? delivery.created_at)} · {delivery.quantity ?? 0} {delivery.unit ?? "copie"}</strong><small>{delivery.distributor_name ?? "Distributore"}{delivery.notes ? ` · ${String(delivery.notes).slice(0, 80)}` : ""}</small></div>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <span className={`delivery-status ${delivery.status}`}>{statusLabels[String(delivery.status)] ?? String(delivery.status)}</span>
+            {auditId && <button type="button" className="table-action" disabled={busy} onClick={() => {
+              if (window.confirm("Eliminare la foto di questo rifornimento? L'operazione non si può annullare.")) {
+                void run(reloadAfter(() => post("/api/operations/photo-audits/delete", { id: auditId })), "Foto eliminata.");
+              }
+            }}>Elimina foto</button>}
+          </div>
+        </div>;
+      }) : <MiniEmpty text="Nessun rifornimento registrato per questo punto." />}
+    </div>
+
+    <h3 className="point-detail-heading">Controlli di ritiro{totals ? ` (${totals.checks})` : ""}</h3>
+    <div className="simple-list">
+      {!detail ? <MiniEmpty text="Caricamento controlli…" /> : detail.checks.length ? detail.checks.map((check) => <div key={String(check.id)}><strong>{when(check.created_at)}</strong><small>{check.distributor_name ?? "Distributore"} · lasciate {check.quantity_left} · trovate {check.quantity_found}{check.notes ? ` · ${check.notes}` : ""}</small><span className="module-status">prese {check.quantity_taken}</span></div>) : <MiniEmpty text="Nessun controllo di ritiro registrato per questo punto." />}
+    </div>
+
+    <h3 className="point-detail-heading">Foto del locale</h3>
+    <div className="simple-list">
+      {hasPointPhoto ? <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
         <PointPhotoThumb pointId={pointId} size={96} />
         <div style={{ flex: "1 1 160px" }}><strong>Foto del locale</strong><small style={{ display: "block" }}>Usata per riconoscere il punto.</small></div>
         {canManage && <button type="button" disabled={busy} onClick={() => {
           if (window.confirm("Eliminare la foto del locale? L'operazione non si può annullare.")) {
-            void run(async () => { await post("/api/operations/distribution-points/delete-photo", { id: pointId }); onClose(); }, "Foto del locale eliminata.");
+            void run(reloadAfter(() => post("/api/operations/distribution-points/delete-photo", { id: pointId })), "Foto del locale eliminata.");
           }
         }}>Elimina foto</button>}
-      </div>}
-      {pointAudits.map((audit) => {
-        const auditId = String(audit.id);
-        return <div key={auditId} style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-          <PhotoAuditThumb auditId={auditId} size={72} />
-          <div style={{ flex: "1 1 160px" }}><strong>{audit.distributor_name ?? "Distributore"}</strong><small style={{ display: "block" }}>{when(audit.created_at)} · {String(audit.status)}</small></div>
-          <button type="button" disabled={busy} onClick={() => {
-            if (window.confirm("Eliminare questa foto? L'operazione non si può annullare.")) {
-              void run(() => post("/api/operations/photo-audits/delete", { id: auditId }), "Foto eliminata.");
-            }
-          }}>Elimina</button>
-        </div>;
-      })}
-      {!hasPointPhoto && !pointAudits.length && <MiniEmpty text="Nessuna foto collegata a questa scheda." />}
+      </div> : <MiniEmpty text="Nessuna foto del locale." />}
     </div>
-    <h3 className="point-detail-heading">Storico consegne</h3>
-    <div className="simple-list">
-      {pointDeliveries.length ? pointDeliveries.map((delivery) => <div key={delivery.id}><strong>{delivery.scheduled_for ? when(delivery.scheduled_for) : "Data non indicata"}</strong><small>{delivery.distributor_name ?? "Distributore non indicato"} · {delivery.quantity ?? 0} {delivery.unit ?? "copie"}</small><span className={`delivery-status ${delivery.status}`}>{statusLabels[delivery.status] ?? delivery.status}</span></div>) : <MiniEmpty text="Nessuna consegna registrata per questo punto." />}
-    </div>
-    <h3 className="point-detail-heading">Controlli di ritiro</h3>
-    <div className="simple-list">
-      {pointChecks.length ? pointChecks.map((check) => <div key={String(check.id)}><strong>{when(check.created_at)}</strong><small>{check.distributor_name ?? "Distributore non indicato"} · lasciate {check.quantity_left} · trovate {check.quantity_found}</small><span className="module-status">prese {check.quantity_taken}</span></div>) : <MiniEmpty text="Nessun controllo di ritiro registrato per questo punto." />}
-    </div>
+
     <div className="modal-actions" style={{ padding: "0 24px 20px" }}>
       {canManage && <button type="button" disabled={busy} onClick={() => {
-        if (window.confirm(`Eliminare definitivamente la scheda «${String(point.name ?? "")}»? Vengono cancellati anche la foto del locale e i controlli di ritiro; lo storico consegne resta senza punto collegato. L'operazione non si può annullare.`)) {
+        if (window.confirm(`Eliminare definitivamente la scheda «${String(info.name ?? "")}»? Vengono cancellati anche la foto del locale e i controlli di ritiro; lo storico rifornimenti resta senza punto collegato. L'operazione non si può annullare.`)) {
           void run(async () => { await post("/api/operations/distribution-points/delete", { id: pointId }); onClose(); }, "Scheda eliminata.");
         }
       }}>Elimina scheda</button>}
@@ -869,7 +911,7 @@ function DistributorPointsBoard({ points, deliveries, deliveryChecks, photoAudit
         })}
     </ActionCard>
     <PointsRouteBuilder points={points} />
-    {pointDetail && <DistributionPointDetailModal point={pointDetail} deliveries={deliveries} deliveryChecks={deliveryChecks} photoAudits={photoAudits} canManage={false} busy={busy} run={run} onClose={() => setPointDetail(null)} />}
+    {pointDetail && <DistributionPointDetailModal point={pointDetail} canManage={false} busy={busy} run={run} onClose={() => setPointDetail(null)} />}
   </div>;
 }
 

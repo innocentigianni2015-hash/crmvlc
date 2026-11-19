@@ -1490,7 +1490,7 @@ async function createQuote(request: Request, user: UserRow, env: RuntimeEnv, ctx
 async function downloadQuote(quoteId: string, user: UserRow, env: RuntimeEnv): Promise<Response> {
   const quote = await getQuote(env, quoteId);
   if (!quote || !canReadRecord(user, quote)) throw new ApiError(404, "quote_not_found", "Preventivo non trovato.");
-  return r2Download(env, quote.pdf_r2_key, "application/pdf", `${quote.quote_number}-${safeFilename(quote.customer_company)}.pdf`);
+  return r2Download(env, quote.pdf_r2_key, "application/pdf", `${quote.quote_number}-${clientFileCode(quote.customer_company)}.pdf`);
 }
 
 async function convertQuoteToContract(request: Request, quoteId: string, user: UserRow, env: RuntimeEnv, ctx: ExecutionContext): Promise<Response> {
@@ -1971,14 +1971,13 @@ async function downloadContract(contractId: string, user: UserRow, env: RuntimeE
   const contract = await getContract(env, contractId);
   if (!contract || !canReadRecord(user, contract)) throw new ApiError(404, "contract_not_found", "Contratto non trovato.");
   const key = contract.signed_r2_key ?? contract.draft_r2_key;
-  const suffix = contract.signed_r2_key ? "-firmado" : "";
-  return r2Download(env, key, "application/pdf", `${safeFilename(contract.title)}-v${contract.version}${suffix}.pdf`);
+  return r2Download(env, key, "application/pdf", await contractFilename(env, contract, contract.signed_r2_key ? "-firmado" : "", "pdf"));
 }
 
 async function downloadEvidence(contractId: string, user: UserRow, env: RuntimeEnv): Promise<Response> {
   const contract = await getContract(env, contractId);
   if (!contract || !canReadRecord(user, contract) || !contract.evidence_r2_key) throw new ApiError(404, "evidence_not_found", "Evidenza di firma non trovata.");
-  return r2Download(env, contract.evidence_r2_key, "application/json", `${safeFilename(contract.title)}-evidencia-firma.json`);
+  return r2Download(env, contract.evidence_r2_key, "application/json", await contractFilename(env, contract, "-evidencia-firma", "json"));
 }
 
 async function requestContractSignature(request: Request, contractId: string, user: UserRow, env: RuntimeEnv): Promise<Response> {
@@ -2916,6 +2915,30 @@ function contractEndDate(startDate: string, months: number): string {
 
 function isDeliveryStatus(value: string): value is DeliveryRow["status"] {
   return ["assigned", "in_progress", "delivered", "issue"].includes(value);
+}
+
+// Nome file: numero del preventivo + sigla del cliente ricavata dal nome (es. VLC-2026-0002-LEMONTREE.pdf).
+const LEGAL_FORMS = new Set(["SL", "SLU", "SLL", "SA", "SAU", "SC", "SCP", "CB", "SLNE", "SRL", "SRLS", "SPA", "SAS", "SNC", "LLC", "LTD", "LIMITED", "INC", "CORP", "GMBH", "BV", "SARL", "EURL", "AUTONOMO", "AUTONOMA", "DE", "DEL", "LA", "LAS", "EL", "LOS", "Y", "E", "THE", "AND", "OF", "DI", "DA", "DEI", "IL", "LO"]);
+function clientFileCode(company: string | null | undefined): string {
+  const words = String(company ?? "")
+    .normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
+    .toUpperCase()
+    .replace(/\b([A-Z])\.(?=[A-Z]\.?)/g, "$1")
+    .replace(/[^A-Z0-9]+/g, " ")
+    .trim()
+    .split(" ")
+    .filter((word) => word && !LEGAL_FORMS.has(word));
+  return words.slice(0, 2).join("").slice(0, 16) || "CLIENTE";
+}
+
+async function contractFilename(env: RuntimeEnv, contract: ContractRow, suffix: string, extension: string): Promise<string> {
+  let data: Record<string, unknown> = {};
+  try { data = contract.contract_data_json ? JSON.parse(contract.contract_data_json) : {}; } catch { data = {}; }
+  const client = await env.DB.prepare("SELECT company_name FROM clients WHERE id = ? LIMIT 1").bind(contract.client_id).first<{ company_name: string }>();
+  const code = clientFileCode(String(data.customerCompany ?? client?.company_name ?? ""));
+  const reference = typeof data.quoteNumber === "string" && data.quoteNumber ? data.quoteNumber : safeFilename(contract.title);
+  const version = Number(contract.version) > 1 ? `-v${contract.version}` : "";
+  return `${reference}-${code}-contrato${version}${suffix}.${extension}`;
 }
 
 function safeFilename(value: string): string {

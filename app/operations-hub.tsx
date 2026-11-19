@@ -9,7 +9,7 @@ type Role = "super_admin" | "admin" | "sales_manager" | "sales" | "distributor";
 type User = { id: string; email?: string; name: string; role: Role; island: string | null };
 type Client = { id: string; company_name: string; island: string };
 type Delivery = {
-  id: string; client_company?: string; island: string; status: string; distributor_user_id?: string; distributor_name?: string;
+  id: string; client_company?: string | null; island: string; status: string; distributor_user_id?: string; distributor_name?: string;
   scheduled_for?: string | null; quantity?: number; unit?: string; distribution_point_id?: string | null; distribution_point_name?: string | null;
   distribution_point_address?: string | null; distribution_point_latitude_e6?: number | null; distribution_point_longitude_e6?: number | null;
 };
@@ -100,11 +100,12 @@ function when(value: unknown) {
   return new Intl.DateTimeFormat(localeTag(), { dateStyle: "short", timeStyle: "short" }).format(new Date(String(value)));
 }
 
-export function OperationsHub({ user, clients, users, deliveries, notify, initialTab }: {
+export function OperationsHub({ user, clients, users, deliveries, notify, initialTab, onDataChanged }: {
   user: User;
   clients: Client[];
   users: User[];
   deliveries: Delivery[];
+  onDataChanged?: () => Promise<void>;
   notify: (text: string, tone?: "ok" | "error") => void;
   initialTab?: OperationsTab;
 }) {
@@ -148,13 +149,18 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
     return () => window.clearInterval(interval);
   }, [refresh, user.role]);
 
+  // Dopo ogni modifica ricarica anche le consegne del CRM: lo storico dei punti le legge da lì.
+  async function refreshAll() {
+    await Promise.all([refresh(), onDataChanged?.().catch(() => undefined)]);
+  }
+
   async function run(action: () => Promise<unknown>, success: string, form?: HTMLFormElement) {
     setBusy(true);
     try {
       await action();
       form?.reset();
       notify(success);
-      await refresh();
+      await refreshAll();
     } catch (error) { notify(error instanceof Error ? error.message : "Operazione non riuscita.", "error"); }
     finally { setBusy(false); }
   }
@@ -221,7 +227,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
         : user.role === "distributor"
           ? "Foto approvata e consegna registrata."
           : "Verifica fotografica inviata.");
-      if (!queued) await refresh();
+      if (!queued) await refreshAll();
     } catch (error) {
       notify(error instanceof Error ? error.message : "Acquisizione non riuscita.", "error");
     } finally {
@@ -251,7 +257,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
       await request("/api/operations/photo-audits/replace", { method: "POST", body: upload });
       form.reset();
       notify("Foto sostituita e inviata per una nuova verifica.");
-      await refresh();
+      await refreshAll();
     } catch (error) {
       notify(error instanceof Error ? error.message : "Sostituzione non riuscita.", "error");
     } finally {
@@ -290,7 +296,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
 
       form.reset();
       notify("Punto approvato e pubblicato nella home e nelle mappe.");
-      await refresh();
+      await refreshAll();
     } catch (error) {
       notify(error instanceof Error ? error.message : "Registrazione non riuscita.", "error");
     } finally {
@@ -327,7 +333,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
 
       form.reset();
       notify("Controllo registrato.");
-      await refresh();
+      await refreshAll();
     } catch (error) {
       notify(error instanceof Error ? error.message : "Controllo non riuscito.", "error");
     } finally {
@@ -373,7 +379,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
     notify(mode === "pending"
       ? `${okCount}/${items.length} nuovi locali caricati, attribuiti e segnati da completare.`
       : `${okCount}/${items.length} foto caricate e attribuite al distributore.`, okCount === items.length ? "ok" : "error");
-    await refresh();
+    await refreshAll();
     setBusy(false);
   }
 
@@ -398,7 +404,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
         longitude,
       });
       notify("Indirizzo e posizione del locale completati.");
-      await refresh();
+      await refreshAll();
     } catch (error) {
       notify(error instanceof Error ? error.message : "Posizione non salvata.", "error");
     } finally {
@@ -579,7 +585,7 @@ function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, subm
       </ActionCard>}
       {user.role !== "distributor" && <ActionCard index="02" title="Foto di consegna" text="Conferma una consegna già assegnata con foto, posizione e controllo geofence.">
         <form onSubmit={submitPhotoAudit}>
-          <select name="deliveryId" required><option value="">Seleziona consegna</option>{deliveries.map((delivery) => <option key={delivery.id} value={delivery.id}>{delivery.client_company ?? delivery.id} · {delivery.island}</option>)}</select>
+          <select name="deliveryId" required><option value="">Seleziona consegna</option>{deliveries.filter((delivery) => delivery.status !== "delivered").map((delivery) => <option key={delivery.id} value={delivery.id}>{delivery.client_company ?? delivery.distribution_point_name ?? delivery.id} · {delivery.island}</option>)}</select>
           <PhotoPickerField />
           <p className="form-microcopy">Foto, coordinate e orario vengono acquisiti insieme.</p>
           <button className="primary" disabled={busy || !deliveries.length}>Scatta foto e registra consegna</button>
@@ -739,9 +745,9 @@ function DistributorPointsBoard({ points, deliveries, deliveryChecks, photoAudit
   }
 
   return <div className="hub-stack">
-    {deliveries.length > 0 && <ActionCard index="00" title="Consegne assegnate da oggi" text="Hai consegne già pianificate dall'amministrazione: fotografa e confermale qui.">
+    {deliveries.some((delivery) => delivery.status !== "delivered") && <ActionCard index="00" title="Consegne assegnate da oggi" text="Hai consegne già pianificate dall'amministrazione: fotografa e confermale qui.">
       <form onSubmit={submitAssignedDelivery}>
-        <select name="deliveryId" required><option value="">Seleziona consegna assegnata</option>{deliveries.map((delivery) => <option key={delivery.id} value={delivery.id}>{delivery.client_company ?? delivery.id}</option>)}</select>
+        <select name="deliveryId" required><option value="">Seleziona consegna assegnata</option>{deliveries.filter((delivery) => delivery.status !== "delivered").map((delivery) => <option key={delivery.id} value={delivery.id}>{delivery.client_company ?? delivery.distribution_point_name ?? delivery.id}</option>)}</select>
         <PhotoPickerField />
         <button className="primary" disabled={busy}>Scatta foto e registra consegna</button>
       </form>

@@ -873,7 +873,7 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
       env.DB.prepare(
         "INSERT INTO deliveries (id, client_id, distributor_user_id, distribution_point_id, island, status, quantity, unit, scheduled_for, delivery_contact_name, delivery_contact_email, delivery_contact_phone, delivery_address, notes, version, created_by, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'delivered', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
       ).bind(deliveryId, point.client_id, distributor.id, point.id, point.island, quantity, unit, canaryDateKey(new Date()), point.contact_name, point.email, point.phone, point.address, "Carico multiplo registrato dall'amministrazione per conto del Distributore.", user.id, createdAt, createdAt, createdAt),
-      env.DB.prepare("UPDATE distribution_points SET next_check_due_at = ?, updated_at = ? WHERE id = ?").bind(nextCheckDueAt, createdAt, point.id),
+      env.DB.prepare("UPDATE distribution_points SET stock = stock + ?, next_check_due_at = ?, updated_at = ? WHERE id = ?").bind(quantity, nextCheckDueAt, createdAt, point.id),
     ]);
     selfReported = true;
   } else if (!deliveryId) {
@@ -885,9 +885,16 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
     const unit = clean(form.get("unit"), 30);
     const reminderDays = Math.min(60, Math.max(1, nonNegativeInt(form.get("reminderDays"), 60) || 7));
     const point = await env.DB.prepare(
-      "SELECT p.id, p.client_id, p.island, p.address, c.contact_name, c.email, c.phone FROM distribution_points p LEFT JOIN clients c ON c.id = p.client_id WHERE p.id = ? AND p.island = ? AND p.public_visible = 1 LIMIT 1",
-    ).bind(distributionPointId, user.island).first<{ id: string; client_id: string | null; island: string; address: string; contact_name: string | null; email: string | null; phone: string | null }>();
+      "SELECT p.id, p.client_id, p.island, p.address, p.latitude_e6, p.longitude_e6, c.contact_name, c.email, c.phone FROM distribution_points p LEFT JOIN clients c ON c.id = p.client_id WHERE p.id = ? AND p.island = ? AND p.public_visible = 1 LIMIT 1",
+    ).bind(distributionPointId, user.island).first<{ id: string; client_id: string | null; island: string; address: string; latitude_e6: number | null; longitude_e6: number | null; contact_name: string | null; email: string | null; phone: string | null }>();
     if (!point || !unit) throw new OperationsError(404, "point_not_found", "Scegli un punto di distribuzione valido per la tua isola.");
+    // Verifica la distanza prima di registrare il rifornimento, così un errore di posizione non lascia consegne senza foto.
+    if (point.latitude_e6 !== null && point.longitude_e6 !== null) {
+      const distanceM = Math.round(haversineMeters(latitude, longitude, point.latitude_e6 / 1_000_000, point.longitude_e6 / 1_000_000));
+      if (distanceM > MAX_GEOFENCE_REJECT_M) {
+        throw new OperationsError(422, "too_far_from_point", `Sei a ${distanceM} m dal punto: troppo lontano per confermare la consegna da qui. Torna sul posto e riprova.`);
+      }
+    }
     deliveryId = crypto.randomUUID();
     const createdAt = new Date().toISOString();
     const nextCheckDueAt = new Date(Date.now() + reminderDays * 86_400_000).toISOString();
@@ -895,7 +902,7 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
       env.DB.prepare(
         "INSERT INTO deliveries (id, client_id, distributor_user_id, distribution_point_id, island, status, quantity, unit, scheduled_for, delivery_contact_name, delivery_contact_email, delivery_contact_phone, delivery_address, notes, version, created_by, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'delivered', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
       ).bind(deliveryId, point.client_id, user.id, point.id, point.island, quantity, unit, canaryDateKey(new Date()), point.contact_name, point.email, point.phone, point.address, "Conferma libera registrata dal Distributore.", user.id, createdAt, createdAt, createdAt),
-      env.DB.prepare("UPDATE distribution_points SET next_check_due_at = ?, updated_at = ? WHERE id = ?").bind(nextCheckDueAt, createdAt, point.id),
+      env.DB.prepare("UPDATE distribution_points SET stock = stock + ?, next_check_due_at = ?, updated_at = ? WHERE id = ?").bind(quantity, nextCheckDueAt, createdAt, point.id),
     ]);
     selfReported = true;
   } else {

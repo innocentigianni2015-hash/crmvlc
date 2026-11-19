@@ -972,7 +972,7 @@ async function bootstrap(user: AuthenticatedUser, env: RuntimeEnv): Promise<Resp
     ).all()).results;
   const deliveryFilter = deliveryScope(user);
   const deliveries = (await env.DB.prepare(
-    `SELECT d.*, c.company_name AS client_company, u.name AS distributor_name, p.name AS distribution_point_name, p.address AS distribution_point_address, p.latitude_e6 AS distribution_point_latitude_e6, p.longitude_e6 AS distribution_point_longitude_e6 FROM deliveries d JOIN clients c ON c.id = d.client_id JOIN users u ON u.id = d.distributor_user_id LEFT JOIN distribution_points p ON p.id = d.distribution_point_id WHERE 1 = 1${deliveryFilter.sql} ORDER BY CASE d.status WHEN 'issue' THEN 0 WHEN 'assigned' THEN 1 WHEN 'in_progress' THEN 2 ELSE 3 END, d.updated_at DESC LIMIT 250`,
+    `SELECT d.*, c.company_name AS client_company, u.name AS distributor_name, p.name AS distribution_point_name, p.address AS distribution_point_address, p.latitude_e6 AS distribution_point_latitude_e6, p.longitude_e6 AS distribution_point_longitude_e6 FROM deliveries d LEFT JOIN clients c ON c.id = d.client_id JOIN users u ON u.id = d.distributor_user_id LEFT JOIN distribution_points p ON p.id = d.distribution_point_id WHERE 1 = 1${deliveryFilter.sql} ORDER BY CASE d.status WHEN 'issue' THEN 0 WHEN 'assigned' THEN 1 WHEN 'in_progress' THEN 2 ELSE 3 END, d.updated_at DESC LIMIT 250`,
   ).bind(...deliveryFilter.values).all<DeliveryRow>()).results;
 
   const distributionPoints = user.role === "distributor"

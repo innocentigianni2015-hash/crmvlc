@@ -271,8 +271,18 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
     setBusy(true);
     try {
       if (!navigator.onLine) throw new Error("La registrazione di un nuovo punto richiede la rete.");
-      const location = await currentLocation();
       const formData = new FormData(form);
+      // Il GPS è facoltativo: senza posizione il punto viene salvato e la posizione si completa dopo.
+      let location: { latitude: number; longitude: number } | null = null;
+      if (formData.get("withoutGps") !== "on") {
+        try {
+          location = await currentLocation();
+        } catch {
+          if (!window.confirm("GPS non disponibile. Vuoi registrare il punto senza posizione e completarla in un secondo momento?")) {
+            throw new Error("Registrazione annullata: attiva la posizione oppure spunta «Registra senza GPS».");
+          }
+        }
+      }
       const name = String(formData.get("name") ?? "");
       const address = String(formData.get("address") ?? "");
       const quantity = String(formData.get("quantity") ?? "1");
@@ -289,13 +299,19 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
       upload.set("quantity", quantity);
       upload.set("unit", unit);
       upload.set("reminderDays", reminderDays);
-      upload.set("latitude", String(location.latitude));
-      upload.set("longitude", String(location.longitude));
+      if (location) {
+        upload.set("latitude", String(location.latitude));
+        upload.set("longitude", String(location.longitude));
+      }
       upload.set("photo", photo, photo.name);
-      await request("/api/operations/distribution-points/self-register", { method: "POST", body: upload });
+      const result = await request<{ locationStatus?: string; locationSource?: string }>("/api/operations/distribution-points/self-register", { method: "POST", body: upload });
 
       form.reset();
-      notify("Punto approvato e pubblicato nella home e nelle mappe.");
+      notify(result.locationStatus === "pending"
+        ? "Punto salvato senza posizione: completala dalla lista «Posizione da completare» quando puoi."
+        : result.locationSource === "address"
+          ? "Punto registrato con la posizione ricavata dall'indirizzo e pubblicato nelle mappe."
+          : "Punto approvato e pubblicato nella home e nelle mappe.");
       await refreshAll();
     } catch (error) {
       notify(error instanceof Error ? error.message : "Registrazione non riuscita.", "error");
@@ -391,7 +407,9 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
       const formData = new FormData(form);
       let latitude = String(formData.get("latitude") ?? "").trim();
       let longitude = String(formData.get("longitude") ?? "").trim();
-      if (formData.get("captureCurrentLocation") === "1") {
+      const submitter = (event.nativeEvent as SubmitEvent).submitter;
+      const useAddressOnly = submitter?.getAttribute("data-mode") === "address";
+      if (formData.get("captureCurrentLocation") === "1" && !useAddressOnly) {
         const location = await currentLocation();
         latitude = String(location.latitude);
         longitude = String(location.longitude);
@@ -579,8 +597,8 @@ function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, subm
     {user.role === "distributor" && <DistributorPointsBoard points={freeConfirmationPoints} deliveries={deliveries} deliveryChecks={data.deliveryChecks} photoAudits={data.photoAudits} busy={busy} run={run} submitPointRegistration={submitPointRegistration} submitRefill={submitPhotoAudit} submitDeliveryCheck={submitDeliveryCheck} submitAssignedDelivery={submitPhotoAudit} submitPointLocation={submitPointLocation} submitPhotoAuditReplace={submitPhotoAuditReplace} />}
     <div className="hub-two">
       {canManage && <ActionCard index="01" title="Punto distribuzione" text="Coordinate, capacità, stock e visibilità pubblica.">
-        <form onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const fd = new FormData(form); void run(() => post("/api/operations/distribution-points", { ...Object.fromEntries(fd), publicVisible: fd.get("publicVisible") === "on" }), "Punto distribuzione creato.", form); }}>
-          <input name="name" placeholder="Nome punto" required /><select name="clientId"><option value="">Nessun cliente collegato</option>{clients.map((client) => <option key={client.id} value={client.id}>{client.company_name}</option>)}</select><IslandSelect user={user} /><input name="address" placeholder="Indirizzo" required /><div className="field-pair"><input name="latitude" type="number" step="0.000001" placeholder="Latitudine" required /><input name="longitude" type="number" step="0.000001" placeholder="Longitudine" required /></div><div className="field-pair"><input name="capacity" type="number" min="0" placeholder="Capacità" required /><input name="stock" type="number" min="0" placeholder="Stock" required /></div><label className="check-line"><input type="checkbox" name="publicVisible" defaultChecked /> Visibile nella mappa pubblica</label><button className="primary" disabled={busy}>Salva punto</button>
+        <form onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const fd = new FormData(form); void run(() => post("/api/operations/distribution-points", { ...Object.fromEntries(fd), publicVisible: fd.get("publicVisible") === "on" }), "Punto salvato. Se la posizione non è ricavabile dall'indirizzo, lo trovi tra i punti con posizione da completare.", form); }}>
+          <input name="name" placeholder="Nome punto" required /><select name="clientId"><option value="">Nessun cliente collegato</option>{clients.map((client) => <option key={client.id} value={client.id}>{client.company_name}</option>)}</select><IslandSelect user={user} /><input name="address" placeholder="Indirizzo" required /><div className="field-pair"><input name="latitude" type="number" step="0.000001" placeholder="Latitudine (facoltativa)" /><input name="longitude" type="number" step="0.000001" placeholder="Longitudine (facoltativa)" /></div><p className="form-microcopy">Senza coordinate il CRM le ricava dall’indirizzo; se non ci riesce, il punto resta «posizione da completare» e non compare sulla mappa pubblica finché non viene completato.</p><div className="field-pair"><input name="capacity" type="number" min="0" placeholder="Capacità" required /><input name="stock" type="number" min="0" placeholder="Stock" required /></div><label className="check-line"><input type="checkbox" name="publicVisible" defaultChecked /> Visibile nella mappa pubblica</label><button className="primary" disabled={busy}>Salva punto</button>
         </form>
       </ActionCard>}
       {user.role !== "distributor" && <ActionCard index="02" title="Foto di consegna" text="Conferma una consegna già assegnata con foto, posizione e controllo geofence.">
@@ -761,7 +779,8 @@ function DistributorPointsBoard({ points, deliveries, deliveryChecks, photoAudit
           <div className="field-pair"><input name="quantity" type="number" min="1" max="1000000" defaultValue="1" placeholder="Quante copie lasci" /><input name="unit" defaultValue="copie" maxLength={30} placeholder="Unità" /></div>
           <input name="reminderDays" type="number" min="1" max="60" defaultValue="7" placeholder="Torna a controllare dopo (giorni)" />
           <PhotoPickerField />
-          <p className="form-microcopy">Foto del negozio/espositore al momento della consegna. Posizione GPS acquisita automaticamente.</p>
+          <label className="check-line"><input type="checkbox" name="withoutGps" /> Registra senza GPS (non sono sul posto o il GPS non funziona)</label>
+          <p className="form-microcopy">Foto del negozio/espositore al momento della consegna. Il GPS viene acquisito automaticamente; senza GPS il CRM prova a ricavare la posizione dall’indirizzo, altrimenti il punto resta da completare.</p>
           <div className="inline-actions">
             <button className="primary" disabled={busy}>Registra punto e prima consegna</button>
             {points.length > 0 && <button type="button" disabled={busy} onClick={() => setShowNewPoint(false)}>Annulla</button>}
@@ -799,9 +818,12 @@ function DistributorPointsBoard({ points, deliveries, deliveryChecks, photoAudit
               <input type="hidden" name="id" value={rowId} />
               <input type="hidden" name="captureCurrentLocation" value="1" />
               <input name="name" defaultValue={String(row.name ?? "")} placeholder="Nome del locale" required maxLength={120} />
-              <input name="address" placeholder="Indirizzo o riferimento del locale" required maxLength={260} />
-              <p className="form-microcopy">Guarda la foto qui sopra per riconoscere il locale. Correggi il nome se non è quello giusto. Quando sei davanti, premi il pulsante: il CRM userà la posizione GPS attuale.</p>
-              <button className="primary" disabled={busy}>Sono sul posto · completa posizione</button>
+              <input name="address" placeholder="Indirizzo o riferimento del locale" required maxLength={260} defaultValue={String(row.area ?? "").startsWith("Indirizzo da completare") ? "" : String(row.area ?? "")} />
+              <p className="form-microcopy">Guarda la foto qui sopra per riconoscere il locale. Correggi il nome se non è quello giusto. Se sei davanti al locale usa il GPS; altrimenti scrivi l’indirizzo esatto (via, numero, città) e il CRM ricava la posizione.</p>
+              <div className="inline-actions">
+                <button className="primary" disabled={busy}>Sono sul posto · usa il GPS</button>
+                <button type="submit" data-mode="address" disabled={busy}>Usa solo l’indirizzo</button>
+              </div>
             </form>}
             {!pending && expanded?.id === rowId && expanded.mode === "refill" && <form style={{ flexBasis: "100%" }} onSubmit={(event) => { submitRefill(event); setExpanded(null); }}>
               <input type="hidden" name="distributionPointId" value={rowId} />

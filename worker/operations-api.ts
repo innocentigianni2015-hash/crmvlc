@@ -491,20 +491,36 @@ async function createDistributionPoint(request: Request, env: RuntimeEnv, user: 
   const island = isGlobalOperator(user) ? requestedIsland : String(user.island ?? "");
   const name = clean(body.name, 120);
   const address = clean(body.address, 260);
-  const latitude = requiredCoordinate(body.latitude, -90, 90);
-  const longitude = requiredCoordinate(body.longitude, -180, 180);
+  let latitude = optionalCoordinate(body.latitude, -90, 90);
+  let longitude = optionalCoordinate(body.longitude, -180, 180);
   const capacity = nonNegativeInt(body.capacity, 1_000_000);
   const stock = nonNegativeInt(body.stock, 1_000_000);
-  if (!isIsland(island) || !name || !address) throw new OperationsError(400, "invalid_point", "Nome, isola, indirizzo e coordinate sono obbligatori.");
+  if (!isIsland(island) || !name || !address) throw new OperationsError(400, "invalid_point", "Nome, isola e indirizzo sono obbligatori.");
+  if ((latitude === null) !== (longitude === null)) throw new OperationsError(400, "invalid_coordinates", "Inserisci sia latitudine sia longitudine, oppure lasciale entrambe vuote.");
+  // Senza coordinate: si prova a ricavarle dall'indirizzo; se non è possibile il punto resta "posizione da completare".
+  let locationStatus: "complete" | "pending" = "complete";
+  if (latitude === null || longitude === null) {
+    const geocode = await geocodeAddress(env, address, island);
+    if (geocode && isPreciseGeocode(geocode) && isWithinCanaryIslands(geocode.latitude, geocode.longitude)) {
+      latitude = geocode.latitude;
+      longitude = geocode.longitude;
+    } else {
+      locationStatus = "pending";
+      const center = ISLAND_CENTERS[island] ?? ISLAND_CENTERS.Tenerife;
+      latitude = center.latitude;
+      longitude = center.longitude;
+    }
+  }
   assertWithinCanaryIslands(latitude, longitude);
   const clientId = cleanOptional(body.clientId, 80);
   if (clientId) await assertClientScope(env, user, clientId, island);
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
-  await env.DB.prepare("INSERT INTO distribution_points (id, client_id, name, island, address, latitude_e6, longitude_e6, capacity, stock, public_visible, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-    .bind(id, clientId, name, island, address, toE6(latitude), toE6(longitude), capacity, stock, body.publicVisible === false ? 0 : 1, now, now).run();
-  await appendOperationsAudit(env, request, user, "distribution_point.created", "distribution_point", id, { name, island, stock });
-  return json({ id }, 201);
+  const publicVisible = locationStatus === "pending" ? 0 : body.publicVisible === false ? 0 : 1;
+  await env.DB.prepare("INSERT INTO distribution_points (id, client_id, name, island, address, latitude_e6, longitude_e6, capacity, stock, public_visible, created_at, updated_at, created_by, area, location_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .bind(id, clientId, name, island, address, toE6(latitude), toE6(longitude), capacity, stock, publicVisible, now, now, user.id, address, locationStatus).run();
+  await appendOperationsAudit(env, request, user, "distribution_point.created", "distribution_point", id, { name, island, stock, locationStatus });
+  return json({ id, locationStatus }, 201);
 }
 
 async function updateDistributionStock(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
@@ -549,6 +565,12 @@ async function geocodeAddress(env: RuntimeEnv, address: string, island: string):
     console.error(JSON.stringify({ level: "error", event: "geocode_failed", error: error instanceof Error ? error.message : "unknown" }));
     return null;
   }
+}
+
+// Solo un risultato al livello di civico/via/luogo è abbastanza preciso per il controllo di distanza (500 m);
+// un indirizzo vago (solo città o CAP) lascia il punto "posizione da completare".
+function isPreciseGeocode(geocode: { locationType: string }): boolean {
+  return ["address", "street", "point-of-interest"].includes(String(geocode.locationType ?? "").toLowerCase());
 }
 
 async function importPendingDistributionPoint(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
@@ -723,17 +745,26 @@ async function selfRegisterDistributionPoint(request: Request, env: RuntimeEnv, 
   }
   const name = clean(form.get("name"), 120);
   const address = clean(form.get("address"), 260);
-  const latitude = requiredCoordinate(form.get("latitude"), -90, 90);
-  const longitude = requiredCoordinate(form.get("longitude"), -180, 180);
+  const gpsLatitude = optionalCoordinate(form.get("latitude"), -90, 90);
+  const gpsLongitude = optionalCoordinate(form.get("longitude"), -180, 180);
   const quantity = positiveInt(form.get("quantity"), 1_000_000);
   const unit = clean(form.get("unit"), 30) || "copie";
   const reminderDays = Math.min(60, Math.max(1, nonNegativeInt(form.get("reminderDays"), 60) || 7));
   if (!name || !address) throw new OperationsError(400, "invalid_point", "Nome e indirizzo del punto sono obbligatori.");
-  assertWithinCanaryIslands(latitude, longitude);
+  const hasGps = gpsLatitude !== null && gpsLongitude !== null;
+  if (hasGps) assertWithinCanaryIslands(gpsLatitude, gpsLongitude);
 
   const geocode = await geocodeAddress(env, address, user.island);
+  const geocodeUsable = geocode !== null && isPreciseGeocode(geocode) && isWithinCanaryIslands(geocode.latitude, geocode.longitude);
+  // Senza GPS: posizione dall'indirizzo se verificabile, altrimenti il punto resta "posizione da completare"
+  // e il distributore la completa in un secondo momento (sul posto con il GPS, oppure con l'indirizzo esatto).
+  const locationStatus: "complete" | "pending" = hasGps || geocodeUsable ? "complete" : "pending";
+  const center = ISLAND_CENTERS[user.island] ?? ISLAND_CENTERS.Tenerife;
+  const latitude = hasGps ? gpsLatitude : geocodeUsable ? geocode.latitude : center.latitude;
+  const longitude = hasGps ? gpsLongitude : geocodeUsable ? geocode.longitude : center.longitude;
+  const locationSource = hasGps ? "gps" : geocodeUsable ? "address" : "none";
   const addressVerified = geocode !== null;
-  const addressDistanceM = geocode ? Math.round(haversineMeters(latitude, longitude, geocode.latitude, geocode.longitude)) : null;
+  const addressDistanceM = hasGps && geocode ? Math.round(haversineMeters(latitude, longitude, geocode.latitude, geocode.longitude)) : null;
   const addressMismatch = addressDistanceM !== null && addressDistanceM > 600;
 
   const bytes = await photo.arrayBuffer();
@@ -745,17 +776,18 @@ async function selfRegisterDistributionPoint(request: Request, env: RuntimeEnv, 
   const now = new Date();
   const nowIso = now.toISOString();
   const key = `distribution-points/${user.island}/${nowIso.slice(0, 10)}/${pointId}.${extensionFor(photo.type)}`;
-  const watermarkText = `CRMVLC | NUOVO PUNTO | ${user.island} | ${nowIso} | ${latitude.toFixed(6)},${longitude.toFixed(6)} | ${digest.slice(0, 12)}`;
+  const watermarkText = `CRMVLC | NUOVO PUNTO${hasGps ? "" : " SENZA GPS"} | ${user.island} | ${nowIso} | ${hasGps ? `${latitude.toFixed(6)},${longitude.toFixed(6)}` : "posizione da indirizzo"} | ${digest.slice(0, 12)}`;
   const aiAnalysis = await analyzeDeliveryPhoto(env, bytes, photo.type, {
     quantity,
     unit,
     pointName: name,
     pointAddress: address,
-    geofenceDistanceM: 0,
+    geofenceDistanceM: hasGps ? 0 : null,
     exactDuplicate: Boolean(duplicate),
   }, null);
-  if (addressMismatch || !addressVerified) aiAnalysis.verdict = "review_required";
-  if (addressMismatch) aiAnalysis.reasons = [`Indirizzo digitato a ${addressDistanceM} m dalla posizione GPS rilevata dal geocoding.`, ...aiAnalysis.reasons].slice(0, 4);
+  if (addressMismatch || !addressVerified || !hasGps) aiAnalysis.verdict = "review_required";
+  if (!hasGps) aiAnalysis.reasons = [locationSource === "address" ? "Punto registrato senza GPS: posizione ricavata dall'indirizzo." : "Punto registrato senza GPS: posizione da completare.", ...aiAnalysis.reasons].slice(0, 4);
+  else if (addressMismatch) aiAnalysis.reasons = [`Indirizzo digitato a ${addressDistanceM} m dalla posizione GPS rilevata dal geocoding.`, ...aiAnalysis.reasons].slice(0, 4);
   else if (!addressVerified) aiAnalysis.reasons = ["Indirizzo non verificabile tramite geocoding: revisione manuale consigliata.", ...aiAnalysis.reasons].slice(0, 4);
   await env.BUCKET.put(key, bytes, { httpMetadata: { contentType: photo.type, cacheControl: "private, no-store" }, customMetadata: { sha256: digest, watermark: watermarkText, pointId, deliveryId } });
   const nextCheckDueAt = new Date(now.getTime() + reminderDays * 86_400_000).toISOString();
@@ -763,18 +795,18 @@ async function selfRegisterDistributionPoint(request: Request, env: RuntimeEnv, 
 
   await env.DB.batch([
     env.DB.prepare(
-      "INSERT INTO distribution_points (id, client_id, name, island, address, latitude_e6, longitude_e6, capacity, stock, public_visible, created_at, updated_at, created_by, self_registered, point_photo_r2_key, next_check_due_at, area, location_status, assigned_distributor_user_id) VALUES (?, NULL, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?, ?, 1, ?, ?, ?, 'complete', ?)",
-    ).bind(pointId, name, user.island, address, toE6(latitude), toE6(longitude), quantity, nowIso, nowIso, user.id, key, nextCheckDueAt, address, user.id),
+      "INSERT INTO distribution_points (id, client_id, name, island, address, latitude_e6, longitude_e6, capacity, stock, public_visible, created_at, updated_at, created_by, self_registered, point_photo_r2_key, next_check_due_at, area, location_status, assigned_distributor_user_id) VALUES (?, NULL, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)",
+    ).bind(pointId, name, user.island, address, toE6(latitude), toE6(longitude), quantity, locationStatus === "complete" ? 1 : 0, nowIso, nowIso, user.id, key, nextCheckDueAt, address, locationStatus, user.id),
     env.DB.prepare(
       "INSERT INTO deliveries (id, client_id, distributor_user_id, distribution_point_id, island, status, quantity, unit, scheduled_for, delivery_contact_name, delivery_contact_email, delivery_contact_phone, delivery_address, notes, version, created_by, completed_at, created_at, updated_at) VALUES (?, NULL, ?, ?, ?, 'delivered', ?, ?, ?, NULL, NULL, NULL, ?, ?, 1, ?, ?, ?, ?)",
     ).bind(deliveryId, user.id, pointId, user.island, quantity, unit, canaryDateKey(now), address, "Punto registrato e prima consegna dal Distributore.", user.id, nowIso, nowIso, nowIso),
     env.DB.prepare(
-      "INSERT INTO photo_audits (id, delivery_id, distributor_user_id, island, r2_key, sha256, latitude_e6, longitude_e6, geofence_distance_m, status, quality_score, duplicate_of_audit_id, ai_model, ai_verdict, ai_result_json, watermark_text, reviewed_by, reviewed_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    ).bind(auditId, deliveryId, user.id, user.island, key, digest, toE6(latitude), toE6(longitude), photoReview.status, aiAnalysis.qualityScore, duplicate?.id ?? null, aiAnalysis.model, aiAnalysis.verdict, JSON.stringify(aiAnalysis), watermarkText, photoReview.reviewedBy, photoReview.reviewedAt, nowIso),
+      "INSERT INTO photo_audits (id, delivery_id, distributor_user_id, island, r2_key, sha256, latitude_e6, longitude_e6, geofence_distance_m, status, quality_score, duplicate_of_audit_id, ai_model, ai_verdict, ai_result_json, watermark_text, reviewed_by, reviewed_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(auditId, deliveryId, user.id, user.island, key, digest, toE6(latitude), toE6(longitude), hasGps ? 0 : null, photoReview.status, aiAnalysis.qualityScore, duplicate?.id ?? null, aiAnalysis.model, aiAnalysis.verdict, JSON.stringify(aiAnalysis), watermarkText, photoReview.reviewedBy, photoReview.reviewedAt, nowIso),
   ]);
 
-  await appendOperationsAudit(env, request, user, "distribution_point.self_registered", "distribution_point", pointId, { name, address, quantity, unit, reminderDays, deliveryId, auditId, photoStatus: photoReview.status, autoApproved: photoReview.autoApproved, publicVisible: true, duplicateOfAuditId: duplicate?.id ?? null, addressVerified, addressDistanceM, geocodedAddress: geocode?.formattedAddress ?? null });
-  return json({ id: pointId, deliveryId, auditId, status: photoReview.status, autoApproved: photoReview.autoApproved, publicVisible: true, nextCheckDueAt, addressVerified, addressDistanceM, geocodedAddress: geocode?.formattedAddress ?? null, addressMismatch }, 201);
+  await appendOperationsAudit(env, request, user, "distribution_point.self_registered", "distribution_point", pointId, { name, address, quantity, unit, reminderDays, deliveryId, auditId, photoStatus: photoReview.status, autoApproved: photoReview.autoApproved, publicVisible: locationStatus === "complete", locationStatus, locationSource, duplicateOfAuditId: duplicate?.id ?? null, addressVerified, addressDistanceM, geocodedAddress: geocode?.formattedAddress ?? null });
+  return json({ id: pointId, deliveryId, auditId, status: photoReview.status, autoApproved: photoReview.autoApproved, publicVisible: locationStatus === "complete", locationStatus, locationSource, nextCheckDueAt, addressVerified, addressDistanceM, geocodedAddress: geocode?.formattedAddress ?? null, addressMismatch }, 201);
 }
 
 async function createDeliveryCheck(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {

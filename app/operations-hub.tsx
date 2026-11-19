@@ -12,6 +12,7 @@ type Delivery = {
   id: string; client_company?: string | null; island: string; status: string; distributor_user_id?: string; distributor_name?: string;
   scheduled_for?: string | null; quantity?: number; unit?: string; distribution_point_id?: string | null; distribution_point_name?: string | null;
   distribution_point_address?: string | null; distribution_point_latitude_e6?: number | null; distribution_point_longitude_e6?: number | null;
+  created_at?: string; completed_at?: string | null;
 };
 type RecordRow = Record<string, string | number | null>;
 type BulkUploadMode = "existing" | "pending";
@@ -165,13 +166,14 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
     finally { setBusy(false); }
   }
 
-  async function submitPhotoAudit(event: FormEvent<HTMLFormElement>) {
+  async function submitPhotoAudit(event: FormEvent<HTMLFormElement>): Promise<boolean> {
     event.preventDefault();
     const form = event.currentTarget;
+    // I dati si leggono subito, prima di attendere il GPS: il modulo resta aperto finché il server non conferma.
+    const formData = new FormData(form);
     setBusy(true);
     try {
       const location = await currentLocation();
-      const formData = new FormData(form);
       const deliveryId = String(formData.get("deliveryId") ?? "");
       const distributionPointId = String(formData.get("distributionPointId") ?? "");
       const quantity = String(formData.get("quantity") ?? "");
@@ -184,12 +186,9 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
       if (!deliveryId && (user.role !== "distributor" || !distributionPointId || Number(quantity) < 1)) {
         throw new Error("Seleziona una consegna oppure un punto e indica la quantità consegnata.");
       }
-      if (!deliveryId && !navigator.onLine) {
-        throw new Error("La conferma libera richiede la rete. Riprova quando il telefono è online.");
-      }
-
       const photo = await prepareDeliveryPhoto(selected);
       let queued = !navigator.onLine;
+      let alreadyRegistered = false;
       if (!queued) {
         const upload = new FormData();
         upload.set("deliveryId", deliveryId);
@@ -203,14 +202,15 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
         upload.set("longitude", String(location.longitude));
         upload.set("photo", photo, photo.name);
         try {
-          await request("/api/operations/photo-audits", { method: "POST", body: upload });
+          const result = await request<{ alreadyRegistered?: boolean }>("/api/operations/photo-audits", { method: "POST", body: upload });
+          if (result?.alreadyRegistered) alreadyRegistered = true;
         } catch (error) {
           if (error instanceof RequestError) throw error;
-          if (!deliveryId) throw new Error("Connessione persa: la conferma libera non è stata registrata. Riprova quando sei online.");
           queued = true;
         }
       }
       if (queued) {
+        // Senza rete anche il rifornimento libero resta salvato sul telefono e parte appena torna la connessione.
         await queuePhotoAudit({
           userId: user.id,
           deliveryId,
@@ -218,18 +218,23 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
           filename: photo.name,
           latitude: location.latitude,
           longitude: location.longitude,
+          ...(!deliveryId ? { distributionPointId, quantity, unit, reminderDays } : {}),
         });
       }
 
       form.reset();
       notify(queued
-        ? "Foto di consegna salvata sul dispositivo. Verrà inviata appena torna la rete."
-        : user.role === "distributor"
-          ? "Foto approvata e consegna registrata."
-          : "Verifica fotografica inviata.");
+        ? "Nessuna rete: rifornimento salvato sul telefono. Verrà inviato da solo appena torna la connessione."
+        : alreadyRegistered
+          ? "Questo rifornimento era già stato registrato: nessun doppione creato."
+          : user.role === "distributor"
+            ? `Rifornimento registrato${quantity ? `: ${quantity} ${unit}` : ""}.`
+            : "Verifica fotografica inviata.");
       if (!queued) await refreshAll();
+      return true;
     } catch (error) {
-      notify(error instanceof Error ? error.message : "Acquisizione non riuscita.", "error");
+      notify(error instanceof Error ? `Rifornimento NON registrato: ${error.message}` : "Rifornimento NON registrato.", "error");
+      return false;
     } finally {
       setBusy(false);
     }
@@ -265,13 +270,13 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
     }
   }
 
-  async function submitPointRegistration(event: FormEvent<HTMLFormElement>) {
+  async function submitPointRegistration(event: FormEvent<HTMLFormElement>): Promise<boolean> {
     event.preventDefault();
     const form = event.currentTarget;
+    const formData = new FormData(form);
     setBusy(true);
     try {
       if (!navigator.onLine) throw new Error("La registrazione di un nuovo punto richiede la rete.");
-      const formData = new FormData(form);
       // Il GPS è facoltativo: senza posizione il punto viene salvato e la posizione si completa dopo.
       let location: { latitude: number; longitude: number } | null = null;
       if (formData.get("withoutGps") !== "on") {
@@ -313,21 +318,23 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
           ? "Punto registrato con la posizione ricavata dall'indirizzo e pubblicato nelle mappe."
           : "Punto approvato e pubblicato nella home e nelle mappe.");
       await refreshAll();
+      return true;
     } catch (error) {
-      notify(error instanceof Error ? error.message : "Registrazione non riuscita.", "error");
+      notify(error instanceof Error ? `Punto NON registrato: ${error.message}` : "Punto NON registrato.", "error");
+      return false;
     } finally {
       setBusy(false);
     }
   }
 
-  async function submitDeliveryCheck(event: FormEvent<HTMLFormElement>) {
+  async function submitDeliveryCheck(event: FormEvent<HTMLFormElement>): Promise<boolean> {
     event.preventDefault();
     const form = event.currentTarget;
+    const formData = new FormData(form);
     setBusy(true);
     try {
       if (!navigator.onLine) throw new Error("Il controllo del punto richiede la rete.");
       const location = await currentLocation();
-      const formData = new FormData(form);
       const distributionPointId = String(formData.get("distributionPointId") ?? "");
       const quantityFound = String(formData.get("quantityFound") ?? "0");
       const notes = String(formData.get("notes") ?? "");
@@ -350,8 +357,10 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
       form.reset();
       notify("Controllo registrato.");
       await refreshAll();
+      return true;
     } catch (error) {
-      notify(error instanceof Error ? error.message : "Controllo non riuscito.", "error");
+      notify(error instanceof Error ? `Controllo NON registrato: ${error.message}` : "Controllo NON registrato.", "error");
+      return false;
     } finally {
       setBusy(false);
     }
@@ -575,9 +584,9 @@ function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, subm
   users: User[];
   clients: Client[];
   deliveries: Delivery[];
-  submitPhotoAudit: (event: FormEvent<HTMLFormElement>) => void;
-  submitPointRegistration: (event: FormEvent<HTMLFormElement>) => void;
-  submitDeliveryCheck: (event: FormEvent<HTMLFormElement>) => void;
+  submitPhotoAudit: (event: FormEvent<HTMLFormElement>) => Promise<boolean>;
+  submitPointRegistration: (event: FormEvent<HTMLFormElement>) => Promise<boolean>;
+  submitDeliveryCheck: (event: FormEvent<HTMLFormElement>) => Promise<boolean>;
   submitBulkPhotoAudit: (
     mode: BulkUploadMode,
     distributorId: string,
@@ -774,10 +783,10 @@ function DistributorPointsBoard({ points, deliveries, deliveryChecks, photoAudit
   photoAudits: RecordRow[];
   busy: boolean;
   run: (action: () => Promise<unknown>, success: string, form?: HTMLFormElement) => Promise<void>;
-  submitPointRegistration: (event: FormEvent<HTMLFormElement>) => void;
-  submitRefill: (event: FormEvent<HTMLFormElement>) => void;
-  submitDeliveryCheck: (event: FormEvent<HTMLFormElement>) => void;
-  submitAssignedDelivery: (event: FormEvent<HTMLFormElement>) => void;
+  submitPointRegistration: (event: FormEvent<HTMLFormElement>) => Promise<boolean>;
+  submitRefill: (event: FormEvent<HTMLFormElement>) => Promise<boolean>;
+  submitDeliveryCheck: (event: FormEvent<HTMLFormElement>) => Promise<boolean>;
+  submitAssignedDelivery: (event: FormEvent<HTMLFormElement>) => Promise<boolean>;
   submitPointLocation: (event: FormEvent<HTMLFormElement>) => void;
   submitPhotoAuditReplace: (event: FormEvent<HTMLFormElement>) => void;
 }) {
@@ -812,13 +821,25 @@ function DistributorPointsBoard({ points, deliveries, deliveryChecks, photoAudit
         <button className="primary" disabled={busy}>Scatta foto e registra consegna</button>
       </form>
     </ActionCard>}
+    <ActionCard index="✓" title="Ultimi rifornimenti registrati" text="Se un rifornimento non compare qui, non è stato salvato: rifallo.">
+      {(() => {
+        const withPhoto = new Set(photoAudits.map((audit) => String(audit.delivery_id ?? "")));
+        const recentRefills = deliveries
+          .filter((delivery) => delivery.status === "delivered")
+          .sort((a, b) => String(b.completed_at ?? b.created_at ?? "").localeCompare(String(a.completed_at ?? a.created_at ?? "")))
+          .slice(0, 6);
+        return recentRefills.length
+          ? <div className="simple-list" style={{ padding: 0 }}>{recentRefills.map((delivery) => <div key={delivery.id} style={{ minHeight: 44, gridTemplateColumns: "minmax(0, 1fr) auto" }}><div><strong>{delivery.distribution_point_name ?? "Punto"} · {delivery.quantity ?? 0} {delivery.unit ?? "copie"}</strong><small>{when(delivery.completed_at ?? delivery.created_at)}</small></div><span className={withPhoto.has(delivery.id) ? "module-status approved" : "ai-review"}>{withPhoto.has(delivery.id) ? "con foto" : "senza foto"}</span></div>)}</div>
+          : <MiniEmpty text="Nessun rifornimento registrato finora." />;
+      })()}
+    </ActionCard>
     <ActionCard index="01" title={points.length ? "Nuovo punto vendita" : "Comincia da qui"} text="Negozio mai visitato prima: nome, indirizzo, foto, quante copie lasci e quando torni a controllare.">
       {!showNewPoint
         ? <button type="button" className="primary" onClick={() => setShowNewPoint(true)}>+ Registra un nuovo punto vendita</button>
-        : <form onSubmit={(event) => { submitPointRegistration(event); setShowNewPoint(false); }}>
+        : <form onSubmit={(event) => { void submitPointRegistration(event).then((ok) => { if (ok) setShowNewPoint(false); }); }}>
           <input name="name" placeholder="Nome punto (es. Bar/Negozio)" required maxLength={120} />
           <input name="address" placeholder="Indirizzo o riferimento" required maxLength={260} />
-          <div className="field-pair"><input name="quantity" type="number" min="1" max="1000000" defaultValue="1" placeholder="Quante copie lasci" /><input name="unit" defaultValue="copie" maxLength={30} placeholder="Unità" /></div>
+          <div className="field-pair"><input name="quantity" type="number" min="1" max="1000000" required placeholder="Quante copie lasci" /><input name="unit" defaultValue="copie" maxLength={30} placeholder="Unità" /></div>
           <input name="reminderDays" type="number" min="1" max="60" defaultValue="7" placeholder="Torna a controllare dopo (giorni)" />
           <PhotoPickerField />
           <label className="check-line"><input type="checkbox" name="withoutGps" /> Registra senza GPS (non sono sul posto o il GPS non funziona)</label>
@@ -867,14 +888,14 @@ function DistributorPointsBoard({ points, deliveries, deliveryChecks, photoAudit
                 <button type="submit" data-mode="address" disabled={busy}>Usa solo l’indirizzo</button>
               </div>
             </form>}
-            {!pending && expanded?.id === rowId && expanded.mode === "refill" && <form style={{ flexBasis: "100%" }} onSubmit={(event) => { submitRefill(event); setExpanded(null); }}>
+            {!pending && expanded?.id === rowId && expanded.mode === "refill" && <form style={{ flexBasis: "100%" }} onSubmit={(event) => { void submitRefill(event).then((ok) => { if (ok) setExpanded(null); }); }}>
               <input type="hidden" name="distributionPointId" value={rowId} />
-              <div className="field-pair"><input name="quantity" type="number" min="1" max="1000000" defaultValue="1" placeholder="Quante copie lasci" /><input name="unit" defaultValue="copie" maxLength={30} placeholder="Unità" /></div>
+              <div className="field-pair"><input name="quantity" type="number" min="1" max="1000000" required placeholder="Quante copie lasci" /><input name="unit" defaultValue="copie" maxLength={30} placeholder="Unità" /></div>
               <input name="reminderDays" type="number" min="1" max="60" defaultValue="7" placeholder="Torna a controllare dopo (giorni)" />
               <PhotoPickerField />
               <button className="primary" disabled={busy}>Scatta foto e registra rifornimento</button>
             </form>}
-            {!pending && expanded?.id === rowId && expanded.mode === "check" && <form style={{ flexBasis: "100%" }} onSubmit={(event) => { submitDeliveryCheck(event); setExpanded(null); }}>
+            {!pending && expanded?.id === rowId && expanded.mode === "check" && <form style={{ flexBasis: "100%" }} onSubmit={(event) => { void submitDeliveryCheck(event).then((ok) => { if (ok) setExpanded(null); }); }}>
               <input type="hidden" name="distributionPointId" value={rowId} />
               <input name="quantityFound" type="number" min="0" max="1000000" placeholder="Quante copie trovi ancora" required />
               <input name="reminderDays" type="number" min="1" max="60" defaultValue="7" placeholder="Torna a controllare dopo (giorni)" />
@@ -1368,10 +1389,23 @@ function MiniEmpty({ text }: { text: string }) { return <div className="mini-emp
 
 async function currentLocation(): Promise<{ latitude: number; longitude: number }> {
   if (!("geolocation" in navigator)) throw new RequestError("Geolocalizzazione non disponibile sul dispositivo.");
-  return new Promise((resolve, reject) => navigator.geolocation.getCurrentPosition(
+  const attempt = (options: PositionOptions) => new Promise<{ latitude: number; longitude: number }>((resolve, reject) => navigator.geolocation.getCurrentPosition(
     (position) => resolve({ latitude: position.coords.latitude, longitude: position.coords.longitude }),
-    () => reject(new RequestError("Consenti l’accesso alla posizione per completare l’operazione.")),
-    { enableHighAccuracy: true, timeout: 15_000, maximumAge: 0 },
+    (error) => reject(error),
+    options,
   ));
+  try {
+    return await attempt({ enableHighAccuracy: true, timeout: 20_000, maximumAge: 30_000 });
+  } catch (first) {
+    if ((first as GeolocationPositionError)?.code === 1) {
+      throw new RequestError("Posizione bloccata: consenti l’accesso alla posizione per crmvlc.com nelle impostazioni del telefono.");
+    }
+    // Al chiuso il GPS preciso spesso non risponde: si riprova con la posizione approssimata (rete/Wi-Fi).
+    try {
+      return await attempt({ enableHighAccuracy: false, timeout: 15_000, maximumAge: 120_000 });
+    } catch {
+      throw new RequestError("GPS senza segnale: esci all’aperto o vicino a una finestra e riprova.");
+    }
+  }
 }
 

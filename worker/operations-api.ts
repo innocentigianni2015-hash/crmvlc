@@ -878,6 +878,7 @@ async function createDeliveryCheck(request: Request, env: RuntimeEnv, user: Oper
 
   const distanceM = Math.round(haversineMeters(latitude, longitude, point.latitude_e6 / 1_000_000, point.longitude_e6 / 1_000_000));
   if (distanceM > MAX_GEOFENCE_REJECT_M) {
+    await appendOperationsAudit(env, request, user, "delivery_check.rejected", "distribution_point", point.id, { reason: "too_far_from_point", distanceM, quantityFound });
     throw new OperationsError(422, "too_far_from_point", `Sei a ${distanceM} m dal punto: troppo lontano per registrare il controllo da qui. Torna sul posto e riprova.`);
   }
 
@@ -918,6 +919,15 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
   const photo = form.get("photo");
   if (!(photo instanceof File) || photo.size === 0 || photo.size > MAX_PHOTO_BYTES || !["image/jpeg", "image/png", "image/webp"].includes(photo.type)) {
     throw new OperationsError(400, "invalid_photo", "Carica una foto JPG, PNG o WebP fino a 8 MB.");
+  }
+  const bytes = await photo.arrayBuffer();
+  const digest = await sha256(bytes);
+  // Idempotenza: la stessa foto inviata due volte dallo stesso distributore (doppio tocco, reinvio dalla coda offline)
+  // restituisce il rifornimento già registrato invece di crearne un doppione.
+  if (user.role === "distributor") {
+    const sameUpload = await env.DB.prepare("SELECT id, delivery_id FROM photo_audits WHERE sha256 = ? AND distributor_user_id = ? ORDER BY created_at DESC LIMIT 1")
+      .bind(digest, user.id).first<{ id: string; delivery_id: string }>();
+    if (sameUpload) return json({ id: sameUpload.id, deliveryId: sameUpload.delivery_id, alreadyRegistered: true }, 200);
   }
   let deliveryId = clean(form.get("deliveryId"), 80);
   const onBehalfOfDistributorId = ["super_admin", "admin", "sales_manager"].includes(user.role)
@@ -970,6 +980,7 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
     if (point.latitude_e6 !== null && point.longitude_e6 !== null) {
       const distanceM = Math.round(haversineMeters(latitude, longitude, point.latitude_e6 / 1_000_000, point.longitude_e6 / 1_000_000));
       if (distanceM > MAX_GEOFENCE_REJECT_M) {
+        await appendOperationsAudit(env, request, user, "delivery.refill_rejected", "distribution_point", point.id, { reason: "too_far_from_point", distanceM, quantity });
         throw new OperationsError(422, "too_far_from_point", `Sei a ${distanceM} m dal punto: troppo lontano per confermare la consegna da qui. Torna sul posto e riprova.`);
       }
     }
@@ -997,8 +1008,6 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
   if (delivery.distribution_point_id && nearest && nearest.distanceM > MAX_GEOFENCE_REJECT_M) {
     throw new OperationsError(422, "too_far_from_point", `Sei a ${nearest.distanceM} m dal punto: troppo lontano per confermare la consegna da qui. Torna sul posto e riprova.`);
   }
-  const bytes = await photo.arrayBuffer();
-  const digest = await sha256(bytes);
   const duplicate = await env.DB.prepare("SELECT id, delivery_id FROM photo_audits WHERE sha256 = ? ORDER BY created_at DESC LIMIT 1").bind(digest).first<{ id: string; delivery_id: string }>();
   const previous = await env.DB.prepare("SELECT id, r2_key FROM photo_audits WHERE delivery_id = ? ORDER BY created_at DESC LIMIT 1").bind(delivery.id).first<{ id: string; r2_key: string }>();
   const id = crypto.randomUUID();
@@ -1040,6 +1049,13 @@ type PhotoAiResult = {
   reasons: string[];
 };
 
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("AI timeout")), ms);
+    promise.then((value) => { clearTimeout(timer); resolve(value); }, (error) => { clearTimeout(timer); reject(error); });
+  });
+}
+
 async function analyzeDeliveryPhoto(
   env: RuntimeEnv,
   bytes: ArrayBuffer,
@@ -1074,12 +1090,13 @@ async function analyzeDeliveryPhoto(
         }
       }
     }
-    const output = await env.AI.run(PHOTO_AI_MODEL, {
+    // L'analisi AI è un indicatore: oltre 8 secondi si salva comunque il rifornimento, con revisione manuale.
+    const output = await withTimeout(env.AI.run(PHOTO_AI_MODEL, {
       messages: [{ role: "system", content: "Sei un revisore prudente di prove fotografiche. Non approvi né rifiuti: produci indicatori verificabili per un revisore umano." }, { role: "user", content }],
       response_format: { type: "json_object" },
       max_tokens: 350,
       temperature: 0,
-    });
+    }), 8_000);
     const parsed = JSON.parse(output.response) as Record<string, unknown>;
     const score = clampScore(parsed.qualityScore);
     const magazinesDetected = parsed.magazinesDetected === true;

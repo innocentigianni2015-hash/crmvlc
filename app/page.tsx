@@ -338,7 +338,7 @@ export default function Home() {
   }, [data?.user.id]);
   useEffect(() => {
     if (!notice) return;
-    const timer = window.setTimeout(() => setNotice(null), 4200);
+    const timer = window.setTimeout(() => setNotice(null), notice.tone === "error" ? 15_000 : 5_000);
     return () => window.clearTimeout(timer);
   }, [notice]);
   useEffect(() => {
@@ -583,7 +583,7 @@ export default function Home() {
         setPromotionPopup(null);
       }} />}
       <HelpAssistantDrawer currentModule={active} offline={offlineMode} onNavigate={navigateFromHelp} />
-      {notice && <div className={`ops-toast ${notice.tone}`}>{notice.tone === "ok" ? "✓" : "!"} {notice.text}</div>}
+      {notice && <div className={`ops-toast ${notice.tone}`} role={notice.tone === "error" ? "alert" : "status"} onClick={() => setNotice(null)}>{notice.tone === "ok" ? "✓" : "!"} {notice.text}</div>}
     </div>
   );
 }

@@ -1,4 +1,4 @@
-const CACHE_NAME = "crmvlc-shell-v17";
+const CACHE_NAME = "crmvlc-shell-v18";
 const FIELD_DB = "crmvlc-field-v1";
 const FIELD_DB_VERSION = 1;
 const SNAPSHOTS = "snapshots";
@@ -119,6 +119,12 @@ async function syncPhotoAuditOutbox() {
   for (const record of records.sort((a, b) => a.createdAt - b.createdAt)) {
     const form = new FormData();
     form.set("deliveryId", record.deliveryId);
+    if (!record.deliveryId && record.distributionPointId) {
+      form.set("distributionPointId", record.distributionPointId);
+      form.set("quantity", String(record.quantity ?? ""));
+      form.set("unit", String(record.unit ?? "copie"));
+      form.set("reminderDays", String(record.reminderDays ?? "7"));
+    }
     form.set("latitude", String(record.latitude));
     form.set("longitude", String(record.longitude));
     form.set("photo", record.photo, record.filename);

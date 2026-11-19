@@ -189,6 +189,8 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
       const photo = await prepareDeliveryPhoto(selected);
       let queued = !navigator.onLine;
       let alreadyRegistered = false;
+      let outsideZone = false;
+      let relocated = false;
       if (!queued) {
         const upload = new FormData();
         upload.set("deliveryId", deliveryId);
@@ -202,7 +204,26 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
         upload.set("longitude", String(location.longitude));
         upload.set("photo", photo, photo.name);
         try {
-          const result = await request<{ alreadyRegistered?: boolean }>("/api/operations/photo-audits", { method: "POST", body: upload });
+          let result: { alreadyRegistered?: boolean };
+          try {
+            result = await request<{ alreadyRegistered?: boolean }>("/api/operations/photo-audits", { method: "POST", body: upload });
+          } catch (error) {
+            // Troppo lontano dal punto registrato: spesso è la posizione del punto a essere sbagliata.
+            // Il distributore può registrare comunque: il rifornimento resta "da verificare" per l'amministrazione.
+            const distance = error instanceof RequestError && error.status === 422 ? /Sei a (\d+) m/.exec(error.message)?.[1] : null;
+            if (!distance || deliveryId) throw error;
+            const confirmed = window.confirm(`Risulti a ${Number(distance).toLocaleString(localeTag())} m dalla posizione salvata per questo punto.\n\nSe sei davvero al locale, premi OK: il rifornimento viene registrato e resta da verificare dall'amministrazione.\nSe non sei al locale, premi Annulla.`);
+            if (!confirmed) throw error;
+            upload.set("outsideZone", "1");
+            result = await request<{ alreadyRegistered?: boolean }>("/api/operations/photo-audits", { method: "POST", body: upload });
+            outsideZone = true;
+            const point = data?.distributionPoints.find((row) => String(row.id) === distributionPointId);
+            if (point && String(point.created_by ?? "") === user.id && window.confirm("Vuoi correggere la posizione di questo punto con quella dove ti trovi adesso? Fallo solo se sei davanti al locale.")) {
+              await post("/api/operations/distribution-points/relocate", { id: distributionPointId, latitude: location.latitude, longitude: location.longitude })
+                .then(() => { relocated = true; })
+                .catch(() => undefined);
+            }
+          }
           if (result?.alreadyRegistered) alreadyRegistered = true;
         } catch (error) {
           if (error instanceof RequestError) throw error;
@@ -227,7 +248,9 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
         ? "Nessuna rete: rifornimento salvato sul telefono. Verrà inviato da solo appena torna la connessione."
         : alreadyRegistered
           ? "Questo rifornimento era già stato registrato: nessun doppione creato."
-          : user.role === "distributor"
+          : outsideZone
+            ? `Rifornimento registrato, da verificare (fuori zona)${relocated ? ". Posizione del punto corretta" : ""}.`
+            : user.role === "distributor"
             ? `Rifornimento registrato${quantity ? `: ${quantity} ${unit}` : ""}.`
             : "Verifica fotografica inviata.");
       if (!queued) await refreshAll();
@@ -603,7 +626,7 @@ function GeoAuditPanel({ data, user, users, clients, deliveries, busy, run, subm
   const [pointDetail, setPointDetail] = useState<RecordRow | null>(null);
   return <div className="hub-stack">
     <DailyRouteCard deliveries={deliveries} user={user} />
-    {user.role === "distributor" && <DistributorPointsBoard points={freeConfirmationPoints} deliveries={deliveries} deliveryChecks={data.deliveryChecks} photoAudits={data.photoAudits} busy={busy} run={run} submitPointRegistration={submitPointRegistration} submitRefill={submitPhotoAudit} submitDeliveryCheck={submitDeliveryCheck} submitAssignedDelivery={submitPhotoAudit} submitPointLocation={submitPointLocation} submitPhotoAuditReplace={submitPhotoAuditReplace} />}
+    {user.role === "distributor" && <DistributorPointsBoard userId={user.id} points={freeConfirmationPoints} deliveries={deliveries} deliveryChecks={data.deliveryChecks} photoAudits={data.photoAudits} busy={busy} run={run} submitPointRegistration={submitPointRegistration} submitRefill={submitPhotoAudit} submitDeliveryCheck={submitDeliveryCheck} submitAssignedDelivery={submitPhotoAudit} submitPointLocation={submitPointLocation} submitPhotoAuditReplace={submitPhotoAuditReplace} />}
     <div className="hub-two">
       {canManage && <ActionCard index="01" title="Punto distribuzione" text="Coordinate, capacità, stock e visibilità pubblica.">
         <form onSubmit={(event) => { event.preventDefault(); const form = event.currentTarget; const fd = new FormData(form); void run(() => post("/api/operations/distribution-points", { ...Object.fromEntries(fd), publicVisible: fd.get("publicVisible") === "on" }), "Punto salvato. Se la posizione non è ricavabile dall'indirizzo, lo trovi tra i punti con posizione da completare.", form); }}>
@@ -777,7 +800,8 @@ function PointDetailModal({ title, subtitle, onClose, children }: { title: strin
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="ops-modal" role="dialog" aria-modal="true" aria-label={title}><header><div><h2>{title}</h2><p>{subtitle}</p></div><button onClick={onClose} aria-label="Chiudi">×</button></header>{children}</section></div>;
 }
 
-function DistributorPointsBoard({ points, deliveries, deliveryChecks, photoAudits, busy, run, submitPointRegistration, submitRefill, submitDeliveryCheck, submitAssignedDelivery, submitPointLocation, submitPhotoAuditReplace }: {
+function DistributorPointsBoard({ userId, points, deliveries, deliveryChecks, photoAudits, busy, run, submitPointRegistration, submitRefill, submitDeliveryCheck, submitAssignedDelivery, submitPointLocation, submitPhotoAuditReplace }: {
+  userId: string;
   points: RecordRow[];
   deliveries: Delivery[];
   deliveryChecks: RecordRow[];
@@ -878,6 +902,13 @@ function DistributorPointsBoard({ points, deliveries, deliveryChecks, photoAudit
               <button type="button" disabled={busy} onClick={() => toggle(rowId, "check")}>{overdue ? "Fai il controllo" : "Controlla ora"}</button>
               <button type="button" disabled={busy} onClick={() => toggle(rowId, "stock")}>Correggi giacenza</button>
               <button type="button" disabled={busy} onClick={() => toggle(rowId, "past")}>Rifornimento già fatto</button>
+              {String(row.created_by ?? "") === userId && <button type="button" disabled={busy} onClick={() => {
+                if (!window.confirm(`Correggere la posizione di «${String(row.name ?? "")}» con quella dove ti trovi adesso? Fallo solo se sei davanti al locale.`)) return;
+                void run(async () => {
+                  const location = await currentLocation();
+                  await post("/api/operations/distribution-points/relocate", { id: rowId, latitude: location.latitude, longitude: location.longitude });
+                }, "Posizione del punto corretta.");
+              }}>Correggi posizione (sono qui)</button>}
             </div>}
             {pending && <form style={{ flexBasis: "100%" }} onSubmit={submitPointLocation}>
               <input type="hidden" name="id" value={rowId} />

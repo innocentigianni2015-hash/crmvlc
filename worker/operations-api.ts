@@ -138,6 +138,9 @@ export async function handleOperationsApi(
     if (url.pathname === "/api/operations/distribution-points/delete" && request.method === "POST") {
       return await deleteDistributionPoint(request, env, user);
     }
+    if (url.pathname === "/api/operations/distribution-points/relocate" && request.method === "POST") {
+      return await relocateDistributionPoint(request, env, user);
+    }
     if (url.pathname === "/api/operations/distribution-points/past-refill" && request.method === "POST") {
       return await registerPastRefill(request, env, user);
     }
@@ -860,6 +863,29 @@ async function selfRegisterDistributionPoint(request: Request, env: RuntimeEnv, 
   return json({ id: pointId, deliveryId, auditId, status: photoReview.status, autoApproved: photoReview.autoApproved, publicVisible: locationStatus === "complete", locationStatus, locationSource, nextCheckDueAt, addressVerified, addressDistanceM, geocodedAddress: geocode?.formattedAddress ?? null, addressMismatch }, 201);
 }
 
+// Correzione della posizione di un punto registrato con GPS sbagliato: il distributore che l'ha creato
+// (dal posto, con la posizione attuale) oppure la gestione operativa.
+async function relocateDistributionPoint(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  const body = await readJson<Record<string, unknown>>(request);
+  const id = clean(body.id, 80);
+  const latitude = requiredCoordinate(body.latitude, -90, 90);
+  const longitude = requiredCoordinate(body.longitude, -180, 180);
+  assertWithinCanaryIslands(latitude, longitude);
+  const point = await env.DB.prepare("SELECT id, name, island, created_by, latitude_e6, longitude_e6 FROM distribution_points WHERE id = ? LIMIT 1")
+    .bind(id).first<{ id: string; name: string; island: string; created_by: string | null; latitude_e6: number; longitude_e6: number }>();
+  if (!point || !canAccessIsland(user, point.island)) throw new OperationsError(404, "point_not_found", "Punto di distribuzione non trovato.");
+  const manager = ["super_admin", "admin", "sales_manager"].includes(user.role);
+  const owner = user.role === "distributor" && point.created_by === user.id;
+  if (!manager && !owner) throw new OperationsError(403, "not_allowed", "Puoi correggere la posizione solo dei punti che hai registrato tu.");
+  const movedM = Math.round(haversineMeters(latitude, longitude, point.latitude_e6 / 1_000_000, point.longitude_e6 / 1_000_000));
+  const now = new Date().toISOString();
+  await env.DB.prepare("UPDATE distribution_points SET latitude_e6 = ?, longitude_e6 = ?, updated_at = ? WHERE id = ?").bind(toE6(latitude), toE6(longitude), now, point.id).run();
+  await appendOperationsAudit(env, request, user, "distribution_point.relocated", "distribution_point", point.id, {
+    name: point.name, from: { latitude: point.latitude_e6 / 1_000_000, longitude: point.longitude_e6 / 1_000_000 }, to: { latitude, longitude }, movedM,
+  });
+  return json({ id: point.id, movedM });
+}
+
 const PAST_REFILL_NOTE = "Rifornimento passato dichiarato dal Distributore, senza foto.";
 const PAST_REFILL_MAX_DAYS = 90;
 
@@ -989,6 +1015,9 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
     : null;
   let selfReported = false;
   let adminBulkUpload = false;
+  // Fuori zona confermato dal distributore: il rifornimento si salva ma resta da verificare.
+  const outsideZoneConfirmed = user.role === "distributor" && form.get("outsideZone") === "1";
+  let outsideZoneDistanceM: number | null = null;
   let latitude: number;
   let longitude: number;
   if (!deliveryId && onBehalfOfDistributorId) {
@@ -1034,8 +1063,11 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
     if (point.latitude_e6 !== null && point.longitude_e6 !== null) {
       const distanceM = Math.round(haversineMeters(latitude, longitude, point.latitude_e6 / 1_000_000, point.longitude_e6 / 1_000_000));
       if (distanceM > MAX_GEOFENCE_REJECT_M) {
-        await appendOperationsAudit(env, request, user, "delivery.refill_rejected", "distribution_point", point.id, { reason: "too_far_from_point", distanceM, quantity });
-        throw new OperationsError(422, "too_far_from_point", `Sei a ${distanceM} m dal punto: troppo lontano per confermare la consegna da qui. Torna sul posto e riprova.`);
+        if (!outsideZoneConfirmed) {
+          await appendOperationsAudit(env, request, user, "delivery.refill_rejected", "distribution_point", point.id, { reason: "too_far_from_point", distanceM, quantity });
+          throw new OperationsError(422, "too_far_from_point", `Sei a ${distanceM} m dal punto: troppo lontano per confermare la consegna da qui. Torna sul posto e riprova.`);
+        }
+        outsideZoneDistanceM = distanceM;
       }
     }
     deliveryId = crypto.randomUUID();
@@ -1044,7 +1076,7 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
     await env.DB.batch([
       env.DB.prepare(
         "INSERT INTO deliveries (id, client_id, distributor_user_id, distribution_point_id, island, status, quantity, unit, scheduled_for, delivery_contact_name, delivery_contact_email, delivery_contact_phone, delivery_address, notes, version, created_by, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'delivered', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
-      ).bind(deliveryId, point.client_id, user.id, point.id, point.island, quantity, unit, canaryDateKey(new Date()), point.contact_name, point.email, point.phone, point.address, "Conferma libera registrata dal Distributore.", user.id, createdAt, createdAt, createdAt),
+      ).bind(deliveryId, point.client_id, user.id, point.id, point.island, quantity, unit, canaryDateKey(new Date()), point.contact_name, point.email, point.phone, point.address, outsideZoneDistanceM !== null ? `Conferma libera registrata dal Distributore. Fuori zona: ${outsideZoneDistanceM} m dal punto registrato, da verificare.` : "Conferma libera registrata dal Distributore.", user.id, createdAt, createdAt, createdAt),
       env.DB.prepare("UPDATE distribution_points SET stock = stock + ?, next_check_due_at = ?, updated_at = ? WHERE id = ?").bind(quantity, nextCheckDueAt, createdAt, point.id),
     ]);
     selfReported = true;
@@ -1059,14 +1091,16 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
   const nearest = delivery.distribution_point_id && delivery.point_latitude_e6 !== null && delivery.point_longitude_e6 !== null
     ? { id: delivery.distribution_point_id, distanceM: Math.round(haversineMeters(latitude, longitude, delivery.point_latitude_e6 / 1_000_000, delivery.point_longitude_e6 / 1_000_000)) }
     : await nearestDistributionPoint(env, delivery.island, latitude, longitude);
-  if (delivery.distribution_point_id && nearest && nearest.distanceM > MAX_GEOFENCE_REJECT_M) {
+  if (delivery.distribution_point_id && nearest && nearest.distanceM > MAX_GEOFENCE_REJECT_M && outsideZoneDistanceM === null) {
     throw new OperationsError(422, "too_far_from_point", `Sei a ${nearest.distanceM} m dal punto: troppo lontano per confermare la consegna da qui. Torna sul posto e riprova.`);
   }
   const duplicate = await env.DB.prepare("SELECT id, delivery_id FROM photo_audits WHERE sha256 = ? ORDER BY created_at DESC LIMIT 1").bind(digest).first<{ id: string; delivery_id: string }>();
   const previous = await env.DB.prepare("SELECT id, r2_key FROM photo_audits WHERE delivery_id = ? ORDER BY created_at DESC LIMIT 1").bind(delivery.id).first<{ id: string; r2_key: string }>();
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
-  const photoReview = photoReviewForUploader(user.role, user.id, now);
+  const photoReview = outsideZoneDistanceM !== null
+    ? { status: "pending", reviewedBy: null, reviewedAt: null, autoApproved: false }
+    : photoReviewForUploader(user.role, user.id, now);
   const watermarkText = `CRMVLC | ${delivery.island} | ${now} | ${latitude.toFixed(6)},${longitude.toFixed(6)} | ${digest.slice(0, 12)}`;
   const aiAnalysis = await analyzeDeliveryPhoto(env, bytes, photo.type, {
     quantity: delivery.quantity,
@@ -1190,6 +1224,17 @@ async function reviewPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
   if (!row || !canAccessIsland(user, row.island)) throw new OperationsError(404, "audit_not_found", "Verifica fotografica non trovata.");
   const now = new Date().toISOString();
   await env.DB.prepare("UPDATE photo_audits SET status = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ? AND status = 'pending'").bind(status, user.id, now, id).run();
+  if (status === "rejected") {
+    // Un rifornimento fuori zona rifiutato non conta più nei totali e la giacenza torna indietro.
+    const outside = await env.DB.prepare("SELECT d.id, d.quantity, d.distribution_point_id FROM photo_audits a JOIN deliveries d ON d.id = a.delivery_id WHERE a.id = ? AND d.status = 'delivered' AND d.notes LIKE '%Fuori zona:%' LIMIT 1")
+      .bind(id).first<{ id: string; quantity: number; distribution_point_id: string | null }>();
+    if (outside) {
+      await env.DB.batch([
+        env.DB.prepare("UPDATE deliveries SET status = 'issue', version = version + 1, updated_at = ? WHERE id = ?").bind(now, outside.id),
+        ...(outside.distribution_point_id ? [env.DB.prepare("UPDATE distribution_points SET stock = MAX(0, stock - ?), updated_at = ? WHERE id = ?").bind(outside.quantity, now, outside.distribution_point_id)] : []),
+      ]);
+    }
+  }
   await appendOperationsAudit(env, request, user, `photo_audit.${status}`, "photo_audit", id, {});
   return json({ ok: true });
 }

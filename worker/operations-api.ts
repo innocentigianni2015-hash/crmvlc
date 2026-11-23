@@ -653,8 +653,8 @@ async function importPendingDistributionPoint(request: Request, env: RuntimeEnv,
       "INSERT INTO deliveries (id, client_id, distributor_user_id, distribution_point_id, island, status, quantity, unit, scheduled_for, delivery_contact_name, delivery_contact_email, delivery_contact_phone, delivery_address, notes, version, created_by, completed_at, created_at, updated_at) VALUES (?, NULL, ?, ?, ?, 'delivered', ?, ?, ?, NULL, NULL, NULL, ?, ?, 1, ?, ?, ?, ?)",
     ).bind(deliveryId, distributor.id, pointId, distributor.island, quantity, unit, canaryDateKey(now), area, "Foto importata dall'amministrazione; indirizzo e posizione da completare.", user.id, nowIso, nowIso, nowIso),
     env.DB.prepare(
-      "INSERT INTO photo_audits (id, delivery_id, distributor_user_id, island, r2_key, sha256, latitude_e6, longitude_e6, geofence_distance_m, status, quality_score, duplicate_of_audit_id, ai_model, ai_verdict, ai_result_json, watermark_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'pending', ?, NULL, ?, ?, ?, ?, ?)",
-    ).bind(auditId, deliveryId, distributor.id, distributor.island, key, digest, toE6(center.latitude), toE6(center.longitude), aiAnalysis.qualityScore, aiAnalysis.model, aiAnalysis.verdict, JSON.stringify(aiAnalysis), watermarkText, nowIso),
+      "INSERT INTO photo_audits (id, delivery_id, distributor_user_id, island, r2_key, sha256, latitude_e6, longitude_e6, geofence_distance_m, status, quality_score, duplicate_of_audit_id, ai_model, ai_verdict, ai_result_json, watermark_text, reviewed_by, reviewed_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'approved', ?, NULL, ?, ?, ?, ?, ?, ?, ?)",
+    ).bind(auditId, deliveryId, distributor.id, distributor.island, key, digest, toE6(center.latitude), toE6(center.longitude), aiAnalysis.qualityScore, aiAnalysis.model, aiAnalysis.verdict, JSON.stringify(aiAnalysis), watermarkText, user.id, nowIso, nowIso),
   ]);
 
   await appendOperationsAudit(env, request, user, "distribution_point.archive_imported", "distribution_point", pointId, {
@@ -1098,9 +1098,7 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
   const previous = await env.DB.prepare("SELECT id, r2_key FROM photo_audits WHERE delivery_id = ? ORDER BY created_at DESC LIMIT 1").bind(delivery.id).first<{ id: string; r2_key: string }>();
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
-  const photoReview = outsideZoneDistanceM !== null
-    ? { status: "pending", reviewedBy: null, reviewedAt: null, autoApproved: false }
-    : photoReviewForUploader(user.role, user.id, now);
+  const photoReview = photoReviewForUploader(user.role, user.id, now);
   const watermarkText = `CRMVLC | ${delivery.island} | ${now} | ${latitude.toFixed(6)},${longitude.toFixed(6)} | ${digest.slice(0, 12)}`;
   const aiAnalysis = await analyzeDeliveryPhoto(env, bytes, photo.type, {
     quantity: delivery.quantity,

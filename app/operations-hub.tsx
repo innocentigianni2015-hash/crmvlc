@@ -209,10 +209,10 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
             result = await request<{ alreadyRegistered?: boolean }>("/api/operations/photo-audits", { method: "POST", body: upload });
           } catch (error) {
             // Troppo lontano dal punto registrato: spesso è la posizione del punto a essere sbagliata.
-            // Il distributore può registrare comunque: il rifornimento resta "da verificare" per l'amministrazione.
+            // Il distributore può registrare comunque: il rifornimento viene salvato e segnalato come fuori zona.
             const distance = error instanceof RequestError && error.status === 422 ? /Sei a (\d+) m/.exec(error.message)?.[1] : null;
             if (!distance || deliveryId) throw error;
-            const confirmed = window.confirm(`Risulti a ${Number(distance).toLocaleString(localeTag())} m dalla posizione salvata per questo punto.\n\nSe sei davvero al locale, premi OK: il rifornimento viene registrato e resta da verificare dall'amministrazione.\nSe non sei al locale, premi Annulla.`);
+            const confirmed = window.confirm(`Risulti a ${Number(distance).toLocaleString(localeTag())} m dalla posizione salvata per questo punto.\n\nSe sei davvero al locale, premi OK: il rifornimento viene registrato e segnalato come fuori zona.\nSe non sei al locale, premi Annulla.`);
             if (!confirmed) throw error;
             upload.set("outsideZone", "1");
             result = await request<{ alreadyRegistered?: boolean }>("/api/operations/photo-audits", { method: "POST", body: upload });
@@ -249,7 +249,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
         : alreadyRegistered
           ? "Questo rifornimento era già stato registrato: nessun doppione creato."
           : outsideZone
-            ? `Rifornimento registrato, da verificare (fuori zona)${relocated ? ". Posizione del punto corretta" : ""}.`
+            ? `Rifornimento registrato (fuori zona)${relocated ? ". Posizione del punto corretta" : ""}.`
             : user.role === "distributor"
             ? `Rifornimento registrato${quantity ? `: ${quantity} ${unit}` : ""}.`
             : "Verifica fotografica inviata.");
@@ -284,7 +284,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
       upload.set("photo", photo, photo.name);
       await request("/api/operations/photo-audits/replace", { method: "POST", body: upload });
       form.reset();
-      notify("Foto sostituita e inviata per una nuova verifica.");
+      notify("Foto sostituita.");
       await refreshAll();
     } catch (error) {
       notify(error instanceof Error ? error.message : "Sostituzione non riuscita.", "error");

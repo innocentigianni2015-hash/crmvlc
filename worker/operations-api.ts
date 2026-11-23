@@ -138,6 +138,9 @@ export async function handleOperationsApi(
     if (url.pathname === "/api/operations/distribution-points/delete" && request.method === "POST") {
       return await deleteDistributionPoint(request, env, user);
     }
+    if (url.pathname === "/api/operations/deliveries/mark-duplicate" && request.method === "POST") {
+      return await markDeliveryDuplicate(request, env, user);
+    }
     if (url.pathname === "/api/operations/distribution-points/relocate" && request.method === "POST") {
       return await relocateDistributionPoint(request, env, user);
     }
@@ -865,6 +868,21 @@ async function selfRegisterDistributionPoint(request: Request, env: RuntimeEnv, 
 
 // Correzione della posizione di un punto registrato con GPS sbagliato: il distributore che l'ha creato
 // (dal posto, con la posizione attuale) oppure la gestione operativa.
+// Consegna registrata due volte: resta nello storico come «problema» con la nota, ma non conta più nei totali.
+async function markDeliveryDuplicate(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
+  requireManager(user);
+  const body = await readJson<Record<string, unknown>>(request);
+  const id = clean(body.id, 80);
+  const note = cleanOptional(body.note, 300) ?? "Doppione: consegna registrata più volte.";
+  const row = await env.DB.prepare("SELECT id, island, status, notes FROM deliveries WHERE id = ? LIMIT 1").bind(id).first<{ id: string; island: string; status: string; notes: string | null }>();
+  if (!row || !canAccessIsland(user, row.island)) throw new OperationsError(404, "delivery_not_found", "Consegna non trovata.");
+  const now = new Date().toISOString();
+  const notes = `${note}${row.notes ? ` ${row.notes}` : ""}`.slice(0, 2000);
+  await env.DB.prepare("UPDATE deliveries SET status = 'issue', notes = ?, version = version + 1, updated_at = ? WHERE id = ?").bind(notes, now, row.id).run();
+  await appendOperationsAudit(env, request, user, "delivery.marked_duplicate", "delivery", row.id, { previousStatus: row.status, note });
+  return json({ id: row.id, status: "issue" });
+}
+
 async function relocateDistributionPoint(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
   const body = await readJson<Record<string, unknown>>(request);
   const id = clean(body.id, 80);
@@ -1290,13 +1308,18 @@ async function deletePointPhoto(request: Request, env: RuntimeEnv, user: Operati
 async function deleteDistributionPoint(request: Request, env: RuntimeEnv, user: OperationsUser): Promise<Response> {
   const body = await readJson<Record<string, unknown>>(request);
   const point = await managedPoint(env, user, body.id);
-  const open = await env.DB.prepare("SELECT COUNT(*) AS n FROM deliveries WHERE distribution_point_id = ? AND status != 'delivered'").bind(point.id).first<{ n: number }>();
+  const open = await env.DB.prepare("SELECT COUNT(*) AS n FROM deliveries WHERE distribution_point_id = ? AND status IN ('assigned', 'in_progress')").bind(point.id).first<{ n: number }>();
   if ((open?.n ?? 0) > 0) {
     throw new OperationsError(409, "point_has_open_deliveries", `Il punto ha ${open?.n} consegne ancora aperte: chiudile o riassegnale prima di eliminare la scheda.`);
   }
   const checks = (await env.DB.prepare("SELECT r2_key FROM delivery_checks WHERE distribution_point_id = ?").bind(point.id).all<{ r2_key: string }>()).results;
   const now = new Date().toISOString();
-  const keys = [...new Set([...(point.point_photo_r2_key ? [point.point_photo_r2_key] : []), ...checks.map((check) => check.r2_key)])];
+  // La foto del locale di un punto registrato dal distributore è la stessa della prima consegna: se è ancora
+  // usata da una foto di consegna non va cancellata dall'archivio.
+  const photoInUse = point.point_photo_r2_key
+    ? await env.DB.prepare("SELECT 1 AS used FROM photo_audits WHERE r2_key = ? LIMIT 1").bind(point.point_photo_r2_key).first<{ used: number }>()
+    : null;
+  const keys = [...new Set([...(point.point_photo_r2_key && !photoInUse ? [point.point_photo_r2_key] : []), ...checks.map((check) => check.r2_key)])];
   await env.DB.batch([
     ...keys.map((key) => env.DB.prepare("INSERT OR IGNORE INTO r2_deletion_queue (r2_key, source, created_at, attempts) VALUES (?, 'point_deleted', ?, 0)").bind(key, now)),
     env.DB.prepare("DELETE FROM delivery_checks WHERE distribution_point_id = ?").bind(point.id),

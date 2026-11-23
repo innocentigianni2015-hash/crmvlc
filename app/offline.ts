@@ -207,9 +207,9 @@ export async function syncPhotoAuditOutbox(userId: string): Promise<{ sent: numb
   for (const record of records.sort((a, b) => a.createdAt - b.createdAt)) {
     const form = new FormData();
     form.set("deliveryId", record.deliveryId);
+    if (record.quantity) form.set("quantity", String(record.quantity));
     if (!record.deliveryId && record.distributionPointId) {
       form.set("distributionPointId", record.distributionPointId);
-      form.set("quantity", String(record.quantity ?? ""));
       form.set("unit", String(record.unit ?? "copie"));
       form.set("reminderDays", String(record.reminderDays ?? "7"));
     }

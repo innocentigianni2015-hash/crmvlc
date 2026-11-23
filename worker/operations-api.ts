@@ -1084,7 +1084,7 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
     latitude = requiredCoordinate(form.get("latitude"), -90, 90);
     longitude = requiredCoordinate(form.get("longitude"), -180, 180);
   }
-  const delivery = await env.DB.prepare("SELECT d.id, d.distributor_user_id, d.island, d.quantity, d.unit, d.distribution_point_id, p.name AS point_name, p.address AS point_address, p.latitude_e6 AS point_latitude_e6, p.longitude_e6 AS point_longitude_e6 FROM deliveries d LEFT JOIN distribution_points p ON p.id = d.distribution_point_id WHERE d.id = ? LIMIT 1").bind(deliveryId).first<{ id: string; distributor_user_id: string; island: string; quantity: number; unit: string; distribution_point_id: string | null; point_name: string | null; point_address: string | null; point_latitude_e6: number | null; point_longitude_e6: number | null }>();
+  const delivery = await env.DB.prepare("SELECT d.id, d.status, d.distributor_user_id, d.island, d.quantity, d.unit, d.distribution_point_id, p.name AS point_name, p.address AS point_address, p.latitude_e6 AS point_latitude_e6, p.longitude_e6 AS point_longitude_e6 FROM deliveries d LEFT JOIN distribution_points p ON p.id = d.distribution_point_id WHERE d.id = ? LIMIT 1").bind(deliveryId).first<{ id: string; status: string; distributor_user_id: string; island: string; quantity: number; unit: string; distribution_point_id: string | null; point_name: string | null; point_address: string | null; point_latitude_e6: number | null; point_longitude_e6: number | null }>();
   if (!delivery || !canAccessIsland(user, delivery.island) || (user.role === "distributor" && delivery.distributor_user_id !== user.id)) {
     throw new OperationsError(404, "delivery_not_found", "Consegna non disponibile nel tuo perimetro.");
   }
@@ -1118,7 +1118,12 @@ async function uploadPhotoAudit(request: Request, env: RuntimeEnv, user: Operati
       .bind(id, delivery.id, delivery.distributor_user_id, delivery.island, key, digest, toE6(latitude), toE6(longitude), nearest?.distanceM ?? null, photoReview.status, qualityScore, duplicate?.id ?? null, aiAnalysis.model, aiAnalysis.verdict, JSON.stringify(aiAnalysis), watermarkText, photoReview.reviewedBy, photoReview.reviewedAt, now),
   ];
   if (user.role === "distributor" && !selfReported) {
-    mutations.push(env.DB.prepare("UPDATE deliveries SET status = 'delivered', completed_at = ?, version = version + 1, updated_at = ? WHERE id = ? AND distributor_user_id = ? AND status IN ('assigned','in_progress','issue')").bind(now, now, delivery.id, user.id));
+    // Consegna assegnata: il distributore indica quante copie ha lasciato davvero (se vuoto resta la quantità prevista).
+    const deliveredQuantity = form.get("quantity") ? positiveInt(form.get("quantity"), 1_000_000) : delivery.quantity;
+    mutations.push(env.DB.prepare("UPDATE deliveries SET status = 'delivered', quantity = ?, completed_at = ?, version = version + 1, updated_at = ? WHERE id = ? AND distributor_user_id = ? AND status IN ('assigned','in_progress','issue')").bind(deliveredQuantity, now, now, delivery.id, user.id));
+    if (delivery.status !== "delivered" && delivery.distribution_point_id) {
+      mutations.push(env.DB.prepare("UPDATE distribution_points SET stock = stock + ?, updated_at = ? WHERE id = ?").bind(deliveredQuantity, now, delivery.distribution_point_id));
+    }
   }
   await env.DB.batch(mutations);
   await appendOperationsAudit(env, request, user, "photo_audit.created", "photo_audit", id, { deliveryId, selfReported, digest, status: photoReview.status, autoApproved: photoReview.autoApproved, distanceM: nearest?.distanceM ?? null, qualityScore, duplicateOfAuditId: duplicate?.id ?? null, aiVerdict: aiAnalysis.verdict, adminBulkUpload, onBehalfOfDistributorId: adminBulkUpload ? delivery.distributor_user_id : null });

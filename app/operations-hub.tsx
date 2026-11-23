@@ -194,9 +194,9 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
       if (!queued) {
         const upload = new FormData();
         upload.set("deliveryId", deliveryId);
+        if (quantity) upload.set("quantity", quantity);
         if (!deliveryId) {
           upload.set("distributionPointId", distributionPointId);
-          upload.set("quantity", quantity);
           upload.set("unit", unit);
           upload.set("reminderDays", reminderDays);
         }
@@ -239,7 +239,7 @@ export function OperationsHub({ user, clients, users, deliveries, notify, initia
           filename: photo.name,
           latitude: location.latitude,
           longitude: location.longitude,
-          ...(!deliveryId ? { distributionPointId, quantity, unit, reminderDays } : {}),
+          ...(!deliveryId ? { distributionPointId, quantity, unit, reminderDays } : quantity ? { quantity } : {}),
         });
       }
 
@@ -841,7 +841,8 @@ function DistributorPointsBoard({ userId, points, deliveries, deliveryChecks, ph
   return <div className="hub-stack">
     {deliveries.some((delivery) => delivery.status !== "delivered") && <ActionCard index="00" title="Consegne assegnate da oggi" text="Hai consegne già pianificate dall'amministrazione: fotografa e confermale qui.">
       <form onSubmit={submitAssignedDelivery}>
-        <select name="deliveryId" required><option value="">Seleziona consegna assegnata</option>{deliveries.filter((delivery) => delivery.status !== "delivered").map((delivery) => <option key={delivery.id} value={delivery.id}>{delivery.client_company ?? delivery.distribution_point_name ?? delivery.id}</option>)}</select>
+        <select name="deliveryId" required><option value="">Seleziona consegna assegnata</option>{deliveries.filter((delivery) => delivery.status !== "delivered").map((delivery) => <option key={delivery.id} value={delivery.id}>{delivery.client_company ?? delivery.distribution_point_name ?? delivery.id}{delivery.quantity ? ` · previste ${delivery.quantity} ${delivery.unit ?? "copie"}` : ""}</option>)}</select>
+        <input name="quantity" type="number" min="1" max="1000000" required placeholder="Quante copie hai lasciato" />
         <PhotoPickerField />
         <button className="primary" disabled={busy}>Scatta foto e registra consegna</button>
       </form>
